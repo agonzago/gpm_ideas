@@ -1,0 +1,60 @@
+/*
+ * Smallest QPM in dynare
+ */
+
+var
+    // Main variables
+    L_GDP_GAP          // Output Gap    
+    DLA_CPI         // QoQ Core Inflation
+    RS                 // MP Rate
+    RR_GAP             // Real Interest Rate Gap     
+;
+
+varexo
+    SHK_L_GDP_GAP     // Output gap shock
+    SHK_DLA_CPI
+    SHK_RS            // Foreign interest rate shock   
+;   
+
+parameters b1, b2, b4, a1, a2;
+parameters g1, g2, g3;
+
+    // Parameters from readmodel.m
+    b1 = 0.7;          // Output persistence
+    b2 = 0.2;         // Policy passthrough 
+    b4 = 0.7;          // MCI weight
+    a1 = 0.5;          // Inflation persistence
+    a2 = 0.1;          // RMC passthrough
+    g1 = 0.7;         // Interest rate smoothing
+    g2 = 0.3;          // Inflation response
+    g3 = 0.25;         // Output gap response
+
+model;
+    // Aggregate demand    
+    L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + SHK_L_GDP_GAP;
+
+    // Core Inflation
+    DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + SHK_DLA_CPI;
+
+    // Monetary policy reaction function
+    RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + SHK_RS;
+    RR_GAP = RS - DLA_CPI(+1);
+
+end;
+
+initval;
+    L_GDP_GAP = 0;    
+    DLA_CPI = 0;
+    RS = 0;
+    RR_GAP = 0;   
+end;
+
+steady;
+check;
+
+// Specify the shocks
+shocks;
+    var SHK_L_GDP_GAP = 1;    
+end;
+
+stoch_simul(order=1, irf=40) L_GDP_GAP DLA_CPI RS;
