@@ -16,8 +16,7 @@ varexo
     SHK_RS            // Foreign interest rate shock   
 ;   
 
-parameters b1, b2, b4, a1, a2;
-parameters g1, g2, g3;
+parameters b1, b2, b4, a1, a2, g1, g2, g3;
 
     // Parameters from readmodel.m
     b1 = 0.7;          // Output persistence

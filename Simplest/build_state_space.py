@@ -1,3 +1,6 @@
+# gpm/model/state_space.py
+import numpy as np
+
 def build_state_space(F, P, R):
     """
     Build state space matrices for the DSGE model

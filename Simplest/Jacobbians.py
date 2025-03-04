@@ -1,4 +1,4 @@
-#%%
+# gpm/model/jacobian.py
 import sympy as sy
 import numpy as np
 import re
@@ -136,42 +136,3 @@ def derive_jacobians_economic_model(equations_dict, variables, shocks, parameter
     ])
     
     return "\n".join(function_code)
-
-# Example for the macro model
-if __name__ == "__main__":
-    # Convert the equations from the list of dictionaries to a single dictionary
-    equations = {
-        "eq1": "(1-b1)*L_GDP_GAP_p + b1*L_GDP_GAP_lag - b4*RR_GAP_p + SHK_L_GDP_GAP - (L_GDP_GAP)",
-        "eq2": "a1*DLA_CPI_lag + (1-a1)*DLA_CPI_p + a2*L_GDP_GAP + SHK_DLA_CPI - (DLA_CPI)",
-        "eq3": "g1*RS_lag + (1-g1)*(DLA_CPI_p + g2*DLA_CPI_lead3 + g3*L_GDP_GAP) + SHK_RS - (RS)",
-        "eq4": "RS - DLA_CPI_p - (RR_GAP)",
-        "eq5": "L_GDP_GAP_lag_p - (L_GDP_GAP_lag)",
-        "eq6": "DLA_CPI_lag_p - (DLA_CPI_lag)",
-        "eq7": "RS_lag_p - (RS_lag)",
-        "eq8": "DLA_CPI_p - (DLA_CPI_lead1)",
-        "eq9": "DLA_CPI_lead1_p - (DLA_CPI_lead2)",
-        "eq10": "DLA_CPI_lead2_p - (DLA_CPI_lead3)"
-    }
-
-    variables = ["L_GDP_GAP", "DLA_CPI", "RS", "RR_GAP", "L_GDP_GAP_lag", 
-                "DLA_CPI_lag", "RS_lag", "DLA_CPI_lead1", "DLA_CPI_lead2", "DLA_CPI_lead3"]
-    
-    shocks = ["SHK_L_GDP_GAP", "SHK_DLA_CPI", "SHK_RS"]
-    
-    parameters = ["b1", "b4", "a1", "a2", "g1", "g2", "g3"]
-    
-    # Generate the evaluation function
-    evaluator_code = derive_jacobians_economic_model(equations, variables, shocks, parameters)
-    
-    print("=" * 60)
-    print("GENERATED FUNCTION CODE:")
-    print("=" * 60)
-    print(evaluator_code)
-    
-    # Save to a file
-    with open("complete_economic_model_jacobian_evaluator.py", "w") as f:
-        f.write(evaluator_code)
-    
-    print("\nThe function has been saved to 'complete_economic_model_jacobian_evaluator.py'")
-    
-    

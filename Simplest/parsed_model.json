@@ -1,0 +1,72 @@
+{
+  "equations": [
+    {
+      "eq1": "(1-b1)*L_GDP_GAP_p + b1*L_GDP_GAP_lag - b4*RR_GAP_p + SHK_L_GDP_GAP - L_GDP_GAP"
+    },
+    {
+      "eq2": "a1*DLA_CPI_lag + (1-a1)*DLA_CPI_p + a2*L_GDP_GAP + SHK_DLA_CPI - DLA_CPI"
+    },
+    {
+      "eq3": "g1*RS_lag + (1-g1)*(DLA_CPI_p + g2*DLA_CPI_lead3 + g3*L_GDP_GAP) + SHK_RS - RS"
+    },
+    {
+      "eq4": "RS - DLA_CPI_p - RR_GAP"
+    },
+    {
+      "eq5": "L_GDP_GAP_lag_p - L_GDP_GAP"
+    },
+    {
+      "eq6": "DLA_CPI_lag_p - DLA_CPI"
+    },
+    {
+      "eq7": "RS_lag_p - RS"
+    },
+    {
+      "eq8": "DLA_CPI_p - DLA_CPI_lead1"
+    },
+    {
+      "eq9": "DLA_CPI_lead1_p - DLA_CPI_lead2"
+    },
+    {
+      "eq10": "DLA_CPI_lead2_p - DLA_CPI_lead3"
+    }
+  ],
+  "variables": [
+    "L_GDP_GAP",
+    "DLA_CPI",
+    "RS",
+    "RR_GAP",
+    "L_GDP_GAP_lag",
+    "DLA_CPI_lag",
+    "RS_lag",
+    "DLA_CPI_lead1",
+    "DLA_CPI_lead2",
+    "DLA_CPI_lead3"
+  ],
+  "parameters": [
+    "b1",
+    "b2",
+    "b4",
+    "a1",
+    "a2",
+    "g1",
+    "g2",
+    "g3"
+  ],
+  "param_values": {
+    "b1": 0.7,
+    "b2": 0.2,
+    "b4": 0.7,
+    "a1": 0.5,
+    "a2": 0.1,
+    "g1": 0.7,
+    "g2": 0.3,
+    "g3": 0.25
+  },
+  "shocks": [
+    "SHK_L_GDP_GAP",
+    "SHK_DLA_CPI",
+    "SHK_RS"
+  ],
+  "output_text": "equations = {\n    {\"eq1\": \"(1-b1)*L_GDP_GAP_p + b1*L_GDP_GAP_lag - b4*RR_GAP_p + SHK_L_GDP_GAP - L_GDP_GAP\"},\n    {\"eq2\": \"a1*DLA_CPI_lag + (1-a1)*DLA_CPI_p + a2*L_GDP_GAP + SHK_DLA_CPI - DLA_CPI\"},\n    {\"eq3\": \"g1*RS_lag + (1-g1)*(DLA_CPI_p + g2*DLA_CPI_lead3 + g3*L_GDP_GAP) + SHK_RS - RS\"},\n    {\"eq4\": \"RS - DLA_CPI_p - RR_GAP\"},\n    {\"eq5\": \"L_GDP_GAP_lag_p - L_GDP_GAP\"},\n    {\"eq6\": \"DLA_CPI_lag_p - DLA_CPI\"},\n    {\"eq7\": \"RS_lag_p - RS\"},\n    {\"eq8\": \"DLA_CPI_p - DLA_CPI_lead1\"},\n    {\"eq9\": \"DLA_CPI_lead1_p - DLA_CPI_lead2\"},\n    {\"eq10\": \"DLA_CPI_lead2_p - DLA_CPI_lead3\"}\n};\n\nvariables = [\"L_GDP_GAP\", \"DLA_CPI\", \"RS\", \"RR_GAP\", \"L_GDP_GAP_lag\", \"DLA_CPI_lag\", \"RS_lag\", \"DLA_CPI_lead1\", \"DLA_CPI_lead2\", \"DLA_CPI_lead3\"];\n\nparameters = [\"b1\", \"b2\", \"b4\", \"a1\", \"a2\", \"g1\", \"g2\", \"g3\"];\n\nb1 = 0.7;\nb2 = 0.2;\nb4 = 0.7;\na1 = 0.5;\na2 = 0.1;\ng1 = 0.7;\ng2 = 0.3;\ng3 = 0.25;\n\nshocks = [\"SHK_L_GDP_GAP\", \"SHK_DLA_CPI\", \"SHK_RS\"];\n"
+}
