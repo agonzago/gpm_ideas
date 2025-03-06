@@ -256,146 +256,6 @@ def save_transformed_model(parsed_model, output_file):
         f.write(parsed_model['output_text'])
 
 
-
-def build_state_space(F, P, R):
-    """
-    Build state space matrices for the DSGE model
-    
-    Args:
-        F: Decision rule (u(t) = F*k(t))
-        P: Law of motion (k(t) = P*k(t-1))
-        R: Shock impact matrix on state variables
-    
-    Returns:
-        Phi: State transition matrix for full state vector s(t) = [k(t); u(t)]
-        R_ss: Shock impact matrix for full state vector
-    """
-    nk = P.shape[0]  # Number of state variables
-    nu = F.shape[0]  # Number of control variables
-    n_total = nk + nu  # Total variables
-    n_shocks = R.shape[1]  # Number of shocks
-    
-    # Build state space transition matrix
-    # [k(t)]   = [P     0] [k(t-1)] + [R ] [eps(t)]
-    # [u(t)]     [F*P   0] [u(t-1)]   [FR]
-    Phi = np.zeros((n_total, n_total))
-    Phi[:nk, :nk] = P
-    Phi[nk:, :nk] = F @ P
-    
-    # Build shock impact matrix
-    R_ss = np.zeros((n_total, n_shocks))
-    R_ss[:nk, :] = R
-    R_ss[nk:, :] = F @ R
-    
-    return Phi, R_ss
-
-def compute_irfs(Phi, R_ss, shock_index=None, periods=40, orig_vars=None, transformed_vars=None):
-    """
-    Compute impulse response functions.
-    
-    Args:
-        Phi (ndarray): State transition matrix
-        R_ss (ndarray): Shock impact matrix
-        shock_index (int, optional): Index of the shock to compute IRFs for.
-                                    If None, compute for all shocks.
-        periods (int): Number of periods for the IRF
-        orig_vars (list): Original variable names
-        transformed_vars (list): Transformed variable names
-    
-    Returns:
-        dict: Dictionary of IRFs keyed by shock and variable
-    """
-    n_vars = Phi.shape[0]
-    n_shocks = R_ss.shape[1]
-    
-    # If shock_index is None, compute IRFs for all shocks
-    if shock_index is None:
-        shock_indices = range(n_shocks)
-    else:
-        shock_indices = [shock_index]
-    
-    # Create dictionary to store IRFs
-    irfs = {}
-    
-    # For each shock
-    for s_idx in shock_indices:
-        # Initialize impulse vector
-        x = np.zeros((n_vars, periods))
-        
-        # Initial impulse
-        x[:, 0] = R_ss[:, s_idx]
-        
-        # Propagate through system
-        for t in range(1, periods):
-            x[:, t] = Phi @ x[:, t-1]
-        
-        # Store IRFs
-        shock_name = f"shock_{s_idx}" if orig_vars is None else f"SHK_{orig_vars[s_idx]}"
-        irfs[shock_name] = {}
-        
-        # Map back to original variables if provided
-        for i, var in enumerate(transformed_vars or range(n_vars)):
-            var_name = var if orig_vars is None else orig_vars[i % len(orig_vars)]
-            irfs[shock_name][var_name] = x[i, :]
-    
-    return irfs
-
-def plot_irfs(irfs, variables=None, shock_name=None, figsize=(12, 8)):
-    """
-    Plot impulse response functions.
-    
-    Args:
-        irfs (dict): Dictionary of IRFs from compute_irfs
-        variables (list, optional): List of variables to plot. If None, plot all.
-        shock_name (str, optional): Name of the shock. If None, use the first shock.
-        figsize (tuple): Figure size.
-    """
-    if not irfs:
-        raise ValueError("No IRFs to plot")
-    
-    # If shock_name is None, use the first shock
-    if shock_name is None:
-        shock_name = next(iter(irfs.keys()))
-    
-    # Get shock IRFs
-    shock_irfs = irfs.get(shock_name)
-    if shock_irfs is None:
-        raise ValueError(f"Shock {shock_name} not found in IRFs")
-    
-    # If variables is None, plot all variables
-    if variables is None:
-        variables = list(shock_irfs.keys())
-    
-    # Number of variables to plot
-    n_vars = len(variables)
-    
-    # Create grid of subplots
-    n_cols = min(3, n_vars)
-    n_rows = (n_vars + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    if n_rows == 1 and n_cols == 1:
-        axes = np.array([axes])
-    axes = axes.flatten()
-    
-    # Plot each variable
-    for i, var in enumerate(variables):
-        if var in shock_irfs:
-            x = np.arange(len(shock_irfs[var]))
-            axes[i].plot(x, shock_irfs[var])
-            axes[i].set_title(var)
-            axes[i].grid(True)
-            axes[i].axhline(y=0, color='r', linestyle='-', alpha=0.3)
-    
-    # Turn off any unused subplots
-    for i in range(n_vars, len(axes)):
-        axes[i].set_visible(False)
-    
-    plt.suptitle(f"IRFs for {shock_name}")
-    plt.tight_layout()
-    
-    return fig
-
 def solve_klein(A, B, nk):
     """
     Solve the linear rational expectations model using Klein's method.
@@ -450,6 +310,27 @@ def solve_klein(A, B, nk):
     
     return F, P
 
+def reorder_variables_for_klein(variables):
+    """
+    Reorder variables to put predetermined variables first, followed by controls
+    
+    Args:
+        variables: List of variable names
+        
+    Returns:
+        Reordered list of variables
+    """
+    # Identify different types of variables
+    pred_endo = [var for var in variables if '_lag' in var]
+    exo_states = [var for var in variables if var.startswith('RES_')]
+    others = [var for var in variables if 
+              '_lag' not in var and 
+              not var.startswith('RES_') and
+              '_p' not in var and
+              '_lead' not in var]
+    
+    # Return reordered list
+    return pred_endo + exo_states + others
 
 def derive_jacobians_economic_model(equations_dict, variables, shocks, parameters):
     """
@@ -587,179 +468,322 @@ def derive_jacobians_economic_model(equations_dict, variables, shocks, parameter
     return "\n".join(function_code)
 
 
-import numpy as np
-import matplotlib.pyplot as plt
-import types
-import warnings
-
-def process_dsge_model(dynare_file, shock_name=None, periods=40, plot=True):
+def build_state_space(F, P, num_k, num_exo, num_control_obs):
     """
-    End-to-end function for processing a DSGE model from a Dynare file.
+    Build state space representation matching the Fortran implementation
     
     Args:
-        dynare_file (str): Path to the Dynare file
-        shock_name (str, optional): Name of shock to generate IRFs for. If None, uses first shock.
-        periods (int): Number of periods for IRF calculation
-        plot (bool): Whether to plot IRFs
-        
-    Returns:
-        dict: Dictionary containing model results and components
+        F: Policy function matrix
+        P: State transition matrix
+        num_k: Number of predetermined variables
+        num_exo: Number of exogenous shock variables
+        num_control_obs: Number of observable control variables
     """
-    print(f"Processing DSGE model from {dynare_file}...")
+    # Define dimensions (as in KALMANFILTERMATRICES)
+    num_est = num_control_obs + num_k
+    n_k = num_control_obs  # Controls
+    k_ex = num_k - num_exo  # Predetermined endogenous
+    n_ex = num_est - num_exo  # All except exogenous shocks
     
-    # Step 1: Parse the Dynare file
-    print("Parsing Dynare file...")
-    parsed_model = parse_dynare_file(dynare_file)
+    # Initialize transition and shock matrices
+    T = np.zeros((num_est, num_est))
+    R = np.zeros((num_est, num_exo))
     
-    # Step 2: Extract model components
+    # Fill transition matrix T
+    # Controls impacted by states
+    T[:n_k, n_k:n_ex] = F[:, :k_ex]  # Impact of pred_endo on controls
+    T[:n_k, n_ex:] = np.dot(F[:, k_ex:], P[k_ex:, k_ex:])  # Impact of exo_states
+    
+    # State transitions
+    T[n_k:n_ex, n_k:n_ex] = P[:k_ex, :k_ex]  # Pred_endo dynamics
+    T[n_k:n_ex, n_ex:] = np.dot(P[:k_ex, k_ex:], P[k_ex:, k_ex:])  # Exo impact on pred_endo
+    T[n_ex:, n_ex:] = P[k_ex:, k_ex:]  # Exogenous shock processes
+    
+    # Fill shock impact matrix R
+    R[:n_k, :] = F[:, k_ex:]  # Impact on controls
+    R[n_k:n_ex, :] = P[:k_ex, k_ex:]  # Impact on pred_endo
+    
+    # Direct impact of innovations on exogenous states
+    for j in range(num_exo):
+        R[n_ex+j, j] = 1.0
+    
+    return T, R
+
+def setup_model_and_state_space(parsed_model, jacobian_file="_jacobian_evaluator.py"):
+    """
+    Setup the model variables and create the state space representation
+    using a pre-generated Jacobian evaluator
+    """
+    # Extract components from parsed model
     variables = parsed_model['variables']
     equations = {key: eq for d in parsed_model['equations'] for key, eq in d.items()}
     parameters = parsed_model['parameters']
     param_values = parsed_model['param_values']
     shocks = parsed_model['shocks']
     
-    print(f"Model contains {len(variables)} variables, {len(equations)} equations, " + 
-          f"{len(parameters)} parameters, and {len(shocks)} shocks")
+    # In transformed variables, we need to identify:
+    # 1. Lagged endogenous variables (e.g., X_lag)
+    # 2. Exogenous state variables (e.g., RES_X)
     
-    # Step 3: Derive Jacobians
-    print("Deriving Jacobian matrices...")
-    jacobian_code = derive_jacobians_economic_model(equations, variables, shocks, parameters)
+    # More precise identification of variable types
+    pred_endo = []
+    exo_states = []
+    controls = []
+
+    # First identify the original variables from the transformed ones
+    original_vars = set()
+    for var in variables:
+        if '_lag' in var:
+            # Extract original variable name from X_lag to get X
+            original_name = var.split('_lag')[0]
+            original_vars.add(original_name)
+        elif '_lead' in var or '_p' in var:
+            # Skip leads/future vars as they're not original variables
+            continue
+        else:
+            original_vars.add(var)
     
-    # Step 4: Execute the generated Jacobian code
-    print("Creating Jacobian evaluation function...")
-    jacobian_module = types.ModuleType('jacobian_module')
-    exec(jacobian_code, jacobian_module.__dict__)
+    # Now classify each transformed variable
+    for var in variables:
+        if '_lag' in var:
+            pred_endo.append(var)
+        elif var.startswith('RES_'):
+            exo_states.append(var)
+        elif var in original_vars and not var.startswith('RES_'):
+            # Current-period endogenous variables
+            controls.append(var)
+    
+    # Calculate key dimensions
+    num_pred_endo = len(pred_endo)
+    num_exo = len(exo_states)
+    num_k = num_pred_endo + num_exo  # Total predetermined variables
+    num_control_obs = len(controls)
+    
+    print(f"Predetermined endogenous: {num_pred_endo} - {pred_endo}")
+    print(f"Exogenous states: {num_exo} - {exo_states}")
+    print(f"Control variables: {num_control_obs} - {controls}")
+    print(f"Total state dimension: {num_k}")
+    
+    # Load the Jacobian evaluator from file
+    print(f"Loading Jacobian evaluator from {jacobian_file}")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jacobian_evaluator", jacobian_file)
+    jacobian_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(jacobian_module)
     evaluate_jacobians = jacobian_module.evaluate_jacobians
     
-    # Step 5: Prepare parameters for evaluation
-    theta = [param_values[param] for param in parameters]
-    
-    # Step 6: Evaluate Jacobians
+    # Prepare parameters and evaluate Jacobians
     print("Evaluating Jacobians...")
+    theta = [param_values[param] for param in parameters]
     A, B, C = evaluate_jacobians(theta)
     
-    # Step 7: Determine number of predetermined variables
-    nk = sum(1 for var in variables if '_lag' in var or var.endswith('_lag'))
-    print(f"Found {nk} predetermined variables")
+    # Check matrix dimensions
+    print(f"Jacobian A shape: {A.shape}")
+    print(f"Jacobian B shape: {B.shape}")
+    print(f"Jacobian C shape: {C.shape}")
     
-    # Step 8: Solve the model using Klein's method
+    # Solve the model with Klein's method
     print("Solving model using Klein's method...")
-    F, P = solve_klein(A, B, nk)
+    F, P = solve_klein(A, B, num_k)
     
     if F is None or P is None:
-        print("Warning: Failed to compute a unique stable solution")
-        return {
-            'success': False,
-            'parsed_model': parsed_model,
-            'matrices': {'A': A, 'B': B, 'C': C},
-            'theta': theta,
-            'nk': nk
-        }
+        print("Failed to find stable solution")
+        return None
     
-    print("Model solved successfully")
+    # Check solution matrix dimensions
+    print(f"Solution F shape: {F.shape}")
+    print(f"Solution P shape: {P.shape}")
     
-    # Step 9: Build state space representation
+    # Build state space with the correct specification
     print("Building state space representation...")
-    Phi, R_ss = build_state_space(F, P, C[:nk])
+    T, R = build_state_space(F, P, num_k, num_exo, num_control_obs)
     
-    # Step 10: Compute IRFs if requested
-    results = {
-        'success': True,
-        'parsed_model': parsed_model,
-        'matrices': {'A': A, 'B': B, 'C': C},
-        'solution': {'F': F, 'P': P},
-        'state_space': {'Phi': Phi, 'R_ss': R_ss},
-        'theta': theta,
-        'nk': nk
+    print(f"State transition matrix T shape: {T.shape}")
+    print(f"Shock impact matrix R shape: {R.shape}")
+    
+    return {
+        'T': T,
+        'R': R,
+        'F': F,
+        'P': P,
+        'A': A,
+        'B': B,
+        'C': C,
+        'variable_info': {
+            'pred_endo': pred_endo,
+            'exo_states': exo_states,
+            'controls': controls,
+            'shocks': shocks,
+            'all_variables': variables
+        },
+        'dimensions': {
+            'num_k': num_k,
+            'num_exo': num_exo,
+            'num_control_obs': num_control_obs
+        }
     }
-    
-    if plot:
-        print("Computing impulse response functions...")
-        # If shock_name is provided, find its index
-        shock_index = None
-        if shock_name:
-            if shock_name in shocks:
-                shock_index = shocks.index(shock_name)
-                print(f"Using shock: {shock_name} (index {shock_index})")
-            else:
-                print(f"Warning: Shock {shock_name} not found in model shocks.")
-                print(f"Available shocks: {shocks}")
-                shock_index = 0  # Use first shock as default
-                shock_name = shocks[0]
-                print(f"Using first shock: {shock_name} instead")
-        
-        # Compute IRFs
-        irfs = compute_irfs(Phi, R_ss, shock_index, periods, parsed_model['variables'], variables)
-        results['irfs'] = irfs
-        
-        # Plot IRFs
-        if plot:
-            print("Plotting impulse response functions...")
-            plot_irfs(irfs, None, f"SHK_{shock_name}" if shock_index is not None else None)
-            plt.tight_layout()
-            plt.show()
-    
-    print("DSGE model processing complete!")
-    return results
 
-def print_model_solution(results):
+
+def process_model(dynare_file, jacobian_file="_jacobian_evaluator.py", shock_name=None, periods=40):
     """
-    Print a detailed summary of the model solution.
+    Process a DSGE model from a Dynare file and compute IRFs
+    """
+    print(f"Processing model from {dynare_file}")
+    
+    # Step 1: Parse the Dynare file
+    parsed_model = parse_dynare_file(dynare_file)
+    
+    # Step 2: Setup the model and create state space
+    model_solution = setup_model_and_state_space(parsed_model, jacobian_file)
+    
+    if model_solution is None:
+        print("Failed to solve model")
+        return None
+    
+    # Step 3: Compute IRFs
+    print("Computing impulse response functions...")
+    
+    # Find shock index if name provided
+    shock_index = None
+    if shock_name:
+        shocks = model_solution['variable_info']['shocks']
+        if shock_name in shocks:
+            shock_index = shocks.index(shock_name)
+            print(f"Using shock {shock_name} (index {shock_index})")
+        else:
+            print(f"Shock {shock_name} not found. Available shocks: {shocks}")
+            return None
+    
+    irfs = compute_irfs(
+        model_solution['T'],
+        model_solution['R'],
+        model_solution['dimensions'],
+        model_solution['variable_info'],
+        shock_index=shock_index,
+        periods=periods
+    )
+    
+    # Step 4: Plot IRFs
+    main_vars = ['L_GDP_GAP', 'DLA_CPI', 'RS']
+    plot_irfs(irfs, variables=main_vars, shock_name=f"SHK_{shock_name}" if shock_name else None)
+    
+    return {
+        'model_solution': model_solution,
+        'irfs': irfs
+    }
+
+
+
+def compute_irfs(T, R, dimensions, variable_info, shock_index=None, periods=40):
+    """
+    Compute impulse response functions using the state space representation
     
     Args:
-        results (dict): Results dictionary from process_dsge_model
+        T: State transition matrix
+        R: Shock impact matrix
+        dimensions: Dictionary with model dimensions
+        variable_info: Dictionary with variable classifications
+        shock_index: Index of shock to simulate (None = all shocks)
+        periods: Number of periods for IRF
+    
+    Returns:
+        Dictionary of IRFs by shock and variable
     """
-    if not results['success']:
-        print("No solution available - model could not be solved.")
-        return
+    num_vars = T.shape[0]
+    num_shocks = R.shape[1]
     
-    print("\n" + "="*60)
-    print("MODEL SOLUTION SUMMARY")
-    print("="*60)
+    # Determine which shocks to compute IRFs for
+    if shock_index is None:
+        shock_indices = range(num_shocks)
+    else:
+        shock_indices = [shock_index]
     
-    # Basic model information
-    parsed_model = results['parsed_model']
-    variables = parsed_model['variables']
-    nk = results['nk']
+    # Create IRF container
+    irfs = {}
     
-    print(f"Model contains {len(variables)} variables")
-    print(f"Predetermined variables ({nk}):")
-    print(", ".join([var for var in variables if '_lag' in var or var.endswith('_lag')]))
+    # Get flat list of all variables
+    all_vars = (
+        variable_info['controls'] + 
+        variable_info['pred_endo'] + 
+        variable_info['exo_states']
+    )
     
-    print(f"\nForward-looking variables ({len(variables) - nk}):")
-    print(", ".join([var for var in variables if '_lag' not in var and not var.endswith('_lag')]))
-    
-    # Solution matrices
-    print("\nDecision rule (non-zero elements of F matrix):")
-    F = results['solution']['F']
-    for i, row_var in enumerate([var for var in variables if '_lag' not in var and not var.endswith('_lag')]):
-        nonzero_elems = []
-        for j, col_var in enumerate([var for var in variables if '_lag' in var or var.endswith('_lag')]):
-            if abs(F[i, j]) > 1e-10:  # Only print non-zero coefficients
-                nonzero_elems.append(f"{F[i, j]:.4f}*{col_var}")
+    # For each shock
+    for s_idx in shock_indices:
+        shock_name = f"SHK_{variable_info['shocks'][s_idx]}"
+        irfs[shock_name] = {}
         
-        if nonzero_elems:
-            print(f"  {row_var} = {' + '.join(nonzero_elems)}")
-    
-    print("\nState transition (non-zero elements of P matrix):")
-    P = results['solution']['P']
-    for i, row_var in enumerate([var for var in variables if '_lag' in var or var.endswith('_lag')]):
-        nonzero_elems = []
-        for j, col_var in enumerate([var for var in variables if '_lag' in var or var.endswith('_lag')]):
-            if abs(P[i, j]) > 1e-10:  # Only print non-zero coefficients
-                nonzero_elems.append(f"{P[i, j]:.4f}*{col_var}")
+        # Initialize impulse vector
+        x = np.zeros((num_vars, periods))
         
-        if nonzero_elems:
-            print(f"  {row_var} = {' + '.join(nonzero_elems)}")
+        # Initial impulse from shock
+        x[:, 0] = R[:, s_idx]
+        
+        # Propagate through system
+        for t in range(1, periods):
+            x[:, t] = np.dot(T, x[:, t-1])
+        
+        # Store IRFs by variable
+        for i, var in enumerate(all_vars):
+            irfs[shock_name][var] = x[i, :]
     
-    # Eigenvalues
-    Phi = results['state_space']['Phi']
-    eigenvalues = np.linalg.eigvals(Phi)
-    print("\nEigenvalues of state transition matrix:")
-    for i, eig in enumerate(eigenvalues):
-        print(f"  λ{i+1} = {eig:.4f} (magnitude: {abs(eig):.4f})")
+    return irfs
+
+def plot_irfs(irfs, variables=None, shock_name=None, figsize=(12, 8)):
+    """
+    Plot impulse response functions.
     
-    print("="*60)
+    Args:
+        irfs (dict): Dictionary of IRFs from compute_irfs
+        variables (list, optional): List of variables to plot. If None, plot all.
+        shock_name (str, optional): Name of the shock. If None, use the first shock.
+        figsize (tuple): Figure size.
+    """
+    if not irfs:
+        raise ValueError("No IRFs to plot")
+    
+    # If shock_name is None, use the first shock
+    if shock_name is None:
+        shock_name = next(iter(irfs.keys()))
+    
+    # Get shock IRFs
+    shock_irfs = irfs.get(shock_name)
+    if shock_irfs is None:
+        raise ValueError(f"Shock {shock_name} not found in IRFs")
+    
+    # If variables is None, plot all variables
+    if variables is None:
+        variables = list(shock_irfs.keys())
+    
+    # Number of variables to plot
+    n_vars = len(variables)
+    
+    # Create grid of subplots
+    n_cols = min(3, n_vars)
+    n_rows = (n_vars + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    if n_rows == 1 and n_cols == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+    
+    # Plot each variable
+    for i, var in enumerate(variables):
+        if var in shock_irfs:
+            x = np.arange(len(shock_irfs[var]))
+            axes[i].plot(x, shock_irfs[var])
+            axes[i].set_title(var)
+            axes[i].grid(True)
+            axes[i].axhline(y=0, color='r', linestyle='-', alpha=0.3)
+    
+    # Turn off any unused subplots
+    for i in range(n_vars, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.suptitle(f"IRFs for {shock_name}")
+    plt.tight_layout()
+    
+    return fig
 
 
 # Example usage
@@ -773,7 +797,7 @@ if __name__ == "__main__":
     print("Parsing Dynare file...")
     parsed_model = parse_dynare_file(dynare_file)
 
-    # Save the parsed model to a file
+    # Step 2: Save the parsed model to a file
     import json
     parsed_model_file = "parsed_model.json"
     print(f"Saving parsed model to {parsed_model_file}...")
@@ -790,86 +814,85 @@ if __name__ == "__main__":
     with open(parsed_model_file, 'w') as f:
         json.dump(serializable_model, f, indent=2)
 
-    # Load the parsed model from the file
-    print(f"Loading parsed model from {parsed_model_file}...")
-    with open(parsed_model_file, 'r') as f:
-        parsed_model = json.load(f)
-    # After loading parsed_model from JSON    
-    # Step 2: Extract model components
-    variables = parsed_model['variables']
+
+    #Step 4: Compute the Jacobian     
+    print("Generating Jacobian evaluator...")    
     equations = {key: eq for d in parsed_model['equations'] for key, eq in d.items()}
-    parameters = parsed_model['parameters']
-    param_values = parsed_model['param_values']
+    variables = parsed_model['variables']
     shocks = parsed_model['shocks']
+    parameters = parsed_model['parameters']
     
-    print(f"Model contains {len(variables)} variables, {len(equations)} equations, " + 
-          f"{len(parameters)} parameters, and {len(shocks)} shocks")
+    # Reorder variables for Klein method
+    ordered_variables = reorder_variables_for_klein(variables)
+
+    # Generate Jacobian code
+    jacobian_code = derive_jacobians_economic_model(equations, ordered_variables, shocks, parameters)
     
-    # Step 3: Derive Jacobians
-    print("Deriving Jacobian matrices...")
-    jacobian_code = derive_jacobians_economic_model(equations, variables, shocks, parameters)
-    
-    # Save the Jacobian code to a file
-    jacobian_file = "_jacobian_evaluator.py"
-    print(f"Saving Jacobian code to {jacobian_file}...")
-    with open(jacobian_file, 'w') as f:
-        f.write(jacobian_code)
+    # Save the analytical Jacobian in the computer
+    with open("_jacobian_evaluator.py", 'w') as f:
+        f.write(jacobian_code) 
+
+    # Step 4: Setup model and build state space
+    # Process model using existing Jacobian evaluator
+    results = process_model("qpm_simpl1.dyn", jacobian_file="_jacobian_evaluator.py", shock_name="SHK_L_GDP_GAP")
+ 
        
 
-    # Step 6: Load the jacobian
-    print("Importing Jacobian evaluation function...")
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("jacobian_evaluator", jacobian_file)
+    # # Step 6: Load the jacobian
+    # print("Importing Jacobian evaluation function...")
+    # import importlib.util
+    # spec = importlib.util.spec_from_file_location("jacobian_evaluator", jacobian_file)
    
-    jacobian_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(jacobian_module)
-    evaluate_jacobians = jacobian_module.evaluate_jacobians
+    # jacobian_module = importlib.util.module_from_spec(spec)
+    # spec.loader.exec_module(jacobian_module)
+    # evaluate_jacobians = jacobian_module.evaluate_jacobians
 
-    # Step 7: Evaluate Jacobians
-    print("Evaluating Jacobians...")
-    # Step 5: Prepare parameters for evaluation
-    theta = [param_values[param] for param in parameters]
-    A, B, C = evaluate_jacobians(theta)
+    # # Step 7: Evaluate Jacobians
+    # print("Evaluating Jacobians...")
+    # # Step 5: Prepare parameters for evaluation
+    # theta = [param_values[param] for param in parameters]
+    # A, B, C = evaluate_jacobians(theta)
     
-    # Step 7: Determine number of predetermined variables
-    nk = sum(1 for var in variables if '_lag' in var or var.endswith('_lag'))
-    print(f"Found {nk} predetermined variables")
+    # # Step 7: Determine number of predetermined variables
+    # nk = sum(1 for var in variables if '_lag' in var or var.endswith('_lag'))
+    # print(f"Found {nk} predetermined variables")
     
-    # Step 8: Solve the model using Klein's method
-    print("Solving model using Klein's method...")
-    F, P = solve_klein(A, B, nk)
+    # # Step 8: Solve the model using Klein's method
+    # print("Solving model using Klein's method...")
+    # F, P = solve_klein(A, B, nk)
 
-    # Step 9: Build state space representation
-    print("Building state space representation...")
-    Phi, R_ss = build_state_space(F, P, C[:nk])
+    # # Step 9: Build state space representation
+    # print("Building state space representation...")
+    # Phi, H = build_state_space(F, P, C)
 
-    # COmpute IRFs    
-    print("Computing impulse response functions...")
-    # If shock_name is provided, find its index
-    shock_name = "SHK_L_GDP_GAP"
-    shock_index = None
-    if shock_name:
-        if shock_name in shocks:
-            shock_index = shocks.index(shock_name)
-            print(f"Using shock: {shock_name} (index {shock_index})")
-        else:
-            print(f"Warning: Shock {shock_name} not found in model shocks.")
-            print(f"Available shocks: {shocks}")
-            shock_index = 0  # Use first shock as default
-            shock_name = shocks[0]
-            print(f"Using first shock: {shock_name} instead")
+    # # COmpute IRFs    
+    # print("Computing impulse response functions...")
+    # # If shock_name is provided, find its index
+    # shock_name = "SHK_L_GDP_GAP"
+    # shock_index = None
+    # if shock_name:
+    #     if shock_name in shocks:
+    #         shock_index = shocks.index(shock_name)
+    #         print(f"Using shock: {shock_name} (index {shock_index})")
+    #     else:
+    #         print(f"Warning: Shock {shock_name} not found in model shocks.")
+    #         print(f"Available shocks: {shocks}")
+    #         shock_index = 0  # Use first shock as default
+    #         shock_name = shocks[0]
+    #         print(f"Using first shock: {shock_name} instead")
 
-    # Compute IRFs
+    # # Compute IRFs
     
-    periods = 40
-    irfs = compute_irfs(Phi, R_ss, shock_index, periods, parsed_model['variables'], variables)
-   # results['irfs'] = irfs
+    
+    # periods = 40
+    # irfs = compute_irfs(Phi, H, shock_index, periods, parsed_model['variables'], variables)
+   
 
-    # Plot IRFs    
-    print("Plotting impulse response functions...")
-    plot_irfs(irfs, None, f"{shock_name}" if shock_index is not None else None)
-    plt.tight_layout()
-    plt.show()
+    # # Plot IRFs    
+    # print("Plotting impulse response functions...")
+    # plot_irfs(irfs, None, f"{shock_name}" if shock_index is not None else None)
+    # plt.tight_layout()
+    # plt.show()
     # Process a DSGE model
     # results = process_dsge_model("/Volumes/TOSHIBA EXT/main_work/Work/Projects/gpm_ideas/Simplest/qpm_simpl1.dyn", shock_name="SHK_L_GDP_GAP")    
     # print( results)
