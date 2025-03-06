@@ -255,6 +255,140 @@ def save_transformed_model(parsed_model, output_file):
     with open(output_file, 'w') as f:
         f.write(parsed_model['output_text'])
 
+def klein(a=None,b=None,c=None,phi=None,n_states=None,eigenvalue_warnings=True):
+
+    '''Solves linear dynamic models with the form of:
+    
+                a*Et[x(t+1)] = b*x(t) + c*z(t)
+
+        with x(t) = [s(t); u(t)] where s(t) is a vector of predetermined (state) variables and u(t) is
+        a vector of nonpredetermined costate variables. z(t) is a vector of exogenous forcing variables with 
+        autocorrelation matrix phi. The solution to the model is a set of matrices f, n, p, l such that:
+
+                u(t)   = f*s(t) + n*z(t)
+                s(t+1) = p*s(t) + l*z(t).
+
+        The solution algorithm is based on Klein (2000) and his solab.m Matlab program.
+
+    Args:
+        a:                      (Numpy ndarray) Coefficient matrix on future-dated variables
+        b:                      (Numpy ndarray) Coefficient matrix on current-dated variables
+        c:                      (Numpy ndarray) Coefficient matrix on exogenous forcing variables
+        phi:                    (Numpy ndarray) Autocorrelation of exogenous forcing variables
+        n_states:               (int) Number of state variables
+        eigenvalue_warnings:    (bool) Whether to print warnings that there are too many or few eigenvalues. Default: True
+
+    Returns:
+        f:          (Numpy ndarray) Solution matrix coeffients on s(t) for u(t)
+        n:          (Numpy ndarray) Solution matrix coeffients on z(t) for u(t)
+        p:          (Numpy ndarray) Solution matrix coeffients on s(t) for s(t+1)
+        l:          (Numpy ndarray) Solution matrix coeffients on z(t) for s(t+1)
+        stab:       (int) Indicates solution stability and uniqueness
+                        stab == 1: too many stable eigenvalues
+                        stab == -1: too few stable eigenvalues
+                        stab == 0: just enoughstable eigenvalues
+        eig:        The generalized eigenvalues from the Schur decomposition
+
+    '''
+
+    s,t,alpha,beta,q,z = la.ordqz(A=a,B=b,sort='ouc',output='complex')
+
+    # print('type of s,',s.dtype)
+    # print('type of t,',t.dtype)
+
+    forcingVars = False
+    if len(np.shape(c))== 0:
+        nz = 0
+        phi = np.empty([0,0])
+    else:
+        forcingVars = True
+        nz = np.shape(c)[1]
+        
+
+    # Components of the z matrix
+    z11 = z[0:n_states,0:n_states]
+    z12 = z[0:n_states,n_states:]
+    z21 = z[n_states:,0:n_states]
+    z22 = z[n_states:,n_states:]
+
+    # number of nonpredetermined variables
+    n_costates = np.shape(a)[0] - n_states
+    
+    if n_states>0:
+        if np.linalg.matrix_rank(z11)<n_states:
+            sys.exit("Invertibility condition violated. Check model equations or parameter values.")
+
+    s11 = s[0:n_states,0:n_states];
+    if n_states>0:
+        z11i = la.inv(z11)
+        s11i = la.inv(s11)
+    else:
+        z11i = z11
+        s11i = s11
+
+    # Components of the s,t,and q matrices
+    s12 = s[0:n_states,n_states:]
+    s22 = s[n_states:,n_states:]
+    t11 = t[0:n_states,0:n_states]
+    t12 = t[0:n_states,n_states:]
+    t22 = t[n_states:,n_states:]
+    q1  = q[0:n_states,:]
+    q2  = q[n_states:,:]
+
+    # Verify that there are exactly n_states stable (inside the unit circle) eigenvalues:
+    stab = 0
+
+    if n_states>0:
+        if np.abs(t[n_states-1,n_states-1])>np.abs(s[n_states-1,n_states-1]):
+            if eigenvalue_warnings:
+                print('Warning: Too few stable eigenvalues. Check model equations or parameter values.')
+            stab = -1
+
+    if n_states<n_states+n_costates:
+        if np.abs(t[n_states,n_states])<np.abs(s[n_states,n_states]):
+            if eigenvalue_warnings:
+                print('Warning: Too many stable eigenvalues. Check model equations or parameter values.')
+            stab = 1
+
+    # Compute the generalized eigenvalues
+    tii = np.diag(t)
+    sii = np.diag(s)
+    eig = np.zeros(np.shape(tii),dtype=np.complex128)
+    # eig = np.zeros(np.shape(tii))
+
+    for k in range(len(tii)):
+        if np.abs(sii[k])>0:
+            # eig[k] = np.abs(tii[k])/np.abs(sii[k])
+            eig[k] = tii[k]/sii[k]    
+        else:
+            eig[k] = np.inf
+
+    # Solution matrix coefficients on the endogenous state
+    if n_states>0:
+            dyn = np.linalg.solve(s11,t11)
+    else:
+        dyn = np.array([])
+
+
+    f = z21.dot(z11i)
+    p = z11.dot(dyn).dot(z11i)
+
+    # Solution matrix coefficients on the exogenous state
+    if not forcingVars:
+        n = np.empty([n_costates,0])
+        l = np.empty([n_states,0])
+    else:
+        mat1 = np.kron(np.transpose(phi),s22) - np.kron(np.identity(nz),t22)
+        mat1i = la.inv(mat1)
+        q2c = q2.dot(c)
+        vecq2c = q2c.flatten(1).T
+        vecm = mat1i.dot(vecq2c)
+        m = np.transpose(np.reshape(np.transpose(vecm),(nz,n_costates)))
+        
+        n = (z22 - z21.dot(z11i).dot(z12)).dot(m)
+        l = -z11.dot(s11i).dot(t11).dot(z11i).dot(z12).dot(m) + z11.dot(s11i).dot(t12.dot(m) - s12.dot(m).dot(phi)+q1.dot(c)) + z12.dot(m).dot(phi)
+
+    return f,n,p,l,stab,eig
 
 def solve_klein(A, B, nk):
     """
@@ -283,7 +417,8 @@ def solve_klein(A, B, nk):
             eigenvalues.append(float('inf'))  # Infinity for zero on diagonal of S
         else:
             eigenvalues.append(T[i, i] / S[i, i])
-    
+    print("Eigenvalues:", np.abs(eigenvalues))
+
     # Extract submatrices
     Z11 = Z[:nk, :nk]
     Z21 = Z[nk:, :nk]
@@ -321,14 +456,11 @@ def reorder_variables_for_klein(variables):
         Reordered list of variables
     """
     # Identify different types of variables
-    pred_endo = [var for var in variables if '_lag' in var]
-    exo_states = [var for var in variables if var.startswith('RES_')]
-    others = [var for var in variables if 
-              '_lag' not in var and 
-              not var.startswith('RES_') and
-              '_p' not in var and
-              '_lead' not in var]
-    
+    # Identify different types of variables
+    pred_endo = [var for var in variables if var.endswith('_lag') and not var.startswith('RES_')]
+    exo_states = [var for var in variables if var.startswith('RES_') and var.endswith('_lag')]
+    others = [var for var in variables if var not in pred_endo and var not in exo_states]
+        
     # Return reordered list
     return pred_endo + exo_states + others
 
@@ -789,7 +921,10 @@ def plot_irfs(irfs, variables=None, shock_name=None, figsize=(12, 8)):
 # Example usage
 if __name__ == "__main__":
 
-    dynare_file = "/Volumes/TOSHIBA EXT/main_work/Work/Projects/gpm_ideas/Simplest/qpm_simpl1.dyn"
+    #dynare_file = "/Volumes/TOSHIBA EXT/main_work/Work/Projects/gpm_ideas/Simplest/qpm_simpl1.dyn"
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    dynare_file = os.path.join(script_dir, "qpm_simpl1.dyn")
     print(f"Processing DSGE model from {dynare_file}...")
     
    
