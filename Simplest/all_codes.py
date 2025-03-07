@@ -2,8 +2,8 @@
 # gpm/solver/klein.py
 import numpy as np
 import warnings
-from scipy.linalg import ordqz
-
+import sys
+import scipy.linalg as la
 # gpm/utils/irfs.py
 import numpy as np
 import matplotlib.pyplot as plt
@@ -289,6 +289,8 @@ def klein(a=None,b=None,c=None,phi=None,n_states=None,eigenvalue_warnings=True):
                         stab == 0: just enoughstable eigenvalues
         eig:        The generalized eigenvalues from the Schur decomposition
 
+        Copyright (c) 2021 Brian C Jenkins
+
     '''
 
     s,t,alpha,beta,q,z = la.ordqz(A=a,B=b,sort='ouc',output='complex')
@@ -390,79 +392,53 @@ def klein(a=None,b=None,c=None,phi=None,n_states=None,eigenvalue_warnings=True):
 
     return f,n,p,l,stab,eig
 
-def solve_klein(A, B, nk):
-    """
-    Solve the linear rational expectations model using Klein's method.
+
+
+# def reorder_variables_for_klein(variables):
+#     """
+#     Reorder variables to put predetermined variables first, followed by controls
     
-    Args:
-        A: The A matrix in AE[x(t+1)|t] = Bx(t)
-        B: The B matrix in AE[x(t+1)|t] = Bx(t)
-        nk: Number of predetermined variables
+#     Args:
+#         variables: List of variable names
         
-    Returns:
-        F: Decision rule such that u(t) = F*k(t)
-        P: Law of motion such that k(t+1) = P*k(t)
-    """
-    # QZ decomposition with reordering        
-    S, T, alpha, beta, Q, Z = ordqz(A, B, sort='ouc')
-
-    # Check if we have the correct number of stable eigenvalues
-    if abs(T[nk-1,nk-1]) > abs(S[nk-1,nk-1]) or abs(T[nk,nk]) < abs(S[nk,nk]):
-        warnings.warn('Wrong number of stable eigenvalues.')
-
-    # Calculate generalized eigenvalues
-    eigenvalues = []
-    for i in range(len(S)):
-        if abs(S[i, i]) < 1e-10:
-            eigenvalues.append(float('inf'))  # Infinity for zero on diagonal of S
-        else:
-            eigenvalues.append(T[i, i] / S[i, i])
-    print("Eigenvalues:", np.abs(eigenvalues))
-
-    # Extract submatrices
-    Z11 = Z[:nk, :nk]
-    Z21 = Z[nk:, :nk]
-    
-    # Check invertibility
-    if np.linalg.matrix_rank(Z11) < nk:
-        warnings.warn("Z11 is not invertible - unique stable solution doesn't exist")
-        return None, None
-    
-    # Compute the solution
-    S11 = S[:nk, :nk]
-    T11 = T[:nk, :nk]
-    
-    # Compute dynamics matrix
-    dyn = np.linalg.solve(S11, T11)
-    
-    # Compute policy and transition functions
-    F = Z21 @ np.linalg.inv(Z11)
-    P = Z11 @ dyn @ np.linalg.inv(Z11)
-    
-    # Convert to real if the model has real coefficients
-    F = np.real_if_close(F)
-    P = np.real_if_close(P)
-    
-    return F, P
+#     Returns:
+#         Reordered list of variables
+#     """
+#     # Identify different types of variables
+#     # Identify different types of variables
+#     pred_endo = [var for var in variables if var.endswith('_lag') and not var.startswith('RES_')]
+#     exo_states = [var for var in variables if var.startswith('RES_') and var.endswith('_lag')]
+#     others = [var for var in variables if var not in pred_endo and var not in exo_states]
+        
+#     # Return reordered list
+#     return pred_endo + exo_states + others
 
 def reorder_variables_for_klein(variables):
     """
-    Reorder variables to put predetermined variables first, followed by controls
+    Reorder variables for Klein's method:
+    1. All predetermined variables first (lagged endogenous and lagged exogenous)
+    2. All non-predetermined variables after
     
-    Args:
-        variables: List of variable names
-        
-    Returns:
-        Reordered list of variables
+    Exogenous shock processes (RES_* without _lag) should be handled separately
     """
-    # Identify different types of variables
-    # Identify different types of variables
-    pred_endo = [var for var in variables if var.endswith('_lag') and not var.startswith('RES_')]
-    exo_states = [var for var in variables if var.startswith('RES_') and var.endswith('_lag')]
-    others = [var for var in variables if var not in pred_endo and var not in exo_states]
-        
-    # Return reordered list
-    return pred_endo + exo_states + others
+    predetermined = []
+    non_predetermined = []
+    exogenous = []
+    
+    for var in variables:
+        # Lagged variables (both endogenous and exogenous) are predetermined
+        if '_lag' in var:
+            predetermined.append(var)
+        # Current period exogenous variables are handled separately
+        elif var.startswith('RES_') and '_lag' not in var:
+            exogenous.append(var)
+        # Current period endogenous variables are non-predetermined
+        else:
+            non_predetermined.append(var)
+    
+    # Return ordered list for the x vector (exclude exogenous)
+    return predetermined + non_predetermined, exogenous
+
 
 def derive_jacobians_economic_model(equations_dict, variables, shocks, parameters):
     """
@@ -600,51 +576,61 @@ def derive_jacobians_economic_model(equations_dict, variables, shocks, parameter
     return "\n".join(function_code)
 
 
-def build_state_space(F, P, num_k, num_exo, num_control_obs):
+def build_state_space(f, n, p, l, phi, num_k, num_exo, num_control_obs):
     """
-    Build state space representation matching the Fortran implementation
+    Build state space representation matching your approach where:
+    x(t) = (u(t), s(t), z(t)) = H*x(t-1) + G*e(t)
     
     Args:
-        F: Policy function matrix
-        P: State transition matrix
+        f: Policy function matrix (controls dependent on states)
+        n: Policy matrix for shocks (controls dependent on exogenous)
+        p: State transition matrix (states dependent on lagged states)
+        l: State impact of shocks matrix
+        phi: Autocorrelation matrix for exogenous processes
         num_k: Number of predetermined variables
         num_exo: Number of exogenous shock variables
         num_control_obs: Number of observable control variables
     """
-    # Define dimensions (as in KALMANFILTERMATRICES)
-    num_est = num_control_obs + num_k
-    n_k = num_control_obs  # Controls
-    k_ex = num_k - num_exo  # Predetermined endogenous
-    n_ex = num_est - num_exo  # All except exogenous shocks
+    # Define dimensions of the state vector [u(t), s(t), z(t)]
+    dim_u = num_control_obs
+    dim_s = num_k - num_exo
+    dim_z = num_exo
+    dim_total = dim_u + dim_s + dim_z
     
-    # Initialize transition and shock matrices
-    T = np.zeros((num_est, num_est))
-    R = np.zeros((num_est, num_exo))
+    # Initialize transition matrix H
+    H = np.zeros((dim_total, dim_total))
     
-    # Fill transition matrix T
-    # Controls impacted by states
-    T[:n_k, n_k:n_ex] = F[:, :k_ex]  # Impact of pred_endo on controls
-    T[:n_k, n_ex:] = np.dot(F[:, k_ex:], P[k_ex:, k_ex:])  # Impact of exo_states
+    # Block (1,2): F*P - impact of lagged states on controls
+    H[:dim_u, dim_u:dim_u+dim_s] = np.dot(f, p)
     
-    # State transitions
-    T[n_k:n_ex, n_k:n_ex] = P[:k_ex, :k_ex]  # Pred_endo dynamics
-    T[n_k:n_ex, n_ex:] = np.dot(P[:k_ex, k_ex:], P[k_ex:, k_ex:])  # Exo impact on pred_endo
-    T[n_ex:, n_ex:] = P[k_ex:, k_ex:]  # Exogenous shock processes
+    # Block (1,3): F*L + N*Phi - impact of lagged exogenous on controls
+    H[:dim_u, dim_u+dim_s:] = np.dot(f, l) + np.dot(n, phi)
     
-    # Fill shock impact matrix R
-    R[:n_k, :] = F[:, k_ex:]  # Impact on controls
-    R[n_k:n_ex, :] = P[:k_ex, k_ex:]  # Impact on pred_endo
+    # Block (2,2): P - state transition
+    H[dim_u:dim_u+dim_s, dim_u:dim_u+dim_s] = p
     
-    # Direct impact of innovations on exogenous states
+    # Block (2,3): L - impact of exogenous on states
+    H[dim_u:dim_u+dim_s, dim_u+dim_s:] = l
+    
+    # Block (3,3): Phi - exogenous process autocorrelation
+    H[dim_u+dim_s:, dim_u+dim_s:] = phi
+    
+    # Initialize shock impact matrix G
+    G = np.zeros((dim_total, num_exo))
+    
+    # Block (1): N - direct impact of innovations on controls
+    G[:dim_u, :] = n
+    
+    # Block (3): Identity - direct impact of innovations on exogenous processes
     for j in range(num_exo):
-        R[n_ex+j, j] = 1.0
+        G[dim_u+dim_s+j, j] = 1.0
     
-    return T, R
+    return H, G
 
 def setup_model_and_state_space(parsed_model, jacobian_file="_jacobian_evaluator.py"):
     """
     Setup the model variables and create the state space representation
-    using a pre-generated Jacobian evaluator
+    using the klein function
     """
     # Extract components from parsed model
     variables = parsed_model['variables']
@@ -653,24 +639,18 @@ def setup_model_and_state_space(parsed_model, jacobian_file="_jacobian_evaluator
     param_values = parsed_model['param_values']
     shocks = parsed_model['shocks']
     
-    # In transformed variables, we need to identify:
-    # 1. Lagged endogenous variables (e.g., X_lag)
-    # 2. Exogenous state variables (e.g., RES_X)
-    
-    # More precise identification of variable types
+    # Classify variables
     pred_endo = []
     exo_states = []
     controls = []
-
-    # First identify the original variables from the transformed ones
+    
+    # Identify variable types
     original_vars = set()
     for var in variables:
         if '_lag' in var:
-            # Extract original variable name from X_lag to get X
             original_name = var.split('_lag')[0]
             original_vars.add(original_name)
         elif '_lead' in var or '_p' in var:
-            # Skip leads/future vars as they're not original variables
             continue
         else:
             original_vars.add(var)
@@ -682,7 +662,6 @@ def setup_model_and_state_space(parsed_model, jacobian_file="_jacobian_evaluator
         elif var.startswith('RES_'):
             exo_states.append(var)
         elif var in original_vars and not var.startswith('RES_'):
-            # Current-period endogenous variables
             controls.append(var)
     
     # Calculate key dimensions
@@ -714,30 +693,54 @@ def setup_model_and_state_space(parsed_model, jacobian_file="_jacobian_evaluator
     print(f"Jacobian B shape: {B.shape}")
     print(f"Jacobian C shape: {C.shape}")
     
+    # Construct phi matrix (autocorrelation of exogenous processes)
+    phi = np.zeros((num_exo, num_exo))
+    # Fill in phi matrix based on model AR coefficients
+    # This would depend on your specific model structure
+    # For example, diagonal elements might be rho_i parameters
+    for i in range(num_exo):
+        # Assuming AR(1) processes, extract AR coefficient (this is approximate)
+        # You may need to adjust this based on your model's structure
+        if i < len(shocks):
+            shock_name = shocks[i]
+            param_name = f"rho_{shock_name.replace('SHK_', '')}"
+            if param_name in param_values:
+                phi[i, i] = param_values[param_name]
+            else:
+                phi[i, i] = 0.0  # Default if not found
+    
     # Solve the model with Klein's method
     print("Solving model using Klein's method...")
-    F, P = solve_klein(A, B, num_k)
+    f, n, p, l, stab, eig = klein(a=A, b=B, c=C, phi=phi, n_states=num_k, eigenvalue_warnings=True)
     
-    if F is None or P is None:
-        print("Failed to find stable solution")
-        return None
+    if stab != 0:
+        print(f"Warning: Model stability indicator = {stab}")
+        if stab == 1:
+            print("Too many stable eigenvalues - model may have multiple equilibria")
+        elif stab == -1:
+            print("Too few stable eigenvalues - model may have no stable solution")
     
     # Check solution matrix dimensions
-    print(f"Solution F shape: {F.shape}")
-    print(f"Solution P shape: {P.shape}")
+    print(f"Solution f shape: {f.shape}")
+    print(f"Solution n shape: {n.shape}")
+    print(f"Solution p shape: {p.shape}")
+    print(f"Solution l shape: {l.shape}")
     
-    # Build state space with the correct specification
+    # Build state space with your approach
     print("Building state space representation...")
-    T, R = build_state_space(F, P, num_k, num_exo, num_control_obs)
+    H, G = build_state_space(f, n, p, l, phi, num_k, num_exo, num_control_obs)
     
-    print(f"State transition matrix T shape: {T.shape}")
-    print(f"Shock impact matrix R shape: {R.shape}")
+    print(f"State transition matrix H shape: {H.shape}")
+    print(f"Shock impact matrix G shape: {G.shape}")
     
     return {
-        'T': T,
-        'R': R,
-        'F': F,
-        'P': P,
+        'H': H,
+        'G': G,
+        'f': f,
+        'n': n,
+        'p': p,
+        'l': l,
+        'phi': phi,
         'A': A,
         'B': B,
         'C': C,
@@ -752,7 +755,9 @@ def setup_model_and_state_space(parsed_model, jacobian_file="_jacobian_evaluator
             'num_k': num_k,
             'num_exo': num_exo,
             'num_control_obs': num_control_obs
-        }
+        },
+        'eigenvalues': eig,
+        'stability': stab
     }
 
 
@@ -787,8 +792,8 @@ def process_model(dynare_file, jacobian_file="_jacobian_evaluator.py", shock_nam
             return None
     
     irfs = compute_irfs(
-        model_solution['T'],
-        model_solution['R'],
+        model_solution['H'],
+        model_solution['G'],
         model_solution['dimensions'],
         model_solution['variable_info'],
         shock_index=shock_index,
@@ -804,15 +809,13 @@ def process_model(dynare_file, jacobian_file="_jacobian_evaluator.py", shock_nam
         'irfs': irfs
     }
 
-
-
-def compute_irfs(T, R, dimensions, variable_info, shock_index=None, periods=40):
+def compute_irfs(H, G, dimensions, variable_info, shock_index=None, periods=40):
     """
-    Compute impulse response functions using the state space representation
+    Compute impulse response functions using the new state space representation
     
     Args:
-        T: State transition matrix
-        R: Shock impact matrix
+        H: State transition matrix [for u(t), s(t), z(t)]
+        G: Shock impact matrix
         dimensions: Dictionary with model dimensions
         variable_info: Dictionary with variable classifications
         shock_index: Index of shock to simulate (None = all shocks)
@@ -821,12 +824,14 @@ def compute_irfs(T, R, dimensions, variable_info, shock_index=None, periods=40):
     Returns:
         Dictionary of IRFs by shock and variable
     """
-    num_vars = T.shape[0]
-    num_shocks = R.shape[1]
+    num_controls = dimensions['num_control_obs']
+    num_pred_endo = dimensions['num_k'] - dimensions['num_exo']
+    num_exo = dimensions['num_exo']
+    num_total = num_controls + num_pred_endo + num_exo
     
     # Determine which shocks to compute IRFs for
     if shock_index is None:
-        shock_indices = range(num_shocks)
+        shock_indices = range(num_exo)
     else:
         shock_indices = [shock_index]
     
@@ -845,19 +850,32 @@ def compute_irfs(T, R, dimensions, variable_info, shock_index=None, periods=40):
         shock_name = f"SHK_{variable_info['shocks'][s_idx]}"
         irfs[shock_name] = {}
         
-        # Initialize impulse vector
-        x = np.zeros((num_vars, periods))
+        # Initialize impulse vector (all zeros)
+        x = np.zeros((num_total, periods))
         
-        # Initial impulse from shock
-        x[:, 0] = R[:, s_idx]
+        # Initial impulse from shock (just set the shock process)
+        epsilon = np.zeros(num_exo)
+        epsilon[s_idx] = 1.0
+        
+        # Apply initial shock impact
+        x[:, 0] = G @ epsilon
         
         # Propagate through system
         for t in range(1, periods):
-            x[:, t] = np.dot(T, x[:, t-1])
+            x[:, t] = H @ x[:, t-1]
         
         # Store IRFs by variable
-        for i, var in enumerate(all_vars):
+        # First store controls
+        for i, var in enumerate(variable_info['controls']):
             irfs[shock_name][var] = x[i, :]
+        
+        # Then store predetermined endogenous variables
+        for i, var in enumerate(variable_info['pred_endo']):
+            irfs[shock_name][var] = x[num_controls + i, :]
+        
+        # Finally store exogenous state variables
+        for i, var in enumerate(variable_info['exo_states']):
+            irfs[shock_name][var] = x[num_controls + num_pred_endo + i, :]
     
     return irfs
 
@@ -964,8 +982,8 @@ if __name__ == "__main__":
     jacobian_code = derive_jacobians_economic_model(equations, ordered_variables, shocks, parameters)
     
     # Save the analytical Jacobian in the computer
-    with open("_jacobian_evaluator.py", 'w') as f:
-        f.write(jacobian_code) 
+    with open("_jacobian_evaluator.py", 'w', encoding='utf-8') as f:
+        f.write(jacobian_code)
 
     # Step 4: Setup model and build state space
     # Process model using existing Jacobian evaluator
