@@ -10,7 +10,14 @@ var
     RR_GAP             // Real Interest Rate Gap     
     RES_L_GDP_GAP      // exogenous states
     RES_DLA_CPI
-    RES_RS
+    RES_RS    
+    DLA_CPI_l
+    RS_l
+    L_GDP_GAP_l
+    DLA_CPI_leads1
+    DLA_CPI_leads2
+    DLA_CPI_leads3
+    RES_RS_l
 ;
 
 varexo
@@ -31,26 +38,33 @@ parameters b1, b4, a1, a2, g1, g2, g3, rho_DLA_CPI, rho_L_GDP_GAP, rho_rs, rho_r
     g3 = 0.25;         // Output gap response
     rho_L_GDP_GAP  =0.1;
     rho_DLA_CPI   =0.2; 
-    rho_rs      =0.8;
-    rho_rs2      =0.0;
+    rho_rs      =0.3;
+    rho_rs2      =0.4;
 model;
     // Aggregate demand    
-    L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
-    
+    L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP_l - b4*RR_GAP(+1) + RES_L_GDP_GAP;
+    RES_L_GDP_GAP(+1) = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP;
 
     // Core Inflation
-    DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
-    
+    DLA_CPI = a1*DLA_CPI_l + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
+    RES_DLA_CPI(+1) = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI;
 
     // Monetary policy reaction function
-    RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + RES_RS;
-    
+    RS = g1*RS_l + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI_leads3 + g3*L_GDP_GAP) + RES_RS;
+    RES_RS(+1) = rho_rs*RES_RS + rho_rs2*RES_RS_l + SHK_RS;
 
     RR_GAP = RS - DLA_CPI(+1);
-    RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
-    RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
-    RES_RS = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
 
+    DLA_CPI_l = DLA_CPI(-1);
+    RS_l = RS(-1);
+    L_GDP_GAP_l = L_GDP_GAP(-1);
+
+    RES_RS_l = RES_RS(-1);    
+    RES_L_GDP_GAP_l = RES_L_GDP_GAP(-1);
+        
+    DLA_CPI_leads1 = DLA_CPI(+1);
+    DLA_CPI_leads2 = DLA_CPI_leads1(+1);
+    DLA_CPI_leads3 = DLA_CPI_leads2(+1);
 end;
 
 initval;
@@ -68,7 +82,7 @@ check;
 
 // Specify the shocks
 shocks;
-    var SHK_RS = 1;    
+    var SHK_L_GDP_GAP = 1;    
 end;
 
 stoch_simul(order=1, irf=40) L_GDP_GAP DLA_CPI RS;

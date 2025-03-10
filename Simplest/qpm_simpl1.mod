@@ -31,8 +31,8 @@ parameters b1, b4, a1, a2, g1, g2, g3, rho_DLA_CPI, rho_L_GDP_GAP, rho_rs, rho_r
     g3 = 0.25;         // Output gap response
     rho_L_GDP_GAP  =0.1;
     rho_DLA_CPI   =0.2; 
-    rho_rs      =0.8;
-    rho_rs2      =0.0;
+    rho_rs      =0.3;
+    rho_rs2      =0.4;
 model;
     // Aggregate demand    
     L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
@@ -68,7 +68,7 @@ check;
 
 // Specify the shocks
 shocks;
-    var SHK_RS = 1;    
+    var SHK_L_GDP_GAP = 1;    
 end;
 
 stoch_simul(order=1, irf=40) L_GDP_GAP DLA_CPI RS;

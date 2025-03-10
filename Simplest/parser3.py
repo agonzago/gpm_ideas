@@ -1,26 +1,4 @@
 #%%
-# gpm/solver/klein.py
-import numpy as np
-import warnings
-import sys
-import scipy.linalg as la
-# gpm/utils/irfs.py
-import numpy as np
-import matplotlib.pyplot as plt
-
-# gpm/model/jacobian.py
-import sympy as sy
-import numpy as np
-import re
-
-"""
-Simple Dynare Parser for Klein's Method
-"""
-
-import re
-import os
-
-#%%
 import re
 import numpy as np
 import os
@@ -143,20 +121,8 @@ class DynareParser:
         else:
             print("WARNING: No model section found!")
         
-        # Detect predefined exogenous variables
-        predefined_exo = []
-        for var in self.variables:
-            if var.startswith('RES_'):
-                predefined_exo.append(var)
-        
-        # Classify variables more precisely
-        # This helps identify truly endogenous variables vs. exogenous ones 
-        self.endogenous = [var for var in self.variables if var not in predefined_exo]
-        self.exogenous = predefined_exo
-        
-        print(f"Initial classification: {len(self.endogenous)} endogenous, {len(self.exogenous)} exogenous")
-        
-        # Classify equations
+        # Classify variables and equations
+        self.classify_variables()
         self.classify_equations()
         
         # Find max lead and lag in equations
@@ -365,6 +331,7 @@ class DynareParser:
                 print(f"Added lag transition equation {eq_num}: {lag_eq}")
                 eq_num += 1
         
+        # Add transition equations for leads - CORRECTED VERSION
         # Only add lead transition equations for variables with leads > 1
         for var, max_lead in var_max_lead.items():
             if max_lead > 1:  # Only create auxiliary variables and equations for leads > 1
@@ -383,11 +350,58 @@ class DynareParser:
                     eq_num += 1
         
         print(f"Transformed equation count: {len(self.transformed_equations)}")
-
+    
+    def prepare_exogenous_var(self):
+        """
+        Prepare exogenous processes in VAR form for JSON output and Phi matrix computation
+        """
+        print("Preparing exogenous variables...")
+        # Skip if no exogenous variables
+        if not self.exogenous:
+            print("No exogenous variables to prepare.")
+            return
+        
+        # Transform exogenous equations to use _lag notation
+        transformed_equations = {}
+        
+        for exo, eq_str in self.exogenous_equations.items():
+            # Replace lags with _lag notation
+            transformed_eq = eq_str
+            for lag in range(self.max_lag, 0, -1):
+                pattern = r'\b([A-Za-z_][A-Za-z0-9_]*)\(\-' + str(lag) + r'\)'
+                lag_suffix = str(lag) if lag > 1 else ""
+                transformed_eq = re.sub(pattern, r'\1_lag' + lag_suffix, transformed_eq)
+            
+            transformed_equations[exo] = transformed_eq
+            print(f"Transformed exogenous equation: {transformed_eq}")
+        
+        # Update exogenous equations
+        self.exogenous_equations = transformed_equations
+        
+        # Create default equations for any exogenous variables without one
+        for exo in self.exogenous:
+            if exo not in self.exogenous_equations:
+                # Try to match with a shock by name
+                shock_name = None
+                for shock in self.shocks:
+                    base_name = exo[4:] if exo.startswith('RES_') else exo
+                    if shock.endswith(base_name) or base_name in shock:
+                        shock_name = shock
+                        break
+                
+                if shock_name:
+                    self.exogenous_equations[exo] = f"{exo} = {shock_name}"
+                    print(f"Created default exogenous equation: {exo} = {shock_name}")
+                else:
+                    # If no matching shock found, use a generic equation
+                    self.exogenous_equations[exo] = f"{exo} = 0"
+                    print(f"Created zero exogenous equation: {exo} = 0")
+        
+        print(f"Prepared {len(self.exogenous_equations)} exogenous equations")
 
     def save_model_to_json(self, output_file):
         """
-        Save the parsed and transformed model to a JSON file with the correct Phi matrix
+        Save the parsed and transformed model to a JSON file
         
         Args:
             output_file (str): Path to the output JSON file
@@ -397,56 +411,27 @@ class DynareParser:
         """
         print(f"Saving model to JSON file: {output_file}")
         
-        # Classify variables into predetermined and non-predetermined
-        predetermined = []
-        non_predetermined = []
+        # Ensure exogenous equations are prepared
+        self.prepare_exogenous_var()
         
-        for var in self.transformed_variables:
-            if '_lag' in var:
-                predetermined.append(var)
-            else:
-                non_predetermined.append(var)
-            
         # Convert transformed equations from list of dicts to a single dict
         endogenous_eqs = {}
         for eq_dict in self.transformed_equations:
-            endogenous_eqs.update(eq_dict)
+            endogenous_eqs.update(eq_dict)  # Merge dictionaries
         
         # Create the model data structure
         model_data = {
-            # Basic model elements
-            "variables": {
-                "predetermined": predetermined,
-                "non_predetermined": non_predetermined,
-                "endogenous": self.transformed_variables,
-                "exogenous": self.exogenous,               
-                "shocks": self.shocks
-            },
-            
-            # Dimensions 
-            "dimensions": {
-                "n_predetermined": len(predetermined),
-                "n_non_predetermined": len(non_predetermined),
-                "n_endogenous": len(self.transformed_variables),
-                "n_exogenous": len(self.exogenous),                
-                "n_shocks": len(self.shocks),
-                "max_lead": self.max_lead,
-                "max_lag": self.max_lag
-            },
-            
-            # Parameters
-            "parameters": self.param_values,
-            
-            # Equations 
-            "equations": {
-                "endogenous": endogenous_eqs,
-                "exogenous": self.exogenous_equations
-            },
-            
-            # Add the key that's expected by generate_jacobian_evaluator
-            "endogenous_equations": endogenous_eqs
+            "endogenous_variables": self.transformed_variables,
+            "exogenous_variables": self.exogenous,
+            "parameters": self.parameters,
+            "parameter_values": self.param_values,
+            "shocks": self.shocks,
+            "original_equations": self.equations,
+            "endogenous_equations": endogenous_eqs,  # Dictionary of equations
+            "exogenous_equations": self.exogenous_equations,
+            "max_lead": self.max_lead,
+            "max_lag": self.max_lag
         }
-        
         
         # Save to file if output_file is provided
         if output_file:
@@ -456,6 +441,141 @@ class DynareParser:
         
         return model_data
     
+    def create_var_representation(self):
+        """
+        Create a proper VAR representation for the exogenous processes,
+        accounting for multiple lags
+        
+        Returns:
+            dict: Information about the VAR representation
+        """
+        print("Creating VAR representation for exogenous processes...")
+        
+        # Create expanded exogenous list including lags
+        expanded_exogenous = []
+        exo_lag_map = {}  # Maps from exo variable to its lags
+        
+        # First, add original exogenous variables
+        for exo in self.exogenous:
+            expanded_exogenous.append(exo)
+            exo_lag_map[exo] = [exo]
+        
+        # Then add all lags for each exogenous variable
+        for exo in self.exogenous:
+            for lag in range(1, self.max_lag + 1):
+                lag_suffix = str(lag) if lag > 1 else ""
+                lag_var = f"{exo}_lag{lag_suffix}"
+                expanded_exogenous.append(lag_var)
+                exo_lag_map[exo].append(lag_var)
+        
+        # Extract information about the structure of each exogenous process
+        var_structure = {}
+        
+        for exo, eq_str in self.exogenous_equations.items():
+            if "=" in eq_str:
+                lhs, rhs = eq_str.split("=", 1)
+                lhs = lhs.strip()
+                rhs = rhs.strip()
+                
+                # Initialize the structure
+                var_structure[exo] = {
+                    "equation": eq_str,
+                    "ar_coefficients": [],
+                    "shock": None,
+                    "constant": 0
+                }
+                
+                # Extract AR coefficients
+                for lag in range(1, self.max_lag + 1):
+                    lag_suffix = str(lag) if lag > 1 else ""
+                    lag_pattern = rf'\b{exo}_lag{lag_suffix}\b'
+                    
+                    # Look for coefficient of the form: a*exo_lag
+                    coef_pattern = rf'([0-9.]+)\s*\*\s*{exo}_lag{lag_suffix}\b'
+                    coef_match = re.search(coef_pattern, rhs)
+                    
+                    if coef_match:
+                        # We have a coefficient
+                        coefficient = float(coef_match.group(1))
+                        var_structure[exo]["ar_coefficients"].append(coefficient)
+                    elif re.search(lag_pattern, rhs):
+                        # The variable appears without explicit coefficient (implied 1)
+                        var_structure[exo]["ar_coefficients"].append(1.0)
+                    else:
+                        # No coefficient for this lag
+                        var_structure[exo]["ar_coefficients"].append(0.0)
+                
+                # Check for shock term
+                for shock in self.shocks:
+                    if re.search(rf'\b{shock}\b', rhs):
+                        var_structure[exo]["shock"] = shock
+                        break
+                
+                # Check for constant term
+                const_pattern = r'([+-]?\s*[0-9.]+)(?!\s*\*)'
+                const_match = re.search(const_pattern, rhs)
+                if const_match:
+                    try:
+                        var_structure[exo]["constant"] = float(const_match.group(1))
+                    except:
+                        # If we can't parse it, leave at default
+                        pass
+        
+        # Create the transition matrix representation
+        phi_matrix = np.zeros((len(expanded_exogenous), len(expanded_exogenous)))
+        shock_selection = np.zeros((len(expanded_exogenous), len(self.shocks)))
+        
+        # Map shocks to their indices
+        shock_indices = {shock: i for i, shock in enumerate(self.shocks)}
+        
+        # Fill in the Phi matrix row by row
+        row_idx = 0
+        for exo in self.exogenous:
+            # Fill row for main exogenous variable
+            if exo in var_structure:
+                # Add AR coefficients
+                for lag, coef in enumerate(var_structure[exo]["ar_coefficients"]):
+                    lag_suffix = str(lag+1) if lag+1 > 1 else ""
+                    lag_var = f"{exo}_lag{lag_suffix}"
+                    lag_col = expanded_exogenous.index(lag_var)
+                    phi_matrix[row_idx, lag_col] = coef
+                
+                # Add shock selection
+                if var_structure[exo]["shock"] is not None:
+                    shock_col = shock_indices[var_structure[exo]["shock"]]
+                    shock_selection[row_idx, shock_col] = 1.0
+            
+            row_idx += 1
+            
+            # Fill rows for lag variables
+            for lag in range(1, self.max_lag):
+                # Current lag
+                lag_suffix = str(lag) if lag > 1 else ""
+                lag_var = f"{exo}_lag{lag_suffix}"
+                
+                # Next lag 
+                next_lag_suffix = str(lag-1) if lag-1 > 1 else ""
+                next_lag_var = exo if lag-1 == 0 else f"{exo}_lag{next_lag_suffix}"
+                
+                # Add transition (identity): lag_var = next_lag_var
+                next_lag_col = expanded_exogenous.index(next_lag_var)
+                phi_matrix[row_idx, next_lag_col] = 1.0
+                
+                row_idx += 1
+        
+        self.expanded_exogenous = expanded_exogenous
+        self.phi_matrix = phi_matrix
+        self.shock_selection_matrix = shock_selection
+        self.exogenous_structure = var_structure
+        
+        var_info = {
+            "expanded_exogenous": expanded_exogenous,
+            "phi_matrix": phi_matrix.tolist(),
+            "shock_selection_matrix": shock_selection.tolist(),
+            "exogenous_structure": var_structure
+        }
+        
+        return var_info
 
     def generate_jacobian_evaluator(self, output_file=None):
         """
@@ -475,23 +595,41 @@ class DynareParser:
         exogenous = self.exogenous
         parameters = self.parameters
         
+        # First, identify the lags used for each exogenous variable
+        exo_lags = {}
+        for exo in exogenous:
+            exo_lags[exo] = []
+            # Check each exogenous equation for lags
+            if exo in self.exogenous_equations:
+                eq_str = self.exogenous_equations[exo]
+                for lag in range(1, self.max_lag + 1):
+                    lag_suffix = str(lag) if lag > 1 else ""
+                    lag_var = f"{exo}_lag{lag_suffix}"
+                    if lag_var in eq_str:
+                        exo_lags[exo].append(lag_var)
+        
+        # Create expanded exogenous list including lags
+        expanded_exogenous = exogenous.copy()
+        for exo in exogenous:
+            expanded_exogenous.extend(exo_lags[exo])
+        
+        print(f"Exogenous variables with lags: {expanded_exogenous}")
         
         # Create variables with "_p" suffix for t+1 variables
         variables_p = [var + "_p" for var in variables]
         
-        # Create symbolic variables for all model components
+        # Create symbolic variables
         var_symbols = {var: sy.symbols(var) for var in variables}
         var_p_symbols = {var_p: sy.symbols(var_p) for var_p in variables_p}
-        exo_symbols = {exo: sy.symbols(exo) for exo in exogenous}
+        exo_symbols = {exo: sy.symbols(exo) for exo in expanded_exogenous}
         param_symbols = {param: sy.symbols(param) for param in parameters}
         
         # Combine all symbols
-        all_symbols = {**var_symbols, **var_p_symbols, **exo_symbols,**param_symbols}
+        all_symbols = {**var_symbols, **var_p_symbols, **exo_symbols, **param_symbols}
         
-        # Get endogenous equations from the transformed equations
-        endogenous_eqs = {}
-        for eq_dict in self.transformed_equations:
-            endogenous_eqs.update(eq_dict)
+        # Get endogenous equations from the JSON representation
+        model_data = self.save_model_to_json(None)
+        endogenous_eqs = model_data["endogenous_equations"]
         
         # Parse endogenous equations into sympy expressions
         equations = []
@@ -526,19 +664,80 @@ class DynareParser:
         # Compute Jacobians for endogenous system
         X_symbols = [var_symbols[var] for var in variables]
         X_p_symbols = [var_p_symbols[var_p] for var_p in variables_p]
-        Z_symbols = [exo_symbols[exo] for exo in exogenous]  
+        Z_symbols = [exo_symbols[exo] for exo in exogenous]  # Only original exogenous
         
         # A = ∂F/∂X_p (Jacobian with respect to future variables)
         print("Computing A matrix...")
-        A_symbolic = -F.jacobian(X_p_symbols)
+        A_symbolic = F.jacobian(X_p_symbols)
         
         # B = -∂F/∂X (negative Jacobian with respect to current variables)
         print("Computing B matrix...")
-        B_symbolic = F.jacobian(X_symbols)
+        B_symbolic = -F.jacobian(X_symbols)
         
         # C = -∂F/∂Z (negative Jacobian with respect to exogenous processes)
         print("Computing C matrix...")
-        C_symbolic = F.jacobian(Z_symbols)
+        C_symbolic = -F.jacobian(Z_symbols)
+        
+        # Create exogenous VAR system - with proper handling of lags
+        print("Computing exogenous VAR system with proper lag structure...")
+        
+        # We need the full expanded Z vector that includes all lags
+        Z_expanded_symbols = [exo_symbols[exo] for exo in expanded_exogenous]
+        
+        # Create equations for the exogenous VAR system
+        exo_equations = []
+        
+        # Process original exogenous equations
+        for exo in exogenous:
+            if exo in self.exogenous_equations:
+                eq_str = self.exogenous_equations[exo]
+                if "=" in eq_str:
+                    lhs, rhs = eq_str.split("=", 1)
+                    lhs = lhs.strip()
+                    rhs = rhs.strip()
+                    
+                    # Convert to symbolic form
+                    eq_sym = rhs
+                    
+                    # Replace variables and parameters with symbols
+                    for name, symbol in all_symbols.items():
+                        pattern = r'\b' + re.escape(name) + r'\b'
+                        eq_sym = re.sub(pattern, str(symbol), eq_sym)
+                    
+                    try:
+                        # Parse the expression
+                        expr = sy.sympify(eq_sym) - exo_symbols[exo]
+                        exo_equations.append(expr)
+                    except Exception as e:
+                        print(f"Error parsing exogenous equation for {exo}: {eq_str}")
+                        print(f"Error: {str(e)}")
+                        # Use placeholder
+                        exo_equations.append(sy.sympify("0"))
+                else:
+                    # Add default equation if no equals sign
+                    exo_equations.append(exo_symbols[exo])
+            else:
+                # Add default equation if no equation defined
+                exo_equations.append(exo_symbols[exo])
+        
+        # Add transition equations for all lags
+        for exo in exogenous:
+            for i, lag_var in enumerate(exo_lags[exo]):
+                if i == 0:
+                    # First lag: exo_lag = exo
+                    eq = exo_symbols[lag_var] - exo_symbols[exo]
+                else:
+                    # Additional lags: exo_lagN = exo_lag(N-1)
+                    prev_lag = exo_lags[exo][i-1]
+                    eq = exo_symbols[lag_var] - exo_symbols[prev_lag]
+                
+                exo_equations.append(eq)
+        
+        # Create exogenous system as sympy Matrix
+        G = sy.Matrix(exo_equations)
+        
+        # Compute Phi matrix for VAR system
+        Phi_symbolic = -G.jacobian(Z_expanded_symbols)
         
         print("Generating output code...")
         
@@ -557,7 +756,8 @@ class DynareParser:
             "    Returns:",
             "        a: Matrix ∂F/∂X_p (Jacobian with respect to future variables)",
             "        b: Matrix -∂F/∂X (negative Jacobian with respect to current variables)",
-            "        c: Matrix -∂F/∂Z (negative Jacobian with respect to exogenous processes)",         
+            "        c: Matrix -∂F/∂Z (negative Jacobian with respect to exogenous processes)",
+            "        phi: Matrix for VAR representation of exogenous processes (includes lags)",
             "    \"\"\"",
             "    # Unpack parameters from theta"
         ]
@@ -572,7 +772,7 @@ class DynareParser:
             f"    a = np.zeros(({len(equations)}, {len(variables)}))",
             f"    b = np.zeros(({len(equations)}, {len(variables)}))",
             f"    c = np.zeros(({len(equations)}, {len(exogenous)}))",
-            f"    phi = np.zeros(({len(expanded_exogenous)}, {len(expanded_exogenous)}))"
+            f"    phi = np.zeros(({len(exo_equations)}, {len(expanded_exogenous)}))"
         ])
         
         # Add A matrix elements
@@ -615,10 +815,23 @@ class DynareParser:
                         expr = re.sub(pattern, param, expr)
                     function_code.append(f"    c[{i}, {j}] = {expr}")
         
+        # Add Phi matrix elements
+        function_code.append("")
+        function_code.append("    # Phi matrix elements (VAR representation with lags)")
+        function_code.append(f"    # Order of variables: {expanded_exogenous}")
+        for i in range(Phi_symbolic.rows):
+            for j in range(Phi_symbolic.cols):
+                if Phi_symbolic[i, j] != 0:
+                    expr = str(Phi_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    phi[{i}, {j}] = {expr}")
         
         # Return all matrices
         function_code.append("")
-        function_code.append("    return a, b, c")
+        function_code.append("    return a, b, c, phi")
         
         # Join all lines to form the complete function code
         complete_code = "\n".join(function_code)
@@ -631,446 +844,10 @@ class DynareParser:
         
         return complete_code
 
-def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
 
-    '''Solves linear dynamic models with the form of:
-    
-                a*Et[x(t+1)] = b*x(t)       
-                
-        [s(t); u(t)] where s(t) is a vector of predetermined (state) variables and u(t) is
-        a vector of nonpredetermined costate variables. z(t) is a vector of exogenous forcing variables with 
-        autocorrelation matrix phi. The solution to the model is a set of matrices f, n, p, l such that:
+import os
+import sys
 
-                u(t)   = f*s(t)
-                s(t+1) = p*s(t).
-
-        The solution algorithm is based on Klein (2000) and his solab.m Matlab program.
-
-    Args:
-        a:                      (Numpy ndarray) Coefficient matrix on future-dated variables
-        b:                      (Numpy ndarray) Coefficient matrix on current-dated variables
-        c:                      (Numpy ndarray) Coefficient matrix on exogenous forcing variables
-        n_states:               (int) Number of state variables
-        eigenvalue_warnings:    (bool) Whether to print warnings that there are too many or few eigenvalues. Default: True
-
-    Returns:
-        f:          (Numpy ndarray) Solution matrix coeffients on s(t) for u(t)
-        p:          (Numpy ndarray) Solution matrix coeffients on s(t) for s(t+1)
-        stab:       (int) Indicates solution stability and uniqueness
-                        stab == 1: too many stable eigenvalues
-                        stab == -1: too few stable eigenvalues
-                        stab == 0: just enoughstable eigenvalues
-        eig:        The generalized eigenvalues from the Schur decomposition
-
-
-    '''
-
-    s,t,alpha,beta,q,z = la.ordqz(A=a,B=b,sort='ouc',output='complex')
-
-    # print('type of s,',s.dtype)
-    # print('type of t,',t.dtype)
-
-    forcingVars = False
-    if len(np.shape(c))== 0:
-        nz = 0
-        phi = np.empty([0,0])
-    else:
-        forcingVars = True
-        nz = np.shape(c)[1]
-        
-
-    # Components of the z matrix
-    z11 = z[0:n_states,0:n_states]
-    z12 = z[0:n_states,n_states:]
-    z21 = z[n_states:,0:n_states]
-    z22 = z[n_states:,n_states:]
-
-    # number of nonpredetermined variables
-    n_costates = np.shape(a)[0] - n_states
-    
-    if n_states>0:
-        if np.linalg.matrix_rank(z11)<n_states:
-            sys.exit("Invertibility condition violated. Check model equations or parameter values.")
-
-    s11 = s[0:n_states,0:n_states];
-    if n_states>0:
-        z11i = la.inv(z11)
-        s11i = la.inv(s11)
-    else:
-        z11i = z11
-        s11i = s11
-
-    # Components of the s,t,and q matrices
-    s12 = s[0:n_states,n_states:]
-    s22 = s[n_states:,n_states:]
-    t11 = t[0:n_states,0:n_states]
-    t12 = t[0:n_states,n_states:]
-    t22 = t[n_states:,n_states:]
-    q1  = q[0:n_states,:]
-    q2  = q[n_states:,:]
-
-    # Verify that there are exactly n_states stable (inside the unit circle) eigenvalues:
-    stab = 0
-
-    if n_states>0:
-        if np.abs(t[n_states-1,n_states-1])>np.abs(s[n_states-1,n_states-1]):
-            if eigenvalue_warnings:
-                print('Warning: Too few stable eigenvalues. Check model equations or parameter values.')
-            stab = -1
-
-    if n_states<n_states+n_costates:
-        if np.abs(t[n_states,n_states])<np.abs(s[n_states,n_states]):
-            if eigenvalue_warnings:
-                print('Warning: Too many stable eigenvalues. Check model equations or parameter values.')
-            stab = 1
-
-    # Compute the generalized eigenvalues
-    tii = np.diag(t)
-    sii = np.diag(s)
-    eig = np.zeros(np.shape(tii),dtype=np.complex128)
-    # eig = np.zeros(np.shape(tii))
-
-    for k in range(len(tii)):
-        if np.abs(sii[k])>0:
-            # eig[k] = np.abs(tii[k])/np.abs(sii[k])
-            eig[k] = tii[k]/sii[k]    
-        else:
-            eig[k] = np.inf
-
-    # Solution matrix coefficients on the endogenous state
-    if n_states>0:
-            dyn = np.linalg.solve(s11,t11)
-    else:
-        dyn = np.array([])
-
-
-    f = z21.dot(z11i)
-    p = z11.dot(dyn).dot(z11i)
-
-    # # Solution matrix coefficients on the exogenous state
-    # if not forcingVars:
-    #     n = np.empty([n_costates,0])
-    #     l = np.empty([n_states,0])
-    # else:
-    #     mat1 = np.kron(np.transpose(phi),s22) - np.kron(np.identity(nz),t22)
-    #     mat1i = la.inv(mat1)
-    #     q2c = q2.dot(c)
-    #     vecq2c = q2c.flatten(1).T
-    #     vecm = mat1i.dot(vecq2c)
-    #     m = np.transpose(np.reshape(np.transpose(vecm),(nz,n_costates)))
-        
-    #     n = (z22 - z21.dot(z11i).dot(z12)).dot(m)
-    #     l = -z11.dot(s11i).dot(t11).dot(z11i).dot(z12).dot(m) + z11.dot(s11i).dot(t12.dot(m) - s12.dot(m).dot(phi)+q1.dot(c)) + z12.dot(m).dot(phi)
-
-    return f, p,stab,eig
-
-
-def reorder_variables_for_klein(variables):
-    """
-    Reorder variables for Klein's method:
-    1. All predetermined variables first (lagged endogenous)
-    2. All non-predetermined variables after
-    
-    Parameters:
-    -----------
-    variables : list
-        List of endogenous variables from the model
-    
-    Returns:
-    --------
-    list
-        Ordered list of variables with predetermined variables first
-    """
-    predetermined = []
-    non_predetermined = []
-    
-    for var in variables:
-        # Lagged variables are predetermined
-        if '_lag' in var:
-            predetermined.append(var)
-        else:
-            non_predetermined.append(var)
-    
-    # Return ordered list: predetermined followed by non-predetermined
-    return predetermined + non_predetermined
-
-
-def build_state_space(f, n, p, l, phi, num_k, num_exo, num_control_obs):
-    """
-    Build state space representation matching your approach where:
-    x(t) = (u(t), s(t), z(t)) = H*x(t-1) + G*e(t)
-    
-    Args:
-        f: Policy function matrix (controls dependent on states)
-        n: Policy matrix for shocks (controls dependent on exogenous)
-        p: State transition matrix (states dependent on lagged states)
-        l: State impact of shocks matrix
-        phi: Autocorrelation matrix for exogenous processes
-        num_k: Number of predetermined variables
-        num_exo: Number of exogenous shock variables
-        num_control_obs: Number of observable control variables
-    """
-    # Define dimensions of the state vector [u(t), s(t), z(t)]
-    dim_u = num_control_obs
-    dim_s = num_k - num_exo
-    dim_z = num_exo
-    dim_total = dim_u + dim_s + dim_z
-    
-    # Initialize transition matrix H
-    H = np.zeros((dim_total, dim_total))
-    
-    # Block (1,2): F*P - impact of lagged states on controls
-    H[:dim_u, dim_u:dim_u+dim_s] = np.dot(f, p)
-    
-    # Block (1,3): F*L + N*Phi - impact of lagged exogenous on controls
-    H[:dim_u, dim_u+dim_s:] = np.dot(f, l) + np.dot(n, phi)
-    
-    # Block (2,2): P - state transition
-    H[dim_u:dim_u+dim_s, dim_u:dim_u+dim_s] = p
-    
-    # Block (2,3): L - impact of exogenous on states
-    H[dim_u:dim_u+dim_s, dim_u+dim_s:] = l
-    
-    # Block (3,3): Phi - exogenous process autocorrelation
-    H[dim_u+dim_s:, dim_u+dim_s:] = phi
-    
-    # Initialize shock impact matrix G
-    G = np.zeros((dim_total, num_exo))
-    
-    # Block (1): N - direct impact of innovations on controls
-    G[:dim_u, :] = n
-    
-    # Block (3): Identity - direct impact of innovations on exogenous processes
-    for j in range(num_exo):
-        G[dim_u+dim_s+j, j] = 1.0
-    
-    return H, G
-
-def setup_model_and_state_space(parsed_model, jacobian_file="_jacobian_evaluator.py"):
-    """
-    Setup the model variables and create the state space representation
-    using the klein function with proper variable ordering
-    """
-    # Extract components from parsed model with corrected key names
-    variables_all = parsed_model['variables']['endogenous']  # Changed from 'endogenous_variables'
-    exogenous_vars = parsed_model['variables']['exogenous']  # Changed from 'exogenous_variables'
-    parameters = list(parsed_model['parameters'].keys())  # Changed from 'parameters'
-    param_values = parsed_model['parameters']  # This should contain the parameter values
-    shocks = parsed_model['variables']['shocks']  # Changed from direct 'shocks'
-    
-    # Classify variables into the correct groups
-    predetermined = parsed_model['variables']['predetermined']  # Use existing classification
-    non_predetermined = parsed_model['variables']['non_predetermined']  # Use existing classification
-    
-    # Combine predetermined and non-predetermined for full state vector
-    variables = predetermined + non_predetermined
-    
-    print(f"Predetermined variables: {len(predetermined)} - {predetermined}")
-    print(f"Non-predetermined variables: {len(non_predetermined)} - {non_predetermined}")
-    print(f"Exogenous processes: {len(exogenous_vars)} - {exogenous_vars}")
-    print(f"Shocks: {len(shocks)} - {shocks}")
-    
-    # Calculate dimensions
-    num_states = len(predetermined)
-    num_controls = len(non_predetermined)
-    num_exo = len(exogenous_vars)
-    
-    # Load the Jacobian evaluator from file
-    print(f"Loading Jacobian evaluator from {jacobian_file}")
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("jacobian_evaluator", jacobian_file)
-    jacobian_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(jacobian_module)
-    evaluate_jacobians = jacobian_module.evaluate_jacobians
-    
-    # Prepare parameters and evaluate Jacobians
-    print("Evaluating Jacobians...")
-    theta = [param_values[param] for param in parameters]
-    a, b, c, phi = evaluate_jacobians(theta)
-    
-    # Print matrices for debugging
-    print(f"Jacobian a shape: {a.shape}")
-    print(f"Jacobian b shape: {b.shape}")
-    print(f"Jacobian c shape: {c.shape}")
-    print(f"Phi matrix shape: {phi.shape}")
-    
-    print("Phi matrix:")
-    print(phi)
-    
-    # Solve the model with Klein's method
-    print("Solving model using Klein's method...")
-    f, n, p, l, stab, eig = klein(a=a, b=b, c=c, phi=phi, n_states=num_states, eigenvalue_warnings=True)
-    
-    if stab != 0:
-        print(f"Warning: Model stability indicator = {stab}")
-        if stab == 1:
-            print("Too many stable eigenvalues - model may have multiple equilibria")
-        elif stab == -1:
-            print("Too few stable eigenvalues - model may have no stable solution")
-    
-    # Print eigenvalues for debugging
-    print("Eigenvalues:")
-    for i, ev in enumerate(eig):
-        magnitude = abs(ev)
-        stability = "stable" if magnitude < 1 else "unstable"
-        print(f"  λ{i+1} = {ev} (magnitude: {magnitude:.4f}, {stability})")
-    
-    # Build state space representation
-    print("Building state space representation...")
-    H, G = build_state_space(f, n, p, l, phi, num_states, num_exo, num_controls)
-    
-    return {
-        'H': H,
-        'G': G,
-        'f': f,
-        'n': n,
-        'p': p,
-        'l': l,
-        'phi': phi,
-        'a': a,
-        'b': b,
-        'c': c,
-        'variable_info': {
-            'predetermined': predetermined,
-            'non_predetermined': non_predetermined,
-            'exogenous': exogenous_vars,
-            'shocks': shocks,
-            'all_variables': variables_all
-        },
-        'dimensions': {
-            'num_states': num_states,
-            'num_controls': num_controls,
-            'num_exo': num_exo,
-            'num_k': num_states
-        },
-        'eigenvalues': eig,
-        'stability': stab
-    }
-
-def compute_irfs(H, G, dimensions, variable_info, shock_index=None, periods=40):
-    """
-    Compute impulse response functions using the new state space representation
-    
-    Args:
-        H: State transition matrix [for u(t), s(t), z(t)]
-        G: Shock impact matrix
-        dimensions: Dictionary with model dimensions
-        variable_info: Dictionary with variable classifications
-        shock_index: Index of shock to simulate (None = all shocks)
-        periods: Number of periods for IRF
-    
-    Returns:
-        Dictionary of IRFs by shock and variable
-    """
-    num_controls = dimensions['num_control_obs']
-    num_pred_endo = dimensions['num_k'] - dimensions['num_exo']
-    num_exo = dimensions['num_exo']
-    num_total = num_controls + num_pred_endo + num_exo
-    
-    # Determine which shocks to compute IRFs for
-    if shock_index is None:
-        shock_indices = range(num_exo)
-    else:
-        shock_indices = [shock_index]
-    
-    # Create IRF container
-    irfs = {}
-    
-    # Get flat list of all variables
-    all_vars = (
-        variable_info['controls'] + 
-        variable_info['pred_endo'] + 
-        variable_info['exo_states']
-    )
-    
-    # For each shock
-    for s_idx in shock_indices:
-        shock_name = f"SHK_{variable_info['shocks'][s_idx]}"
-        irfs[shock_name] = {}
-        
-        # Initialize impulse vector (all zeros)
-        x = np.zeros((num_total, periods))
-        
-        # Initial impulse from shock (just set the shock process)
-        epsilon = np.zeros(num_exo)
-        epsilon[s_idx] = 1.0
-        
-        # Apply initial shock impact
-        x[:, 0] = G @ epsilon
-        
-        # Propagate through system
-        for t in range(1, periods):
-            x[:, t] = H @ x[:, t-1]
-        
-        # Store IRFs by variable
-        # First store controls
-        for i, var in enumerate(variable_info['controls']):
-            irfs[shock_name][var] = x[i, :]
-        
-        # Then store predetermined endogenous variables
-        for i, var in enumerate(variable_info['pred_endo']):
-            irfs[shock_name][var] = x[num_controls + i, :]
-        
-        # Finally store exogenous state variables
-        for i, var in enumerate(variable_info['exo_states']):
-            irfs[shock_name][var] = x[num_controls + num_pred_endo + i, :]
-    
-    return irfs
-
-def plot_irfs(irfs, variables=None, shock_name=None, figsize=(12, 8)):
-    """
-    Plot impulse response functions.
-    
-    Args:
-        irfs (dict): Dictionary of IRFs from compute_irfs
-        variables (list, optional): List of variables to plot. If None, plot all.
-        shock_name (str, optional): Name of the shock. If None, use the first shock.
-        figsize (tuple): Figure size.
-    """
-    if not irfs:
-        raise ValueError("No IRFs to plot")
-    
-    # If shock_name is None, use the first shock
-    if shock_name is None:
-        shock_name = next(iter(irfs.keys()))
-    
-    # Get shock IRFs
-    shock_irfs = irfs.get(shock_name)
-    if shock_irfs is None:
-        raise ValueError(f"Shock {shock_name} not found in IRFs")
-    
-    # If variables is None, plot all variables
-    if variables is None:
-        variables = list(shock_irfs.keys())
-    
-    # Number of variables to plot
-    n_vars = len(variables)
-    Jaco
-    n_cols = min(3, n_vars)
-    n_rows = (n_vars + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    if n_rows == 1 and n_cols == 1:
-        axes = np.array([axes])
-    axes = axes.flatten()
-    
-    # Plot each variable
-    for i, var in enumerate(variables):
-        if var in shock_irfs:
-            x = np.arange(len(shock_irfs[var]))
-            axes[i].plot(x, shock_irfs[var])
-            axes[i].set_title(var)
-            axes[i].grid(True)
-            axes[i].axhline(y=0, color='r', linestyle='-', alpha=0.3)
-    
-    # Turn off any unused subplots
-    for i in range(n_vars, len(axes)):
-        axes[i].set_visible(False)
-    
-    plt.suptitle(f"IRFs for {shock_name}")
-    plt.tight_layout()
-    
-    return fig
 
 # Example usage
 if __name__ == "__main__":
@@ -1089,9 +866,9 @@ if __name__ == "__main__":
     
     # Prepare exogenous processes in VAR form
     parser.prepare_exogenous_var()
-
+    
     # Save the model to JSON
-    output_prefix = os.path.join(script_dir, "qpm_model_parsed")
+    output_prefix = "qpm_model_parsed"
     json_file = f"{output_prefix}.json"
     model_data = parser.save_model_to_json(json_file)
     print(f"Parsed model saved to {json_file}")
@@ -1101,10 +878,11 @@ if __name__ == "__main__":
     parser.generate_jacobian_evaluator(jacobian_file)
     print(f"Jacobian evaluator saved to {jacobian_file}")
     
-    # Solve the model with Klein's method
-    solution = setup_model_and_state_space(model_data, jacobian_file)
-    
-    # Optionally, generate IRFs
-    # from compute_irfs import compute_irfs, plot_irfs
-    # irfs = compute_irfs(solution['H'], solution['G'], solution['dimensions'], solution['variable_info'])
-    # plot_irfs(irfs)
+    # Print summary of model components
+    print("\nModel Summary:")
+    print(f"- Endogenous variables: {len(model_data['endogenous_variables'])}")
+    print(f"- Exogenous variables: {len(model_data['exogenous_variables'])}")
+    print(f"- Parameters: {len(model_data['parameters'])}")
+    print(f"- Equations: {len(model_data['endogenous_equations'])}")
+    print(f"- Maximum lead: {model_data['max_lead']}")
+    print(f"- Maximum lag: {model_data['max_lag']}")
