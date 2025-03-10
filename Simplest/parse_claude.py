@@ -1008,92 +1008,113 @@ def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
 
     return f, p,stab,eig
 
-def build_state_space(f, p, c, n_states, n_equations):
+
+
+def build_fortran_state_space(F, P, C, n_states, n_controls, n_exogenous):
     """
-    Builds the state space representation of a linear dynamic model solved using Klein's method.
+    Builds the state space representation matching the Fortran code structure.
     
-    Starting from Klein's solution:
-        u(t)   = f*s(t)
-        s(t+1) = p*s(t) + c_sub*shocks
+    This function creates the state-space matrices that match the structure used in
+    the Fortran implementation (found in dsoltokalman.f90 and related files).
     
-    The state space representation is:
-        x(t) = A*x(t-1) + B*shocks(t)
+    Variable ordering in the state-space:
+    1. Control variables (non-predetermined)
+    2. Endogenous state variables (predetermined)
+    3. Exogenous state variables (like shocks with AR processes)
     
-    Where x(t) = [u(t), s(t)]' contains both control and state variables.
+    Matrix structures:
+    - T matrix (transition):
+      [0               F1              F2*P_exo] (controls)
+      [0               P_endo          P_endo_exo*P_exo] (endogenous states)
+      [0               0               P_exo] (exogenous states)
+    
+    - R matrix (shock impact):
+      [F2*P_exo] (controls affected through exogenous states)
+      [P_endo_exo] (endogenous states affected by exogenous states)
+      [I] (identity matrix for direct shock impacts)
+    
+    Where:
+    - F1: Impact of endogenous states on controls
+    - F2: Impact of exogenous states on controls
+    - P_endo: Transition of endogenous states
+    - P_exo: Autoregressive process of exogenous states
+    - P_endo_exo: Impact of exogenous states on endogenous states
     
     Args:
-        f:          (numpy.ndarray) Solution matrix coefficients on s(t) for u(t)
-        p:          (numpy.ndarray) Solution matrix coefficients on s(t) for s(t+1)
-        c:          (numpy.ndarray) Original shock impact matrix from linearized system
-        n_states:   (int) Number of state variables
-        n_equations: (int) Total number of equations in the original system
+        F:          (numpy.ndarray) Solution matrix from Klein (control-to-state mapping)
+        P:          (numpy.ndarray) Solution matrix from Klein (state transition)
+        C:          (numpy.ndarray) Shock impact matrix from the linearized system
+        n_states:   (int) Number of state variables (both endogenous and exogenous)
+        n_controls: (int) Number of control variables
+        n_exogenous: (int) Number of exogenous shock processes
         
     Returns:
-        A:          (numpy.ndarray) Transition matrix for state space
-        B:          (numpy.ndarray) Shock impact matrix for state space
+        T:          (numpy.ndarray) Transition matrix for state space matching Fortran
+        R:          (numpy.ndarray) Shock impact matrix for state space matching Fortran
     """
-    # Check dimensions
-    n_controls = f.shape[0]
-    n_total = n_controls + n_states
-    n_shocks = c.shape[1]
+    # Total size of the state vector
+    n_total = n_controls + n_states 
     
-    # Calculate f*p for control variables transition
-    fp = np.dot(f, p)
+    # In Fortran representation, we have to separate endogenous from exogenous states
+    n_endo_states = n_states - n_exogenous
     
-    # Extract the appropriate submatrix of C corresponding to state equations
-    # In the ordered system, state equations are the fisrt n_states equations
-    c_sub = c[:n_states, :]
+    # Initialize the state transition matrix T
+    T = np.zeros((n_total, n_total))
     
-    # Calculate impact on control variables through state relationship
-    fc_sub = np.dot(f, c_sub)
+    # 1. Initialize T matrix according to blocks in Fortran code
     
-    # Initialize state space matrices
-    A = np.zeros((n_total, n_total))
-    B = np.zeros((n_total, n_shocks))
+    # Upper middle block: controls depend on endogenous states through F
+    T[:n_controls, n_controls:n_controls+n_endo_states] = F[:, :n_endo_states]
     
-    # Fill transition matrix A = [[0, f*p], [0, p]]
-    # Order is [u_t, s_t] (controls first, then states)
-    A[:n_controls, n_controls:] = fp
-    A[n_controls:, n_controls:] = p
+    # Upper right block: controls depend on exogenous states 
+    T[:n_controls, n_controls+n_endo_states:] = np.dot(F[:, n_endo_states:], P[n_endo_states:, n_endo_states:])
     
-    # Fill shock impact matrix B = [[f*c_sub], [c_sub]]
-    B[:n_controls, :] = fc_sub
-    B[n_controls:, :] = c_sub
+    # Middle middle block: endogenous state transitions
+    T[n_controls:n_controls+n_endo_states, n_controls:n_controls+n_endo_states] = P[:n_endo_states, :n_endo_states]
     
-    return A, B
+    # Middle right block: endogenous states affected by exogenous states
+    T[n_controls:n_controls+n_endo_states, n_controls+n_endo_states:] = np.dot(
+        P[:n_endo_states, n_endo_states:], 
+        P[n_endo_states:, n_endo_states:]
+    )
+    
+    # Lower right block: exogenous state processes (AR processes)
+    T[n_controls+n_endo_states:, n_controls+n_endo_states:] = P[n_endo_states:, n_endo_states:]
+    
+    # 2. Now create the R matrix (shock impact)
+    R = np.zeros((n_total, n_exogenous))
+    
+    # Upper part: controls are affected by shocks through F
+    R[:n_controls, :] = np.dot(F[:, n_endo_states:], P[n_endo_states:, n_endo_states:])
+    
+    # Middle part: endogenous states affected by shocks 
+    R[n_controls:n_controls+n_endo_states, :] = P[:n_endo_states, n_endo_states:]
+    
+    # Lower part: unit shock impacts on exogenous processes - optimized
+    exo_indices = np.arange(n_exogenous)
+    R[n_controls+n_endo_states+exo_indices, exo_indices] = 1.0
+        
+    return T, R
 
-
-
-def get_variable_order(parser):
-    """Get variable order matching state space construction"""
-    # From Context 3's state space construction:
-    # Order is [control_variables, state_variables]
-    return  parser.state_variables + parser.control_variables
-
-def impulse_response(A, B, shock_idx, periods, scale=1.0):
+def impulse_response_fortran(T, R, shock_idx, periods, scale=1.0, parser=None):
     """
-    Computes impulse response functions for a specified shock.
+    Computes impulse response functions for a specified shock using the Fortran-aligned state space.
     
     Args:
-        A:          (numpy.ndarray) Transition matrix
-        B:          (numpy.ndarray) Shock impact matrix
+        T:          (numpy.ndarray) Transition matrix (Fortran aligned)
+        R:          (numpy.ndarray) Shock impact matrix (Fortran aligned)
         shock_idx:  (int) Index of shock to analyze
         periods:    (int) Number of periods for IRF
         scale:      (float) Scale factor for the shock
+        parser:     (DynareParser) Parser instance to get variable ordering
         
     Returns:
-        irf:        (numpy.ndarray) Impulse responses (periods x n_variables)
+        irf:        (pandas.DataFrame) Impulse responses with variable names
     """
-
-    # Get the order of the variables in the steady state
-    ordered_vars = get_variable_order(parser)
+    import pandas as pd
     
-    # # Validate IRF dimensions match variable count
-    # if irfs.shape[0] != len(ordered_vars):
-    #     raise ValueError(f"IRF matrix has {irfs.shape[0]} variables but parser has {len(ordered_vars)}")
-    
-    n_variables = A.shape[0]
-    n_shocks = B.shape[1]
+    n_variables = T.shape[0]
+    n_shocks = R.shape[1]
     
     # Check shock index
     if shock_idx >= n_shocks:
@@ -1110,20 +1131,42 @@ def impulse_response(A, B, shock_idx, periods, scale=1.0):
     # Initialize with zeros
     x0 = np.zeros(n_variables)
     
-    # Compute IRF
-    irf = simulate_state_space(A, B, x0, shocks, periods)
-    import pandas as pd
+    # Compute IRF using the simulation function
+    irf_values = simulate_state_space(T, R, x0, shocks, periods)
     
-    irf = pd.DataFrame(
-        data=irf[1:, :],  # Transpose to (periods x variables)
-        columns=ordered_vars,
-        index=pd.RangeIndex(stop=periods, name='Period')
-    )
+    # Get variable ordering from parser
+    if parser:
+        # Order should be: controls first, then endogenous states, then exogenous states
+        # This depends on how your parser identifies these variables
+        
+        # Separate exogenous states (often starting with RES_ or similar prefix)
+        exogenous_states = [var for var in parser.state_variables if var.startswith(("RES_"))]
+        endogenous_states = [var for var in parser.state_variables if not var.startswith(("RES_"))]
+        
+        # Combine in the order the state space expects
+        ordered_vars = parser.control_variables + endogenous_states + exogenous_states
+        
+        # Create DataFrame with variable names
+        irf = pd.DataFrame(
+            data=irf_values[1:, :],  # Skip the initial zeros
+            columns=ordered_vars,
+            index=pd.RangeIndex(stop=periods, name='Period')
+        )
+    else:
+        # If no parser provided, just use numerical indices
+        irf = pd.DataFrame(
+            data=irf_values[1:, :],
+            columns=[f"var_{i}" for i in range(n_variables)],
+            index=pd.RangeIndex(stop=periods, name='Period')
+        )
+    
     return irf
 
 
 
-import matplotlib.pyplot as plt
+
+
+
 
 def plot_variables(df, variables, figsize=(12, 8)):
     """
@@ -1250,7 +1293,10 @@ if __name__ == "__main__":
 
     
     n_states = len(parser.state_variables)
+    n_exogenous = len(parser.varexo_list)
     n_equations = len(parser.all_variables)
+    n_controls = n_equations - n_states
+    
     # Evaluate Jacobians
     a, b, c = evaluate_jacobians(param_values)
 
@@ -1263,17 +1309,24 @@ if __name__ == "__main__":
     print_model_details(parser)
     print("Done!")
 
-    T, R = build_state_space(f, p, c, n_states, n_equations)    
-    irfs = impulse_response(T, R,2, periods=40, scale=1.0)
+    # T, R = build_state_space(f, p, c, n_states, n_equations)    
+    # irfs = impulse_response(T, R,2, periods=40, scale=1.0)
 
-    variables_to_plot= [
-    "RR_GAP",
-    "RS",    
-    "DLA_CPI",
-    "L_GDP_GAP",   
-    "RES_RS",
-    "RES_LGDP_GAP",
-    "RES_DLA_CPI"
+    # Build state space using Fortran alignment
+    T, R = build_fortran_state_space(f, p, c, n_states, n_controls, n_exogenous)
+    
+    # Compute impulse responses
+    irfs = impulse_response_fortran(T, R, shock_idx=2, periods=40, scale=1.0, parser=parser)
+
+    # Plot IRFs
+    variables_to_plot = [
+        "RR_GAP",
+        "RS",    
+        "DLA_CPI",
+        "L_GDP_GAP",   
+        "RES_RS",
+        "RES_LGDP_GAP",
+        "RES_DLA_CPI"
     ]
     plot_variables(irfs, variables_to_plot)
 
