@@ -5,7 +5,10 @@ import os
 import numpy as np
 import scipy.linalg as la
 import sys
+import sympy as sy
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy.linalg import lu_factor, lu_solve, norm
 
 class DynareParser:
     def __init__(self, file_path):
@@ -90,8 +93,6 @@ class DynareParser:
             equations = [eq.strip() for eq in equations if eq.strip()]
             
             self.equations = equations
-
-
 
 
 
@@ -285,85 +286,7 @@ class DynareParser:
         return transformation_map, aux_equations, model_variables
 
 
-    # def apply_transformation(self):
-    #     """
-    #     Two-pass transformation of the model:
-    #     1. Analyze all variables and their time shifts
-    #     2. Create a comprehensive transformation plan
-    #     3. Apply transformations consistently across all equations
-    #     4. Update model variables and add auxiliary equations
-        
-    #     Returns:
-    #         Dictionary with transformed model information
-    #     """
-    #     # First pass: Analyze variables and their shifts
-    #     variable_shifts, all_variables = self.analyze_model_variables()
-        
-    #     # Create transformation plan based on the analysis
-    #     transformation_map, aux_equations, model_variables = self.create_transformation_plan(variable_shifts)
-        
-    #     # Apply transformations to all equations
-    #     transformed_equations = []
-    #     for i, equation in enumerate(self.equations):
-    #         # Remove comments and clean up
-    #         clean_eq = re.sub(r'//.*', '', equation).strip()
-    #         transformed_eq = clean_eq
-            
-    #         # Process each variable in the equation
-    #         for var_name in all_variables:
-    #             # Replace var(+1) with var_p
-    #             transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*\+1\s*\)', f'{var_name}_p', transformed_eq)
-                
-    #             # Replace var(-1) with var_lag
-    #             transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*-1\s*\)', f'{var_name}_lag', transformed_eq)
-                
-    #             # Replace var(+n) with var_leadn for n > 1
-    #             for j in range(2, 10):  # Assume no leads greater than +9
-    #                 transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*\+{j}\s*\)', f'{var_name}_lead{j}', transformed_eq)
-                
-    #             # Replace var(-n) with var_lagn for n > 1
-    #             for j in range(2, 10):  # Assume no lags greater than -9
-    #                 transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*-{j}\s*\)', f'{var_name}_lag{j}', transformed_eq)
-            
-    #         transformed_equations.append(transformed_eq)
-        
-    #     # Update class properties
-    #     self.transformed_equations = transformed_equations
-    #     self.auxiliary_equations = aux_equations
-        
-    #     # Remove _p variables and shock variables from main model variables
-    #     endogenous_vars = set([v for v in model_variables['all_variables'] 
-    #                         if not v.endswith('_p') and v not in self.varexo_list])
-        
-    #     # Properly classify state/control variables
-    #     self.state_variables = list(set(model_variables['state_variables']))
-        
-    #     # First, separate the state variables into endogenous and exogenous
-    #     self.exogenous_states = [var for var in self.state_variables if var.startswith("RES_") and var.endswith("_lag")]
-    #     self.endogenous_states = [var for var in self.state_variables if var not in self.exogenous_states]
 
-    #     # Reorder state variables with exogenous states last
-    #     self.state_variables = sorted(self.endogenous_states) + sorted(self.exogenous_states)
-
-    #     # Control variables are endogenous variables that are not state variables
-    #     self.control_variables = list(endogenous_vars - set(self.state_variables))
-        
-    #     # Remove shock variables from all_variables
-    #     self.all_variables = list(endogenous_vars)
-        
-    #     # Keep auxiliary variables as defined
-    #     self.auxiliary_variables = list(set(model_variables['aux_variables']))
-        
-    #     # Format equations for output
-    #     formatted_equations = self.format_transformed_equations(transformed_equations, aux_equations)
-        
-    #     return {
-    #         'equations': formatted_equations,
-    #         'state_variables': sorted(self.state_variables),
-    #         'control_variables': sorted(self.control_variables),
-    #         'auxiliary_variables': sorted(self.auxiliary_variables),
-    #         'all_variables': sorted(self.all_variables)
-    #     }
 
     def apply_transformation(self):
         """
@@ -671,8 +594,8 @@ class DynareParser:
         Returns:
             str: The generated Python code for the Jacobian evaluator
         """
-        import sympy as sy
-        import re
+        
+        
         
         print("Generating Jacobian evaluator...")
         
@@ -842,6 +765,732 @@ class DynareParser:
         
         return complete_code
 
+
+    def generate_doubling_jacobian_evaluator(self, output_file=None):
+        """
+        Generate Python code for the Jacobian matrices needed for the doubling algorithm.
+        
+        The model follows the structure:
+        0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t
+        
+        Args:
+            self: A DynareParser instance with parsed model
+            output_file (str, optional): Path to save the generated Python code
+                
+        Returns:
+            str: The generated Python code for the Jacobian evaluator
+        """
+        print("Generating Jacobian evaluator for doubling algorithm...")
+        
+        # Get model components from parser
+        variables = self.state_variables + self.control_variables
+        exogenous = self.varexo_list
+        parameters = list(self.parameters.keys())
+        
+        # Variables with "_p" suffix for t+1 variables
+        variables_p = [var + "_p" for var in variables]
+        
+        # Create symbolic variables for all model components
+        var_symbols = {var: sy.symbols(var) for var in variables}
+        var_p_symbols = {var_p: sy.symbols(var_p) for var_p in variables_p}
+        exo_symbols = {exo: sy.symbols(exo) for exo in exogenous}
+        param_symbols = {param: sy.symbols(param) for param in parameters}
+        
+        # Combine all symbols for equation parsing
+        all_symbols = {**var_symbols, **var_p_symbols, **exo_symbols, **param_symbols}
+        
+        # Get equations from the transformed model
+        formatted_equations = self.format_transformed_equations(
+            self.transformed_equations, 
+            self.auxiliary_equations
+        )
+        
+        # Parse endogenous equations into sympy expressions
+        equations = []
+        success_count = 0
+        error_count = 0
+        
+        for eq_dict in formatted_equations:
+            for eq_name, eq_str in eq_dict.items():
+                # Convert string to sympy expression
+                eq_expr = eq_str
+                for name, symbol in all_symbols.items():
+                    # Use regex to match whole words only
+                    pattern = r'\b' + re.escape(name) + r'\b'
+                    eq_expr = re.sub(pattern, str(symbol), eq_expr)
+                
+                # Try to parse the expression
+                try:
+                    expr = sy.sympify(eq_expr)
+                    equations.append(expr)
+                    success_count += 1
+                except Exception as e:
+                    print(f"Failed to parse equation {eq_name}: {eq_str}")
+                    print(f"Error: {str(e)}")
+                    # Try to recover by using a placeholder
+                    equations.append(sy.sympify("0"))
+                    error_count += 1
+        
+        print(f"Parsed {success_count} equations successfully, {error_count} with errors")
+        
+        # Create system as sympy Matrix
+        F = sy.Matrix(equations)
+        
+        # Get variable counts for matrix dimensions
+        n_states = len(self.state_variables)
+        n_vars = len(variables)
+        n_shocks = len(exogenous)
+        
+        # Extract symbols for different variable types
+        future_symbols = [var_p_symbols[var_p] for var_p in variables_p]
+        current_symbols = [var_symbols[var] for var in variables]
+        # State variables at t-1 (for past variables)
+        past_symbols = [var_symbols[var] for var in self.state_variables]
+        shock_symbols = [exo_symbols[exo] for exo in exogenous]
+        
+        # Compute Jacobians for the model structure:
+        # 0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t
+        print("Computing A matrix (coefficient on future variables)...")
+        A_symbolic = F.jacobian(future_symbols)
+        
+        print("Computing B matrix (coefficient on current variables)...")
+        B_symbolic = F.jacobian(current_symbols)
+        
+        print("Computing C matrix (coefficient on past state variables)...")
+        # Only state variables have t-1 values
+        C_symbolic = sy.zeros(n_vars, n_states)
+        for i in range(len(equations)):
+            for j, state_var in enumerate(self.state_variables):
+                lag_var = state_var + "_lag"
+                if lag_var in all_symbols:
+                    C_symbolic[i, j] = sy.diff(equations[i], all_symbols[lag_var])
+        
+        print("Computing D matrix (coefficient on shock variables)...")
+        D_symbolic = F.jacobian(shock_symbols)
+        
+        print("Generating output code...")
+        
+        # Generate code for the doubling algorithm Jacobian evaluation function
+        function_code = [
+            "import numpy as np",
+            "",
+            "def evaluate_doubling_jacobians(theta):",
+            "    \"\"\"",
+            "    Evaluates Jacobian matrices for the doubling algorithm",
+            "    ",
+            "    For the model structure: 0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t",
+            "    ",
+            "    Args:",
+            "        theta: List or array of parameter values in the order of:",
+            f"            {parameters}",
+            "        ",
+            "    Returns:",
+            "        A_plus: Matrix for future variables (coefficient on t+1 variables)",
+            "        A_zero: Matrix for current variables (coefficient on t variables)",
+            "        A_minus: Matrix for past variables (coefficient on t-1 variables)",
+            "        shock_impact: Matrix for shock impacts (n_vars x n_shocks)",
+            "        state_indices: Indices of state variables",
+            "        control_indices: Indices of control variables",
+            "    \"\"\"",
+            "    # Unpack parameters from theta"
+        ]
+        
+        # Add parameter unpacking
+        for i, param in enumerate(parameters):
+            function_code.append(f"    {param} = theta[{i}]")
+        
+        # Initialize matrices
+        function_code.extend([
+            "",
+            f"    n_vars = {n_vars}",
+            f"    n_states = {n_states}",
+            f"    n_shocks = {n_shocks}",
+            f"    A_plus = np.zeros((n_vars, n_vars))",
+            f"    A_zero = np.zeros((n_vars, n_vars))",
+            f"    A_minus = np.zeros((n_vars, n_states))",
+            f"    shock_impact = np.zeros((n_vars, n_shocks))"   
+        ])
+        
+        # Add A_plus matrix elements (future variables)
+        function_code.append("")
+        function_code.append("    # A_plus matrix elements (future variables)")
+        for i in range(A_symbolic.rows):
+            for j in range(A_symbolic.cols):
+                if A_symbolic[i, j] != 0:
+                    expr = str(A_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        # Replace symbol with parameter name
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    A_plus[{i}, {j}] = {expr}")
+        
+        # Add A_zero matrix elements (current variables)
+        function_code.append("")
+        function_code.append("    # A_zero matrix elements (current variables)")
+        for i in range(B_symbolic.rows):
+            for j in range(B_symbolic.cols):
+                if B_symbolic[i, j] != 0:
+                    expr = str(B_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    A_zero[{i}, {j}] = {expr}")
+        
+        # Add A_minus matrix elements (past variables)
+        function_code.append("")
+        function_code.append("    # A_minus matrix elements (past variables)")
+        for i in range(C_symbolic.rows):
+            for j in range(C_symbolic.cols):
+                if C_symbolic[i, j] != 0:
+                    expr = str(C_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    A_minus[{i}, {j}] = {expr}")
+        
+        # Add shock_impact matrix elements (shock terms)
+        function_code.append("")
+        function_code.append("    # shock_impact matrix elements (shock impacts)")
+        for i in range(D_symbolic.rows):
+            for j in range(D_symbolic.cols):
+                if D_symbolic[i, j] != 0:
+                    expr = str(D_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    shock_impact[{i}, {j}] = {expr}")
+        
+        # Add state and control indices
+        function_code.extend([
+            "",
+            "    # Indices of state and control variables",
+            f"    state_indices = {list(range(n_states))}",
+            f"    control_indices = {list(range(n_states, n_vars))}"
+        ])
+        
+        # Return matrices
+        function_code.append("")
+        function_code.append("    return A_plus, A_zero, A_minus, shock_impact, state_indices, control_indices")
+        
+        # Join all lines to form the complete function code
+        complete_code = "\n".join(function_code)
+        
+        # Save to file if specified
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(complete_code)
+            print(f"Doubling algorithm Jacobian evaluator saved to {output_file}")
+        
+        return complete_code
+
+import numpy as np
+from scipy.linalg import lu_factor, lu_solve, norm
+
+def solve_quadratic_matrix_equation_doubling(A, B, C, initial_guess=None, tol=1e-14, max_iter=100, verbose=False):
+    """
+    Solve the quadratic matrix equation A*X^2 + B*X + C = 0 using the structure-preserving doubling algorithm.
+    
+    This is a Python translation of the Julia function from quadratic_matrix_equation.jl.
+    
+    Args:
+        A: Matrix for future variables (coefficient on t+1 variables)
+        B: Matrix for current variables (coefficient on t variables)
+        C: Matrix for past variables (coefficient on t-1 variables)
+        initial_guess: Initial guess for the solution (optional)
+        tol: Tolerance for convergence
+        max_iter: Maximum number of iterations
+        verbose: Whether to print progress
+        
+    Returns:
+        X: Solution matrix
+        iter_count: Number of iterations performed
+        reached_tol: Final residual
+    """
+    # Check if initial guess is provided
+    guess_provided = True
+    if initial_guess is None or initial_guess.size == 0:
+        guess_provided = False
+        initial_guess = np.zeros_like(A)
+    
+    # Initialize matrices
+    E = C.copy()
+    F = A.copy()
+    
+    # Compute B̄ = B + A*initial_guess
+    B_bar = B.copy()
+    B_bar += A @ initial_guess
+    
+    # LU factorization of B̄
+    try:
+        B_lu, B_piv = lu_factor(B_bar)
+    except:
+        if verbose:
+            print("LU factorization of B_bar failed")
+        return A, 0, 1.0
+    
+    # Compute initial values E and F
+    E = lu_solve((B_lu, B_piv), C)
+    F = lu_solve((B_lu, B_piv), A)
+    
+    # Initial X and Y
+    X = -E - initial_guess
+    Y = -F
+    
+    # Preallocate temporary matrices
+    X_new = np.zeros_like(X)
+    Y_new = np.zeros_like(Y)
+    E_new = np.zeros_like(E)
+    F_new = np.zeros_like(F)
+    
+    temp1 = np.zeros_like(Y)
+    temp2 = np.zeros_like(Y)
+    temp3 = np.zeros_like(Y)
+    
+    n = X.shape[0]
+    II = np.eye(n)
+    
+    Xtol = 1.0
+    Ytol = 1.0
+    
+    solved = False
+    iter_count = max_iter
+    
+    # Main iteration loop
+    for i in range(1, max_iter + 1):
+        # Compute EI = I - Y*X
+        np.matmul(Y, X, out=temp1)
+        temp1 = II - temp1
+        
+        # Factorize EI
+        try:
+            EI_lu, EI_piv = lu_factor(temp1)
+        except:
+            if verbose:
+                print(f"LU factorization of EI failed at iteration {i}")
+            return A, i, 1.0
+        
+        # Compute E = E * EI^(-1) * E
+        temp3 = lu_solve((EI_lu, EI_piv), E)
+        np.matmul(E, temp3, out=E_new)
+        
+        # Compute FI = I - X*Y
+        np.matmul(X, Y, out=temp2)
+        temp2 = II - temp2
+        
+        # Factorize FI
+        try:
+            FI_lu, FI_piv = lu_factor(temp2)
+        except:
+            if verbose:
+                print(f"LU factorization of FI failed at iteration {i}")
+            return A, i, 1.0
+        
+        # Compute F = F * FI^(-1) * F
+        temp3 = lu_solve((FI_lu, FI_piv), F)
+        np.matmul(F, temp3, out=F_new)
+        
+        # Compute X_new = X + F * FI^(-1) * X * E
+        np.matmul(X, E, out=temp3)
+        temp3 = lu_solve((FI_lu, FI_piv), temp3)
+        np.matmul(F, temp3, out=X_new)
+        
+        if i > 5 or guess_provided:
+            Xtol = norm(X_new)
+        
+        X_new += X
+        
+        # Compute Y_new = Y + E * EI^(-1) * Y * F
+        np.matmul(Y, F, out=temp3)
+        temp3 = lu_solve((EI_lu, EI_piv), temp3)
+        np.matmul(E, temp3, out=Y_new)
+        
+        if i > 5 or guess_provided:
+            Ytol = norm(Y_new)
+        
+        Y_new += Y
+        
+        # Check for convergence
+        if Xtol < tol:
+            solved = True
+            iter_count = i
+            break
+        
+        # Update values for next iteration
+        X[:] = X_new
+        Y[:] = Y_new
+        E[:] = E_new
+        F[:] = F_new
+    
+    # Compute the final X
+    X_new += initial_guess
+    X = X_new
+    
+    # Compute the residual
+    AXX = A @ X @ X
+    AXXnorm = norm(AXX)
+    AXX += B @ X
+    AXX += C
+    
+    reached_tol = norm(AXX) / (AXXnorm + 1e-20)
+    
+    if verbose:
+        print(f"Doubling algorithm finished in {iter_count} iterations with tolerance {reached_tol}")
+    
+    return X, iter_count, reached_tol
+
+def solve_quadratic_matrix_equation(A, B, C, T, initial_guess=None, 
+                                   quadratic_matrix_equation_algorithm="doubling",
+                                   tol=1e-14, acceptance_tol=1e-8, verbose=False):
+    """
+    Wrapper function for solving the quadratic matrix equation, similar to the Julia implementation.
+    
+    Args:
+        A: Matrix for future variables 
+        B: Matrix for current variables
+        C: Matrix for past variables
+        T: Timing structure (from parser)
+        initial_guess: Initial guess for the solution (optional)
+        quadratic_matrix_equation_algorithm: Algorithm to use (only 'doubling' is fully implemented)
+        tol: Tolerance for convergence
+        acceptance_tol: Acceptance tolerance for convergence
+        verbose: Whether to print progress
+        
+    Returns:
+        sol: Solution matrix
+        converged: Whether the solution converged
+    """
+    # Check if initial guess is valid
+    if initial_guess is not None and initial_guess.size > 0:
+        X = initial_guess
+        
+        # Check if initial guess is already a solution
+        AXX = A @ X @ X
+        AXXnorm = norm(AXX)
+        AXX += B @ X
+        AXX += C
+        
+        reached_tol = norm(AXX) / (AXXnorm + 1e-20)
+        
+        if reached_tol < (acceptance_tol * len(initial_guess) / 1e6):
+            if verbose:
+                print(f"Quadratic matrix equation solver: previous solution has tolerance {reached_tol}")
+            return initial_guess, True
+    
+    # Solve using doubling algorithm
+    sol, iterations, reached_tol = solve_quadratic_matrix_equation_doubling(
+        A, B, C, 
+        initial_guess=initial_guess, 
+        tol=tol, 
+        max_iter=100, 
+        verbose=verbose
+    )
+    
+    if verbose:
+        print(f"Quadratic matrix equation solver: doubling - converged: {reached_tol < acceptance_tol} in {iterations} iterations to tolerance: {reached_tol}")
+    
+    return sol, reached_tol < acceptance_tol
+
+def build_state_space_from_solution_doubling(F, P, shock_impact, state_indices, control_indices):
+    """
+    Convert the solution matrices F and P to state space form.
+    
+    Args:
+        F: Control-to-state mapping from solution
+        P: State transition matrix from solution
+        shock_impact: Shock impact matrix
+        state_indices: Indices of state variables
+        control_indices: Indices of control variables
+        
+    Returns:
+        A: State transition matrix
+        B: Shock impact matrix
+    """
+    n_states = len(state_indices)
+    n_controls = len(control_indices)
+    n_shocks = shock_impact.shape[1]
+    n_variables = n_states + n_controls
+    
+    # Create state space matrices
+    A = np.zeros((n_variables, n_variables))
+    B = np.zeros((n_variables, n_shocks))
+    
+    # Fill state transition matrix
+    # Controls depend on states
+    A[:n_controls, n_controls:] = F
+    
+    # States transition according to P
+    A[n_controls:, n_controls:] = P
+    
+    # Shock impact matrix
+    # Controls directly affected by shocks
+    B[:n_controls, :] = shock_impact[:n_controls, :]
+    
+    # States affected by shocks
+    B[n_controls:, :] = shock_impact[n_controls:, :]
+    
+    return A, B
+
+def impulse_response_doubling(A, B, periods=40, shock_idx=0, shock_size=1.0):
+    """
+    Compute impulse response function for a given shock.
+    
+    Args:
+        A: State transition matrix
+        B: Shock impact matrix
+        periods: Number of periods to simulate
+        shock_idx: Index of the shock
+        shock_size: Size of the shock
+        
+    Returns:
+        irf: Impulse response matrix (periods x variables)
+    """
+    n_variables = A.shape[0]
+    
+    # Initialize impulse response matrix
+    irf = np.zeros((periods, n_variables))
+    
+    # Initial shock
+    irf[0, :] = B[:, shock_idx] * shock_size
+    
+    # Propagate through the state space
+    for t in range(1, periods):
+        irf[t, :] = A @ irf[t-1, :]
+    
+    return irf
+
+def solve_dsge_klein_representation(A_plus, A_zero, A_minus, 
+                                    state_indices, control_indices,
+                                    initial_guess=None, tol=1e-14, max_iter=100, verbose=False):
+    """
+    Solves a DSGE model using the doubling algorithm and returns the Klein representation matrices.
+    
+    Parameters:
+    -----------
+    A_plus : ndarray
+        Jacobian with respect to future variables (t+1)
+    A_zero : ndarray
+        Jacobian with respect to current variables (t)
+    A_minus : ndarray
+        Jacobian with respect to past variables (t-1)
+    state_indices : list
+        Indices of predetermined state variables in the model
+    control_indices : list
+        Indices of control variables in the model
+    initial_guess : ndarray, optional
+        Initial guess for X
+    tol : float, optional
+        Tolerance for convergence
+    max_iter : int, optional
+        Maximum number of iterations
+    verbose : bool, optional
+        Whether to print progress
+    
+    Returns:
+    --------
+    F : ndarray
+        Policy function matrix (control variables as function of state variables)
+    P : ndarray
+        State transition matrix (evolution of state variables)
+    converged : bool
+        Whether the solution converged
+    X : ndarray
+        The original solution to the quadratic matrix equation
+    """
+    # First solve the quadratic matrix equation using the doubling algorithm
+    X, iterations, residual = solve_quadratic_matrix_equation_doubling(
+        A_plus, A_zero, A_minus, initial_guess, tol, max_iter, verbose
+    )
+    
+    if residual > tol:
+        if verbose:
+            print(f"Solution did not converge. Residual: {residual}")
+        return None, None, False, X
+    
+    # Construct the full transition matrix
+    n_vars = A_zero.shape[0]
+    full_transition = np.zeros((n_vars, n_vars))
+    
+    # The structure depends on how the model is arranged, but generally:
+    # 1. For predetermined variables (states), we use the law of motion from the model
+    # 2. For control variables, we use the policy function X
+    
+    # Extract state-to-state transition (P matrix)
+    n_states = len(state_indices)
+    P = np.zeros((n_states, n_states))
+    
+    # Assuming X gives the full set of relationships
+    # We need to extract the parts relevant to state transitions
+    for i, row_idx in enumerate(state_indices):
+        for j, col_idx in enumerate(state_indices):
+            # This assumes X contains the full transition structure
+            # The exact indexing depends on the structure of X
+            P[i, j] = X[row_idx, col_idx]
+    
+    # Extract control-to-state relationships (F matrix)
+    n_controls = len(control_indices)
+    F = np.zeros((n_controls, n_states))
+    
+    for i, row_idx in enumerate(control_indices):
+        for j, col_idx in enumerate(state_indices):
+            F[i, j] = X[row_idx, col_idx]
+    
+    return F, P, True, X
+
+def solve_quadratic_matrix_equation_doubling(A, B, C, initial_guess=None, tol=1e-14, max_iter=100, verbose=False):
+    """
+    Solve the quadratic matrix equation A*X^2 + B*X + C = 0 using the structure-preserving doubling algorithm.
+    
+    Parameters:
+    -----------
+    A : ndarray
+        Coefficient matrix for X^2 term
+    B : ndarray
+        Coefficient matrix for X term
+    C : ndarray
+        Constant term
+    initial_guess : ndarray, optional
+        Initial guess for X
+    tol : float, optional
+        Tolerance for convergence
+    max_iter : int, optional
+        Maximum number of iterations
+    verbose : bool, optional
+        Whether to print progress
+    
+    Returns:
+    --------
+    X : ndarray
+        Solution to the quadratic matrix equation
+    iter_count : int
+        Number of iterations performed
+    reached_tol : float
+        Final error tolerance reached
+    """
+    guess_provided = True
+    
+    if initial_guess is None or initial_guess.size == 0:
+        guess_provided = False
+        initial_guess = np.zeros_like(A)
+    
+    # Initialize matrices
+    E = C.copy()
+    F = A.copy()
+    
+    # Compute B̄ = B + A*initial_guess
+    B_bar = B.copy()
+    B_bar += A @ initial_guess
+    
+    # LU factorization of B̄
+    try:
+        B_lu, B_piv = lu_factor(B_bar)
+    except:
+        return A, 0, 1.0
+    
+    # Compute initial values
+    E = lu_solve((B_lu, B_piv), C)
+    F = lu_solve((B_lu, B_piv), A)
+    
+    X = -E - initial_guess
+    Y = -F
+    
+    # Preallocate temporary matrices
+    X_new = np.zeros_like(X)
+    Y_new = np.zeros_like(Y)
+    E_new = np.zeros_like(E)
+    F_new = np.zeros_like(F)
+    
+    temp1 = np.zeros_like(Y)
+    temp2 = np.zeros_like(Y)
+    temp3 = np.zeros_like(Y)
+    
+    n = X.shape[0]
+    II = np.eye(n)
+    
+    Xtol = 1.0
+    Ytol = 1.0
+    
+    solved = False
+    iter_count = max_iter
+    
+    # Main iteration loop
+    for i in range(1, max_iter + 1):
+        # Compute EI = I - Y*X
+        np.matmul(Y, X, out=temp1)
+        temp1 = II - temp1
+        
+        # Factorize EI
+        try:
+            EI_lu, EI_piv = lu_factor(temp1)
+        except:
+            return A, i, 1.0
+        
+        # Compute E = E * EI^(-1) * E
+        temp3 = lu_solve((EI_lu, EI_piv), E)
+        np.matmul(E, temp3, out=E_new)
+        
+        # Compute FI = I - X*Y
+        np.matmul(X, Y, out=temp2)
+        temp2 = II - temp2
+        
+        # Factorize FI
+        try:
+            FI_lu, FI_piv = lu_factor(temp2)
+        except:
+            return A, i, 1.0
+        
+        # Compute F = F * FI^(-1) * F
+        temp3 = lu_solve((FI_lu, FI_piv), F)
+        np.matmul(F, temp3, out=F_new)
+        
+        # Compute X_new = X + F * FI^(-1) * X * E
+        np.matmul(X, E, out=temp3)
+        temp3 = lu_solve((FI_lu, FI_piv), temp3)
+        np.matmul(F, temp3, out=X_new)
+        
+        if i > 5 or guess_provided:
+            Xtol = norm(X_new)
+        
+        X_new += X
+        
+        # Compute Y_new = Y + E * EI^(-1) * Y * F
+        np.matmul(Y, F, out=temp3)
+        temp3 = lu_solve((EI_lu, EI_piv), temp3)
+        np.matmul(E, temp3, out=Y_new)
+        
+        if i > 5 or guess_provided:
+            Ytol = norm(Y_new)
+        
+        Y_new += Y
+        
+        # Check for convergence
+        if Xtol < tol:
+            solved = True
+            iter_count = i
+            break
+        
+        # Update values for next iteration
+        X[:] = X_new
+        Y[:] = Y_new
+        E[:] = E_new
+        F[:] = F_new
+    
+    # Compute the final X
+    X_new += initial_guess
+    X = X_new
+    
+    # Compute the residual
+    AXX = A @ X @ X
+    AXXnorm = norm(AXX)
+    AXX += B @ X
+    AXX += C
+    
+    reached_tol = norm(AXX) / AXXnorm
+    
+    return X, iter_count, reached_tol
 
 def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
 
@@ -1275,3 +1924,27 @@ if __name__ == "__main__":
     plot_variables(irfs, variables_to_plot)
 
     
+    parser.generate_doubling_jacobian_evaluator("doubling_jacobian_evaluator.py")
+
+    # Get Jacobians
+#A_plus, A_zero, A_minus, shock_impact, state_indices, control_indices = evaluate_doubling_jacobians(parameters)
+
+# # Solve the quadratic matrix equation
+# solution_matrix, converged = solve_quadratic_matrix_equation(
+#     A_plus, A_zero, A_minus, 
+#     T=timings_object,  # You'll need to pass your timing structure
+#     initial_guess=None,
+#     verbose=True
+# )
+
+# # If needed, build state space form
+# A, B = build_state_space_from_solution(
+#     F=solution_matrix[:n_controls, :n_states],
+#     P=solution_matrix[n_controls:, :n_states],
+#     shock_impact=shock_impact,
+#     state_indices=state_indices,
+#     control_indices=control_indices
+# )
+
+# # Compute impulse responses
+# irf = impulse_response(A, B, periods=40, shock_idx=0)
