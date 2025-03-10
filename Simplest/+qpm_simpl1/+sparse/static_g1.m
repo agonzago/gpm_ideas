@@ -4,7 +4,7 @@ if nargin < 8
     T = NaN(0, 1);
 end
 [T_order, T] = qpm_simpl1.sparse.static_g1_tt(y, x, params, T_order, T);
-g1_v = NaN(22, 1);
+g1_v = NaN(19, 1);
 g1_v(1)=(-params(4));
 g1_v(2)=(-((1-params(5))*params(7)));
 g1_v(3)=(-(1-params(5)));
@@ -19,17 +19,14 @@ g1_v(11)=1-params(9);
 g1_v(12)=(-1);
 g1_v(13)=1-params(8);
 g1_v(14)=(-1);
-g1_v(15)=1-params(10);
-g1_v(16)=(-1);
-g1_v(17)=1;
-g1_v(18)=(-1);
-g1_v(19)=(-((1-params(5))*params(6)));
-g1_v(20)=1;
-g1_v(21)=(-params(11));
-g1_v(22)=1;
+g1_v(15)=1-(params(10)+params(11));
+g1_v(16)=1;
+g1_v(17)=(-1);
+g1_v(18)=(-((1-params(5))*params(6)));
+g1_v(19)=1;
 if ~isoctave && matlab_ver_less_than('9.8')
     sparse_rowval = double(sparse_rowval);
     sparse_colval = double(sparse_colval);
 end
-g1 = sparse(sparse_rowval, sparse_colval, g1_v, 10, 10);
+g1 = sparse(sparse_rowval, sparse_colval, g1_v, 9, 9);
 end

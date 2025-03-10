@@ -18,7 +18,7 @@ function g1 = static_g1(T, y, x, params, T_flag)
 if T_flag
     T = qpm_simpl1.static_g1_tt(T, y, x, params);
 end
-g1 = zeros(10, 10);
+g1 = zeros(9, 9);
 g1(1,4)=params(2);
 g1(1,5)=(-1);
 g1(2,1)=(-params(4));
@@ -33,13 +33,10 @@ g1(4,3)=(-1);
 g1(4,4)=1;
 g1(5,5)=1-params(9);
 g1(6,6)=1-params(8);
-g1(7,7)=1-params(10);
-g1(7,10)=(-params(11));
+g1(7,7)=1-(params(10)+params(11));
 g1(8,2)=(-1);
 g1(8,8)=1;
 g1(9,8)=(-1);
 g1(9,9)=1;
-g1(10,7)=(-1);
-g1(10,10)=1;
 
 end

@@ -22,16 +22,15 @@ function residual = dynamic_resid(T, y, x, params, steady_state, it_, T_flag)
 if T_flag
     T = qpm_simpl1.dynamic_resid_tt(T, y, x, params, steady_state, it_);
 end
-residual = zeros(10, 1);
-    residual(1) = (y(8)) - ((1-params(1))*y(18)+params(1)*y(1)-params(2)*y(20)+y(12));
-    residual(2) = (y(9)) - (params(3)*y(2)+(1-params(3))*y(19)+y(8)*params(4)+y(13));
-    residual(3) = (y(10)) - (y(14)+params(5)*y(3)+(1-params(5))*(y(8)*params(7)+y(19)+params(6)*y(22)));
-    residual(4) = (y(11)) - (y(10)-y(19));
-    residual(5) = (y(12)) - (params(9)*y(4)+x(it_, 1));
-    residual(6) = (y(13)) - (params(8)*y(5)+x(it_, 2));
-    residual(7) = (y(14)) - (x(it_, 3)+params(10)*y(6)+params(11)*y(7));
-    residual(8) = (y(15)) - (y(19));
-    residual(9) = (y(16)) - (y(21));
-    residual(10) = (y(17)) - (y(6));
+residual = zeros(9, 1);
+    residual(1) = (y(5)) - ((1-params(1))*y(14)+params(1)*y(1)-params(2)*y(16)+y(9));
+    residual(2) = (y(6)) - (params(3)*y(2)+(1-params(3))*y(15)+y(5)*params(4)+y(10));
+    residual(3) = (y(7)) - (y(11)+params(5)*y(3)+(1-params(5))*(y(5)*params(7)+y(15)+params(6)*y(21)));
+    residual(4) = (y(8)) - (y(7)-y(15));
+    residual(5) = (y(17)) - (y(9)*params(9)+x(it_, 1));
+    residual(6) = (y(18)) - (y(10)*params(8)+x(it_, 2));
+    residual(7) = (y(19)) - (y(11)*params(10)+params(11)*y(4)+x(it_, 3));
+    residual(8) = (y(12)) - (y(15));
+    residual(9) = (y(13)) - (y(20));
 
 end

@@ -92,23 +92,48 @@ class DynareParser:
             self.equations = equations
 
 
-    def identify_state_control_variables(self):
-        """Identify state/control variables from transformed var_list"""
-        # This method is modified to use the transformed variable list
-        if not hasattr(self, 'transformed_var_list'):
-            # If transformed_var_list doesn't exist yet, generate it
-            self.generate_auxiliary_equations()
+    # def identify_state_control_variables(self):
+    #     """Identify state/control variables from transformed var_list"""
+    #     # This method is modified to use the transformed variable list
+    #     if not hasattr(self, 'transformed_var_list'):
+    #         # If transformed_var_list doesn't exist yet, generate it
+    #         self.generate_auxiliary_equations()
         
-        # State variables: All variables with _lag suffix
-        self.state_variables = sorted([var for var in self.transformed_var_list if "_lag" in var])
+    #     # State variables: All variables with _lag suffix
+    #     self.state_variables = sorted([var for var in self.transformed_var_list if "_lag" in var])
         
-        # Control variables: Remaining non-exogenous variables that aren't future variables
-        self.control_variables = sorted([
-            var for var in self.transformed_var_list 
-            if var not in self.state_variables
-            and var not in self.varexo_list
-            and not var.endswith("_p")
-        ])
+    #     # Control variables: Remaining non-exogenous variables that aren't future variables
+    #     self.control_variables = sorted([
+    #         var for var in self.transformed_var_list 
+    #         if var not in self.state_variables
+    #         and var not in self.varexo_list
+    #         and not var.endswith("_p")
+    #     ])
+
+    # def identify_state_control_variables(self):
+    #     """Identify state/control variables and ensure exogenous states appear last"""
+    #     if not hasattr(self, 'transformed_var_list'):
+    #         self.generate_auxiliary_equations()
+        
+    #     # First identify all state variables
+    #     all_state_variables = [var for var in self.transformed_var_list if "_lag" in var]
+        
+    #     # Separate endogenous and exogenous state variables
+    #     # Typically exogenous state variables begin with "RES_" or "SHK_" in your model
+    #     exogenous_states = [var for var in all_state_variables if var.startswith(("RES_"))]
+    #     endogenous_states = [var for var in all_state_variables if not var.startswith(("RES_", "SHK_"))]
+        
+    #     # Combine with exogenous last
+    #     self.state_variables = sorted(endogenous_states) + sorted(exogenous_states)
+        
+    #     # Control variables remain the same
+    #     self.control_variables = sorted([
+    #         var for var in self.transformed_var_list 
+    #         if var not in self.state_variables
+    #         and var not in self.varexo_list
+    #         and not var.endswith("_p")
+    #     ])
+
 
     def analyze_model_variables(self):
         """
@@ -350,9 +375,16 @@ class DynareParser:
         endogenous_vars = set([v for v in model_variables['all_variables'] 
                             if not v.endswith('_p') and v not in self.varexo_list])
         
-        # Properly classify state/control variables
+        # # Properly classify state/control variables
         self.state_variables = list(set(model_variables['state_variables']))
         
+        # First, separate the state variables into endogenous and exogenous
+        self.exogenous_states = [var for var in self.state_variables if var.startswith("RES_") and var.endswith("_lag")]
+        self.endogenous_states = [var for var in self.state_variables if var not in self.exogenous_states]
+
+        # Reorder state variables with exogenous states last
+        self.state_variables = sorted(self.endogenous_states) + sorted(self.exogenous_states)
+
         # Control variables are endogenous variables that are not state variables
         self.control_variables = list(endogenous_vars - set(self.state_variables))
         
@@ -1036,7 +1068,7 @@ def get_variable_order(parser):
     """Get variable order matching state space construction"""
     # From Context 3's state space construction:
     # Order is [control_variables, state_variables]
-    return parser.control_variables + parser.state_variables
+    return  parser.state_variables + parser.control_variables
 
 def impulse_response(A, B, shock_idx, periods, scale=1.0):
     """

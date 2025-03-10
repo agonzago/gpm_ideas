@@ -18,16 +18,15 @@ function residual = static_resid(T, y, x, params, T_flag)
 if T_flag
     T = qpm_simpl1.static_resid_tt(T, y, x, params);
 end
-residual = zeros(10, 1);
+residual = zeros(9, 1);
     residual(1) = (y(1)) - (y(1)*(1-params(1))+y(1)*params(1)-params(2)*y(4)+y(5));
     residual(2) = (y(2)) - (y(2)*params(3)+y(2)*(1-params(3))+y(1)*params(4)+y(6));
     residual(3) = (y(3)) - (y(7)+y(3)*params(5)+(1-params(5))*(y(1)*params(7)+y(2)+params(6)*y(9)));
     residual(4) = (y(4)) - (y(3)-y(2));
     residual(5) = (y(5)) - (y(5)*params(9)+x(1));
     residual(6) = (y(6)) - (y(6)*params(8)+x(2));
-    residual(7) = (y(7)) - (x(3)+y(7)*params(10)+params(11)*y(10));
+    residual(7) = (y(7)) - (y(7)*params(10)+y(7)*params(11)+x(3));
     residual(8) = (y(8)) - (y(2));
     residual(9) = (y(9)) - (y(8));
-    residual(10) = (y(10)) - (y(7));
 
 end
