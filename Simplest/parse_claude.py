@@ -10,6 +10,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve, norm
 
+import numpy as np
+import pandas as pd
+
+
 class DynareParser:
     def __init__(self, file_path):
         self.file_path = file_path
@@ -1143,8 +1147,8 @@ def solve_quadratic_matrix_equation_doubling(A, B, C, initial_guess=None, tol=1e
     return X, iter_count, reached_tol
 
 def solve_quadratic_matrix_equation(A, B, C, T, initial_guess=None, 
-                                   quadratic_matrix_equation_algorithm="doubling",
-                                   tol=1e-14, acceptance_tol=1e-8, verbose=False):
+                                quadratic_matrix_equation_algorithm="doubling",
+                                tol=1e-14, acceptance_tol=1e-8, verbose=False):
     """
     Wrapper function for solving the quadratic matrix equation, similar to the Julia implementation.
     
@@ -1542,14 +1546,13 @@ def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
     s11 = s[0:n_states,0:n_states];
     if n_states>0:
         z11i = la.inv(z11)
-   
+
     else:
         z11i = z11
-   
+
 
     # Components of the s,t,and q matrices   
     t11 = t[0:n_states,0:n_states]
-   
     # Verify that there are exactly n_states stable (inside the unit circle) eigenvalues:
     stab = 0
 
@@ -1595,175 +1598,116 @@ def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
 
     return f, p,stab,eig
 
-
-
-def build_fortran_state_space(F, P, C, parser):
+def create_shock_mapping(parser):
     """
-    Builds the state space representation matching the Fortran code structure,
-    with proper handling of exogenous states with multiple lags.
+    Creates an explicit mapping between shock innovations and exogenous state variables.
     
-    Args:
-        F:          (numpy.ndarray) Solution matrix from Klein (control-to-state mapping)
-        P:          (numpy.ndarray) Solution matrix from Klein (state transition)
-        C:          (numpy.ndarray) Shock impact matrix from the linearized system
-        parser:     (DynareParser) Parser object with categorized state variables
-        
     Returns:
-        T:          (numpy.ndarray) Transition matrix for state space matching Fortran
-        R:          (numpy.ndarray) Shock impact matrix for state space matching Fortran
+        shock_map: Dictionary mapping shock names to exogenous state variables
+        reverse_map: Dictionary mapping exogenous state variables to shock names
     """
-    # Get variable counts from parser's categorized state variables
+    shock_map = {}
+    reverse_map = {}
+    
+    # For each exogenous state variable that receives shocks
+    for exo_var in parser.exo_with_shocks:
+        # Get the shock name using the naming convention
+        shock_name = exo_var.replace("RES_", "SHK_")
+        
+        # Only add to mapping if the shock actually exists in the model
+        if shock_name in parser.varexo_list:
+            shock_map[shock_name] = exo_var
+            reverse_map[exo_var] = shock_name
+    
+    # Add this to the parser for future reference
+    parser.shock_to_exo_map = shock_map
+    parser.exo_to_shock_map = reverse_map
+    
+    return shock_map, reverse_map
+
+def build_state_space(F, P, parser):
+    """
+    Builds a simple state space representation focusing only on the essential mechanics.
+    """
+    # Variable counts
     n_controls = len(parser.control_variables)
-    n_endo_states = len(parser.endogenous_states)
-    n_exo_with_shocks = len(parser.exo_with_shocks)
-    n_exo_without_shocks = len(parser.exo_without_shocks)
+    n_states = len(parser.state_variables)
+    n_shocks = len(parser.varexo_list)
     
-    # Total state variables
-    n_states = n_endo_states + n_exo_with_shocks + n_exo_without_shocks
-    n_total = n_controls + n_states
+    # A is the state transition matrix - use P directly
+    A = P.copy()
     
-    # Get indices for different variable blocks within the F and P matrices
-    # Note: State ordering in F and P is [endogenous_states, exo_with_shocks, exo_without_shocks]
-    endo_indices = range(n_endo_states)
-    exo_with_indices = range(n_endo_states, n_endo_states + n_exo_with_shocks)
-    exo_without_indices = range(n_endo_states + n_exo_with_shocks, n_states)
+    # B maps shocks to states
+    B = np.zeros((n_states, n_shocks))
     
-    # Initialize the state transition matrix T
-    T = np.zeros((n_total, n_total))
+    # Simple mapping: SHK_X directly affects RES_X with unit impact
+    for exo_var in parser.exo_with_shocks:
+        shock_name = exo_var.replace("RES_", "SHK_")
+        if shock_name in parser.varexo_list:
+            exo_index = parser.state_variables.index(exo_var)
+            shock_index = parser.varexo_list.index(shock_name)
+            # Direct unit impact
+            B[exo_index, shock_index] = 1.0
     
-    # 1. Build the T matrix blocks
+    # C maps states to controls - use F directly
+    C = F.copy()
     
-    # Upper middle block: controls depend on endogenous states through F
-    T[:n_controls, n_controls:n_controls+n_endo_states] = F[:, endo_indices]
+    # D is zero - no direct shock impact on controls
+    D = np.zeros((n_controls, n_shocks))
     
-    # Upper right block (part 1): controls depend on exo_with_shocks
-    T[:n_controls, n_controls+n_endo_states:n_controls+n_endo_states+n_exo_with_shocks] = F[:, exo_with_indices]
-    
-    # Upper right block (part 2): controls depend on exo_without_shocks
-    if n_exo_without_shocks > 0:
-        T[:n_controls, n_controls+n_endo_states+n_exo_with_shocks:] = F[:, exo_without_indices]
-    
-    # Middle middle block: endogenous state transitions
-    T[n_controls:n_controls+n_endo_states, n_controls:n_controls+n_endo_states] = P[endo_indices, :][:, endo_indices]
-    
-    # Middle right block (part 1): endogenous states affected by exo_with_shocks
-    T[n_controls:n_controls+n_endo_states, 
-      n_controls+n_endo_states:n_controls+n_endo_states+n_exo_with_shocks] = P[endo_indices, :][:, exo_with_indices]
-    
-    # Middle right block (part 2): endogenous states affected by exo_without_shocks
-    if n_exo_without_shocks > 0:
-        T[n_controls:n_controls+n_endo_states, 
-          n_controls+n_endo_states+n_exo_with_shocks:] = P[endo_indices, :][:, exo_without_indices]
-    
-    # Lower middle block: no effect of endogenous states on exogenous states
-    # (This block is already zeros from initialization)
-    
-    # Lower right block (part 1): exo_with_shocks transitions
-    exo_start = n_controls + n_endo_states
-    T[exo_start:exo_start+n_exo_with_shocks, 
-      exo_start:exo_start+n_exo_with_shocks] = P[exo_with_indices, :][:, exo_with_indices]
-    
-    # Lower right block (part 2): exo_with_shocks affect exo_without_shocks
-    if n_exo_without_shocks > 0:
-        T[exo_start:exo_start+n_exo_with_shocks, 
-          exo_start+n_exo_with_shocks:] = P[exo_with_indices, :][:, exo_without_indices]
-    
-    # Lower right block (part 3): exo_without_shocks transitions
-    if n_exo_without_shocks > 0:
-        exo_without_start = exo_start + n_exo_with_shocks
-        T[exo_without_start:, 
-          exo_without_start:] = P[exo_without_indices, :][:, exo_without_indices]
-        
-        # exo_without_shocks affected by exo_with_shocks
-        T[exo_without_start:, 
-          exo_start:exo_without_start] = P[exo_without_indices, :][:, exo_with_indices]
-    
-    # 2. Now create the R matrix (shock impact)
-    # R only has columns for shocks affecting exo_with_shocks variables
-    R = np.zeros((n_total, n_exo_with_shocks))
-    
-    # Calculate shock impacts via exo_with_shocks
-    
-    # Shocks affect controls via F's relationship with exo_with_shocks
-    R[:n_controls, :] = F[:, exo_with_indices]
-    
-    # Shocks affect endogenous states via their relationship with exo_with_shocks
-    R[n_controls:n_controls+n_endo_states, :] = P[endo_indices, :][:, exo_with_indices]
-    
-    # Direct impact on exo_with_shocks (identity matrix for this block)
-    R[n_controls+n_endo_states:n_controls+n_endo_states+n_exo_with_shocks, :] = np.eye(n_exo_with_shocks)
-    
-    # Shocks affect exo_without_shocks via their relationship with exo_with_shocks
-    if n_exo_without_shocks > 0:
-        R[n_controls+n_endo_states+n_exo_with_shocks:, :] = P[exo_without_indices, :][:, exo_with_indices]
-    
-    return T, R
+    return A, B, C, D
 
-def impulse_response_fortran(T, R, shock_idx, periods, scale=1.0, parser=None):
+def impulse_response(A, B, C, D, parser, shock_names, periods=40, scale=1.0):
     """
-    Computes impulse response functions for a specified shock using the Fortran-aligned state space.
-    
-    Args:
-        T:          (numpy.ndarray) Transition matrix (Fortran aligned)
-        R:          (numpy.ndarray) Shock impact matrix (Fortran aligned)
-        shock_idx:  (int) Index of shock to analyze
-        periods:    (int) Number of periods for IRF
-        scale:      (float) Scale factor for the shock
-        parser:     (DynareParser) Parser instance to get variable ordering
-        
-    Returns:
-        irf:        (pandas.DataFrame) Impulse responses with variable names
+    Simplified impulse response calculation focusing on basic mechanics.
     """
-    import pandas as pd
+    n_states = A.shape[0]
+    n_controls = C.shape[0]
     
-    n_variables = T.shape[0]
-    n_shocks = R.shape[1]
+    n_shocks = len(parser.varexo_list)
+    # Get variable names
+    state_names = parser.state_variables
+    control_names = parser.control_variables
+    all_names = control_names + state_names
     
-    # Check shock index
-    if shock_idx >= n_shocks:
-        raise ValueError(f"Shock index {shock_idx} out of range (0-{n_shocks-1})")
+    irf_dict = {}
     
-    # Create shock vector (one-time shock)
-    shock = np.zeros(n_shocks)
-    shock[shock_idx] = scale
-    
-    # Create shock matrix (all zeros except for first period)
-    shocks = np.zeros((periods, n_shocks))
-    shocks[0, :] = shock
-    
-    # Initialize with zeros
-    x0 = np.zeros(n_variables)
-    
-    # Compute IRF using the simulation function
-    irf_values = simulate_state_space(T, R, x0, shocks, periods)
-    
-    # Get variable ordering from parser
-    if parser:
-        # Order should be: controls first, then endogenous states, then exogenous states
-        # This depends on how your parser identifies these variables
+    for shock_name in shock_names:
+        if shock_name not in parser.varexo_list:
+            print(f"Warning: Shock '{shock_name}' not found in model. Skipping.")
+            continue
         
-        # Separate exogenous states (often starting with RES_ or similar prefix)
-        exogenous_states = [var for var in parser.state_variables if var.startswith(("RES_"))]
-        endogenous_states = [var for var in parser.state_variables if not var.startswith(("RES_"))]
+        # Get shock index
+        shock_idx = parser.varexo_list.index(shock_name)
         
-        # Combine in the order the state space expects
-        ordered_vars = parser.control_variables + endogenous_states + exogenous_states
+        # Initialize arrays
+        states = np.zeros((periods, n_states))
+        controls = np.zeros((periods, n_controls))
         
-        # Create DataFrame with variable names
-        irf = pd.DataFrame(
-            data=irf_values[1:, :],  # Skip the initial zeros
-            columns=ordered_vars,
-            index=pd.RangeIndex(stop=periods, name='Period')
-        )
-    else:
-        # If no parser provided, just use numerical indices
-        irf = pd.DataFrame(
-            data=irf_values[1:, :],
-            columns=[f"var_{i}" for i in range(n_variables)],
-            index=pd.RangeIndex(stop=periods, name='Period')
-        )
+        # Period 0: Apply shock
+        shock_vector = np.zeros(n_shocks)
+        shock_vector[shock_idx] = scale
+        
+        # Initial shock impact on states
+        states[0, :] = B @ shock_vector
+        
+        # Initial impact on controls
+        controls[0, :] = C @ states[0, :]
+        
+        # Propagate dynamics forward
+        for t in range(1, periods):
+            states[t, :] = A @ states[t-1, :]
+            controls[t, :] = C @ states[t, :]
+        
+        # Combine results
+        combined = np.column_stack((controls, states))
+        irf_df = pd.DataFrame(combined, columns=all_names)
+        irf_df.index.name = 'Period'
+        
+        irf_dict[shock_name] = irf_df
     
-    return irf
+    return irf_dict
+
 
 def plot_variables(df, variables, figsize=(12, 8)):
     """
@@ -1822,7 +1766,7 @@ def print_model_details(parser):
     print(f"State variables: {len(parser.state_variables)}")
     print(f"Control variables: {len(parser.control_variables)}")
     print(f"Exogenous shocks: {len(parser.varexo_list)}")
-   
+
     # Eigenvalues (from Context 3)
     print('Eigenvalues:')
     for i, val in enumerate(np.abs(parser.eig)):
@@ -1831,38 +1775,7 @@ def print_model_details(parser):
     print("="*60)
 
 
-def simulate_state_space(A, B, x0, shocks, periods):
-    """
-    Simulates the state space model for a given number of periods.
-    
-    Args:
-        A:          (numpy.ndarray) Transition matrix
-        B:          (numpy.ndarray) Shock impact matrix
-        x0:         (numpy.ndarray) Initial state vector
-        shocks:     (numpy.ndarray) Matrix of shocks (periods x n_shocks)
-        periods:    (int) Number of periods to simulate
-        
-    Returns:
-        x:          (numpy.ndarray) Simulated state variables (periods x n_variables)
-    """
-    n_variables = A.shape[0]
-    n_shocks = B.shape[1]
-    
-    # Initialize simulation array
-    x = np.zeros((periods+1, n_variables))
-    x[0, :] = x0
-    
-    # Check shocks dimensions
-    if shocks.shape[0] < periods:
-        raise ValueError(f"Shock matrix must have at least {periods} rows")
-    if shocks.shape[1] != n_shocks:
-        raise ValueError(f"Shock matrix must have {n_shocks} columns")
-    
-    # Simulate forward
-    for t in range(periods):
-        x[t+1, :] = A @ x[t, :] + B @ shocks[t, :]
-    
-    return x
+
 
 
 # Example usage
@@ -1906,10 +1819,11 @@ if __name__ == "__main__":
     print("Done!")
 
     # Build state space using Fortran alignment    
-    T, R = build_fortran_state_space(f, p, c, parser)
+    A, B, C, D = build_state_space(f, p, parser)
     
     # Compute impulse responses
-    irfs = impulse_response_fortran(T, R, shock_idx=1, periods=40, scale=1.0, parser=parser)
+    shock_names = {'SHK_RS'}
+    irf_dict = impulse_response(A, B, C, D, parser, shock_names, periods=40, scale=1.0)
 
     # Plot IRFs
     variables_to_plot = [
@@ -1921,7 +1835,7 @@ if __name__ == "__main__":
         "RES_L_GDP_GAP",
         "RES_DLA_CPI"
     ]
-    plot_variables(irfs, variables_to_plot)
+    plot_variables(irf_dict['SHK_RS'], variables_to_plot)
 
     
     parser.generate_doubling_jacobian_evaluator("doubling_jacobian_evaluator.py")

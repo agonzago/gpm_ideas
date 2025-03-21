@@ -71,4 +71,4 @@ shocks;
     var SHK_RS = 1;    
 end;
 
-stoch_simul(order=1, irf=40) L_GDP_GAP DLA_CPI RS;
+stoch_simul(order=1, irf=40);
