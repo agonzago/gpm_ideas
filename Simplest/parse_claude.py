@@ -190,7 +190,7 @@ class DynareParser:
                 # One-period lag (shift = -1)
                 elif shift == -1:
                     orig_expr = f"{var_name}(-1)"
-                    transformed_var = f"{var_name}_lag"
+                    transformed_var = f"{var_name}_lag"  # Standard naming convention for first lag
                     transformation_map[orig_expr] = transformed_var
                     model_variables['all_variables'].add(transformed_var)
                     model_variables['state_variables'].add(transformed_var)
@@ -248,181 +248,42 @@ class DynareParser:
                     model_variables['all_variables'].add(transformed_var)
                     model_variables['state_variables'].add(transformed_var)
                     
-                    # Generate auxiliary variables and equations for all lags:
-                    # For lag variables, we need:
+                    # CORRECTED: Generate auxiliary variables and equations for all lags
+                    # We need to ensure proper chain of auxiliary equations:
                     # var_lag_p = var
                     # var_lag2_p = var_lag
                     # var_lag3_p = var_lag2
                     
-                    # First add the standard one-period lag if needed
-                    std_lag_var = f"{var_name}_lag"
-                    model_variables['all_variables'].add(std_lag_var)
-                    model_variables['state_variables'].add(std_lag_var)
+                    # First make sure we have the first lag defined
+                    first_lag_var = f"{var_name}_lag"  # Standard name for first lag
+                    model_variables['all_variables'].add(first_lag_var)
+                    model_variables['state_variables'].add(first_lag_var)
                     
-                    std_lag_eq = f"{std_lag_var}_p = {var_name}"
-                    if std_lag_eq not in processed_aux_eqs:
-                        aux_equations.append(std_lag_eq)
-                        processed_aux_eqs.add(std_lag_eq)
-                        model_variables['aux_variables'].add(std_lag_var)
+                    first_lag_eq = f"{first_lag_var}_p = {var_name}"
+                    if first_lag_eq not in processed_aux_eqs:
+                        aux_equations.append(first_lag_eq)
+                        processed_aux_eqs.add(first_lag_eq)
+                        model_variables['aux_variables'].add(first_lag_var)
                     
-                    # Generate additional lags as needed
+                    # Now create higher-order lags recursively
+                    prev_lag_var = first_lag_var  # Start with the first lag
                     for i in range(2, abs_shift + 1):
-                        # The current lag variable
-                        lag_var = f"{var_name}_lag{i}"
-                        model_variables['all_variables'].add(lag_var)
-                        model_variables['state_variables'].add(lag_var)
+                        curr_lag_var = f"{var_name}_lag{i}"
+                        model_variables['all_variables'].add(curr_lag_var)
+                        model_variables['state_variables'].add(curr_lag_var)
                         
-                        # The previous lag variable
-                        prev_lag = f"{var_name}_lag{i-1}"
-                        
-                        # Auxiliary equation: current_lag_p = previous_lag
-                        aux_eq = f"{lag_var}_p = {prev_lag}"
+                        # This is the key correction: curr_lag_p = prev_lag
+                        aux_eq = f"{curr_lag_var}_p = {prev_lag_var}"
                         
                         if aux_eq not in processed_aux_eqs:
                             aux_equations.append(aux_eq)
                             processed_aux_eqs.add(aux_eq)
-                            model_variables['aux_variables'].add(lag_var)
+                            model_variables['aux_variables'].add(curr_lag_var)
+                        
+                        # Update prev_lag for next iteration
+                        prev_lag_var = curr_lag_var
         
         return transformation_map, aux_equations, model_variables
-
-    # def apply_transformation(self):
-    #     """
-    #     Two-pass transformation of the model with improved handling of exogenous processes with multiple lags:
-    #     1. Analyze all variables and their time shifts
-    #     2. Create a comprehensive transformation plan
-    #     3. Apply transformations consistently across all equations
-    #     4. Update model variables and add auxiliary equations
-    #     5. Properly categorize state variables based on exogenous process lags
-        
-    #     Returns:
-    #         Dictionary with transformed model information
-    #     """
-    #     # First pass: Analyze variables and their shifts
-    #     variable_shifts, all_variables = self.analyze_model_variables()
-        
-    #     # Create transformation plan based on the analysis
-    #     transformation_map, aux_equations, model_variables = self.create_transformation_plan(variable_shifts)
-        
-    #     # Apply transformations to all equations
-    #     transformed_equations = []
-    #     for i, equation in enumerate(self.equations):
-    #         # Remove comments and clean up
-    #         clean_eq = re.sub(r'//.*', '', equation).strip()
-    #         transformed_eq = clean_eq
-            
-    #         # Process each variable in the equation
-    #         for var_name in all_variables:
-    #             # Replace var(+1) with var_p
-    #             transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*\+1\s*\)', f'{var_name}_p', transformed_eq)
-                
-    #             # Replace var(-1) with var_lag
-    #             transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*-1\s*\)', f'{var_name}_lag', transformed_eq)
-                
-    #             # Replace var(+n) with var_leadn for n > 1
-    #             for j in range(2, 10):  # Assume no leads greater than +9
-    #                 transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*\+{j}\s*\)', f'{var_name}_lead{j}', transformed_eq)
-                
-    #             # Replace var(-n) with var_lagn for n > 1
-    #             for j in range(2, 10):  # Assume no lags greater than -9
-    #                 transformed_eq = re.sub(rf'{re.escape(var_name)}\(\s*-{j}\s*\)', f'{var_name}_lag{j}', transformed_eq)
-            
-    #         transformed_equations.append(transformed_eq)
-        
-    #     # Update class properties
-    #     self.transformed_equations = transformed_equations
-    #     self.auxiliary_equations = aux_equations
-        
-    #     # Remove _p variables and shock variables from main model variables
-    #     endogenous_vars = set([v for v in model_variables['all_variables'] 
-    #                         if not v.endswith('_p') and v not in self.varexo_list])
-        
-    #     # Identify all state variables
-    #     all_state_variables = list(set(model_variables['state_variables']))
-
-    #     # ---- NEW CODE: Better categorization of exogenous process states ----
-    #     # Group state variables by exogenous processes and their lags
-    #     exo_processes = {}  # Dict mapping base names to lists of (lag, var_name)
-    #     endogenous_states = []
-        
-    #     for var in all_state_variables:
-    #         if var.startswith("RES_") and "_lag" in var:
-    #             # This is an exogenous process state
-    #             base_name = var.split("_lag")[0]  # Get base name before _lag
-                
-    #             # Extract lag number
-    #             if var.endswith("_lag"):
-    #                 lag = 1  # First lag
-    #             else:
-    #                 # Try to extract lag number after _lag
-    #                 lag_suffix = var.split("_lag")[1]
-    #                 if lag_suffix and lag_suffix.isdigit():
-    #                     lag = int(lag_suffix)
-    #                 else:
-    #                     lag = 1  # Default to first lag if not specified
-                
-    #             # Add to the exogenous processes dictionary
-    #             if base_name not in exo_processes:
-    #                 exo_processes[base_name] = []
-    #             exo_processes[base_name].append((lag, var))
-    #         else:
-    #             # This is an endogenous state
-    #             endogenous_states.append(var)
-        
-    #     # Sort each exogenous process by lag
-    #     for process in exo_processes.values():
-    #         process.sort()  # Sort by lag
-        
-    #     # Extract variables that receive direct shocks (first lag of each process)
-    #     exo_with_shocks = []
-    #     exo_without_shocks = []
-        
-    #     for process_lags in exo_processes.values():
-    #         if process_lags:  # If there are any lags for this process
-    #             exo_with_shocks.append(process_lags[0][1])  # First lag gets direct shock
-    #             for _, var in process_lags[1:]:  # Higher lags don't get direct shocks
-    #                 exo_without_shocks.append(var)
-
-    #     # Define self variables 
-    #     self.endogenous_states = endogenous_states
-    #     self.exo_with_shocks = exo_with_shocks
-    #     self.exo_without_shocks = exo_without_shocks
-
-    #     # Add explicit mapping between shocks and exogenous states
-    #     self.shock_to_state_map = {}
-    #     for process_name, process_lags in exo_processes.items():
-    #         if process_lags:  # If there are any lags
-    #             state_var = process_lags[0][1]  # First lag gets direct shock
-    #             # Extract base shock name (remove RES_ prefix)
-    #             shock_name = "SHK_" + process_name[4:]  # Assuming RES_VAR → SHK_VAR pattern
-    #             if shock_name in self.varexo_list:
-    #                 self.shock_to_state_map[shock_name] = state_var
-        
-    #     # Update the state_variables list with the correct ordering for state space
-    #     self.state_variables = self.endogenous_states + self.exo_with_shocks + self.exo_without_shocks
-    #     # ---- END NEW CODE ----
-        
-    #     # Control variables are endogenous variables that are not state variables
-    #     self.control_variables = list(endogenous_vars - set(self.state_variables))
-        
-    #     # Remove shock variables from all_variables
-    #     self.all_variables = list(endogenous_vars)
-        
-    #     # Keep auxiliary variables as defined
-    #     self.auxiliary_variables = list(set(model_variables['aux_variables']))
-        
-    #     # Format equations for output
-    #     formatted_equations = self.format_transformed_equations(transformed_equations, aux_equations)
-        
-    #     return {
-    #         'equations': formatted_equations,
-    #         'state_variables': self.state_variables,
-    #         'control_variables': self.control_variables,
-    #         'auxiliary_variables': self.auxiliary_variables,
-    #         'all_variables': self.all_variables,
-    #         'endogenous_states': self.endogenous_states,
-    #         'exo_with_shocks': self.exo_with_shocks,
-    #         'exo_without_shocks': self.exo_without_shocks
-    #     }
 
     def apply_transformation(self):
         """
@@ -1855,17 +1716,20 @@ def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
 
     return f, p,stab,eig
 
-def generate_state_space_matrices(parser, F, P):
+def create_state_space_representation(parser, f, p):
     """
-    Generate partitioned state-space matrices according to variable types
+    Create state space representation from Klein solution matrices
     
+    Args:
+        parser: DynareParser instance with model information
+        f: Control policy function matrix from Klein solution
+        p: State transition matrix from Klein solution
+        
     Returns:
-        F_ck: Control responses to endogenous states
-        F_cz: Control responses to exogenous states
-        P_kk: Endogenous state transitions
-        P_kz: Exogenous impacts on endogenous states
-        P_zz: Exogenous state transitions
-        R: Shock selection matrix
+        A: State transition matrix for state space representation
+        B: Shock impact matrix for state space representation
+        C: Observation matrix
+        D: Direct shock impact on observables (often zero)
     """
     # Get variable counts
     n_endogenous = len(parser.endogenous_states)
@@ -1876,79 +1740,184 @@ def generate_state_space_matrices(parser, F, P):
     
     # Total exogenous states
     n_exo_states = n_exo_with_shocks + n_exo_without_shocks
+    n_states = n_endogenous + n_exo_states
     
     # Extract submatrices from F (control policy functions)
-    F_ck = F[:, :n_endogenous]
-    F_cz = F[:, n_endogenous:]
+    # F maps states to controls: c_t = F s_t
+    Fcx = f[:, :n_endogenous]  # Control responses to endogenous states
+    Fcz = f[:, n_endogenous:]  # Control responses to exogenous states
     
     # Extract submatrices from P (state transitions)
-    P_kk = P[:n_endogenous, :n_endogenous]
-    P_kz = P[:n_endogenous, n_endogenous:]
-    P_zz = P[n_endogenous:, n_endogenous:]
+    # P maps current states to future states: s_{t+1} = P s_t
+    Pxx = p[:n_endogenous, :n_endogenous]  # Endogenous state transitions
+    Pxz = p[:n_endogenous, n_endogenous:]  # Impact of exogenous on endogenous
+    Pzz = p[n_endogenous:, n_endogenous:]  # Exogenous AR processes
     
     # Create shock selection matrix R
+    # This maps structural shocks to exogenous states: z_t = Pzz z_{t-1} + R ε_t
     R = np.zeros((n_exo_states, n_shocks))
     
     # Fill R matrix using shock_to_state_map
-    for i, shock_name in enumerate(parser.varexo_list):
+    for shock_idx, shock_name in enumerate(parser.varexo_list):
         if shock_name in parser.shock_to_state_map:
             state_var = parser.shock_to_state_map[shock_name]
-            # Find index of this state in the exogenous state list
+            # Find position of this state in the exogenous states
             try:
-                state_idx = parser.exo_with_shocks.index(state_var)
-                R[state_idx, i] = 1.0
+                # First find position in full state list
+                state_full_idx = parser.state_variables.index(state_var)
+                # Calculate position in exogenous state vector
+                exo_state_idx = state_full_idx - n_endogenous
+                if 0 <= exo_state_idx < n_exo_states:
+                    R[exo_state_idx, shock_idx] = 1.0
             except ValueError:
-                print(f"Warning: State variable {state_var} not found in exo_with_shocks")
+                print(f"Warning: State variable {state_var} not found in state_variables")
     
-    return F_ck, F_cz, P_kk, P_kz, P_zz, R
+    # ---- STATE SPACE MATRICES ----
+    
+    # A matrix: state transition
+    A = p.copy()  # The P matrix already captures the state transition
+    
+    # B matrix: shock impacts on states
+    # Only exogenous states are directly affected by shocks
+    B = np.zeros((n_states, n_shocks))
+    B[n_endogenous:, :] = R
+    
+    # C matrix: maps states to observables
+    # By default, we'll use the controls and states as observables
+    n_observables = n_controls + n_states
+    C = np.zeros((n_observables, n_states))
+    
+    # First rows: controls as functions of states (via policy function F)
+    C[:n_controls, :] = f
+    
+    # Next rows: states mapped one-to-one (identity matrix)
+    C[n_controls:, :] = np.eye(n_states)
+    
+    # D matrix: direct shock impact on observables
+    # Usually zero in DSGE models, but controls might be directly affected
+    D = np.zeros((n_observables, n_shocks))
+    
+    # Create labels for the state space
+    state_labels = parser.state_variables
+    observable_labels = parser.control_variables + parser.state_variables
+    shock_labels = parser.varexo_list
+    
+    return {
+        'A': A,
+        'B': B,
+        'C': C,
+        'D': D,
+        'state_labels': state_labels,
+        'observable_labels': observable_labels,
+        'shock_labels': shock_labels,
+        'n_states': n_states,
+        'n_shocks': n_shocks,
+        'n_observables': n_observables
+    }
 
-def ir(F, P, x0, T=40, parser=None):
+def simulate_irf_state_space(ss, shock_idx=0, shock_size=1.0, periods=40):
     """
-    Compute impulse responses and return as pandas DataFrame
+    Simulate impulse responses using state space representation
     
     Args:
-        F: Control policy function matrix
-        P: State transition matrix
-        x0: Initial state vector
-        T: Number of periods
-        parser: DynareParser instance with variable names
+        ss: State space representation (output from create_state_space_representation)
+        shock_idx: Index of shock to simulate
+        shock_size: Size of the shock
+        periods: Number of periods for IRF
         
     Returns:
         DataFrame with IRF results
     """
     import pandas as pd
     
-    nx = P.shape[0]  # Number of state variables
-    ny = F.shape[0]  # Number of control variables
+    # Get state space matrices
+    A = ss['A']
+    B = ss['B']
+    C = ss['C']
     
-    # Create augmented observation matrix
-    MX = np.vstack([F, np.eye(nx)])
+    # Initialize state vector
+    x = np.zeros(ss['n_states'])
     
-    # Initialize responses
-    IR = np.zeros((T, ny + nx))
+    # Initialize arrays for IRFs
+    states_irf = np.zeros((periods, ss['n_states']))
+    obs_irf = np.zeros((periods, ss['n_observables']))
     
-    # Set initial state
-    x = x0.copy()
+    # Apply shock at t=0
+    # The shock affects the state via B matrix
+    shock = np.zeros(ss['n_shocks'])
+    shock[shock_idx] = shock_size
+    x = B @ shock
     
-    # Compute responses
-    for t in range(T):
-        IR[t, :] = MX @ x
-        x = P @ x
+    # Store period 0 results
+    states_irf[0, :] = x
+    obs_irf[0, :] = C @ x
     
-    # Get variable names from parser
-    if parser:
-        variable_names = parser.control_variables + parser.state_variables
-    else:
-        variable_names = [f"var_{i}" for i in range(ny + nx)]
+    # Simulate forward
+    for t in range(1, periods):
+        x = A @ states_irf[t-1, :]
+        states_irf[t, :] = x
+        obs_irf[t, :] = C @ x
+    
+    # Create DataFrame with results
+    irf_data = {}
+    
+    # Add observable variables
+    for i, var in enumerate(ss['observable_labels']):
+        irf_data[var] = obs_irf[:, i]
     
     # Create DataFrame
-    df = pd.DataFrame(IR, columns=variable_names)
+    irf_df = pd.DataFrame(irf_data)
     
-    return df
+    # Add shock name for reference
+    shock_name = ss['shock_labels'][shock_idx] if shock_idx < len(ss['shock_labels']) else f"shock_{shock_idx}"
+    irf_df.attrs['shock_name'] = shock_name
+    
+    return irf_df
+
+def compare_irf_methods(parser, f, p):
+    """
+    Compare IRFs from different methods
+    
+    Args:
+        parser: DynareParser instance
+        f: Control policy matrix
+        p: State transition matrix
+    """
+    # Original IRF method
+    irf_original = generate_irfs(parser, f, p)
+    
+    # State space IRF method
+    ss = create_state_space_representation(parser, f, p)
+    
+    # Compare for each shock
+    for shock_idx, shock_name in enumerate(parser.varexo_list):
+        if shock_name in irf_original:
+            print(f"Comparing IRFs for shock: {shock_name}")
+            
+            # Generate IRF using state space
+            irf_ss = simulate_irf_state_space(ss, shock_idx=shock_idx)
+            
+            # Select some key variables to compare
+            vars_to_compare = ['RS', 'DLA_CPI', 'L_GDP_GAP', 'RR_GAP']
+            vars_to_compare = [v for v in vars_to_compare if v in irf_original[shock_name].columns]
+            
+            # Compare values
+            for var in vars_to_compare:
+                original = irf_original[shock_name][var].values[:10]
+                ss_method = irf_ss[var].values[:10]
+                
+                # Calculate difference
+                max_diff = np.max(np.abs(original - ss_method))
+                print(f"  {var}: Max difference = {max_diff:.8f}")
+                
+                if max_diff > 1e-6:
+                    print(f"    Warning: Differences detected for {var}")
+                    print(f"    Original: {original[:5]}")
+                    print(f"    SS method: {ss_method[:5]}")
 
 def generate_irfs(parser, F, P, shock_size=1.0, T=40):
     """
-    Generate IRFs using shock-to-state mappings instead of C matrix
+    Generate IRFs using Klein's state-space representation with proper AR(1) dynamics.
     
     Args:
         parser: DynareParser instance with model information
@@ -1986,6 +1955,47 @@ def generate_irfs(parser, F, P, shock_size=1.0, T=40):
             print(f"Warning: No state variable mapping found for shock {shock_name}")
     
     return irf_results
+
+def ir(F, P, x0, T=40, parser=None):
+    """
+    Compute impulse responses and return as pandas DataFrame
+    
+    Args:
+        F: Control policy function matrix
+        P: State transition matrix
+        x0: Initial state vector
+        T: Number of periods
+        parser: DynareParser instance with variable names
+        
+    Returns:
+        DataFrame with IRF results
+    """
+    import pandas as pd
+    
+    nx = P.shape[0]  # Number of state variables
+    ny = F.shape[0]  # Number of control variables
+    
+    # Create augmented observation matrix that maps states to all variables
+    MX = np.vstack([F, np.eye(nx)])
+    
+    # Initialize responses
+    IR = np.zeros((T, ny + nx))
+    
+    # Set initial state
+    x = x0.copy()
+    
+    # Compute responses
+    for t in range(T):
+        IR[t, :] = MX @ x  # Map states to all variables
+        x = P @ x          # Transition states to next period
+    
+    # Get variable names from parser
+    variable_names = parser.control_variables + parser.state_variables
+    
+    # Create DataFrame
+    df = pd.DataFrame(IR, columns=variable_names)
+    
+    return df
 
 def plot_irf(irf_df, variables_to_plot, shock_name, figsize=(12, 8)):
     """
@@ -2107,17 +2117,18 @@ if __name__ == "__main__":
         "RS",    
         "DLA_CPI",
         "L_GDP_GAP",   
-        "RES_RS",
-        "RES_L_GDP_GAP",
-        "RES_DLA_CPI"
+        "RES_RS_lag",
+        "RES_L_GDP_GAP_lag",
+        "RES_DLA_CPI_lag"
     ]
 
     # I still need lag z_t in the state space form to get the responses alignig with dynare. Say in my notation a shock to RES is really a shock to RES_LAG (as state) and RES_ is the value at t+1 of RES.  
     # This commes from the klein's solution that has Z(t+1) and K(t+1). The IRFs look OK. I guess. 
     plot_irf(irf_results['SHK_RS'], variables_to_plot, 'Interest Rate', figsize=(12, 8))
 
-    
-    parser.generate_doubling_jacobian_evaluator("doubling_jacobian_evaluator.py")
+    compare_irf_methods(parser, f, p)
+
+    ##parser.generate_doubling_jacobian_evaluator("doubling_jacobian_evaluator.py")
 
     # Get Jacobians
 #A_plus, A_zero, A_minus, shock_impact, state_indices, control_indices = evaluate_doubling_jacobians(parameters)
