@@ -1318,7 +1318,8 @@ class DynareParser:
         labels = {
             'state_labels': self.state_variables,
             'observable_labels': self.control_variables + self.state_variables,
-            'shock_labels': self.varexo_list
+            'shock_labels': self.varexo_list,
+            'param_labels': list(self.parameters.keys())
         }
 
         # 2. Add constant components for trend augmentation
@@ -1396,501 +1397,398 @@ class DynareParser:
 
 
 
-
-
-class ParameterMapper:
-    """
-    Maps model parameters to their respective locations in state space matrices.
-    This allows efficient updates of state space matrices without repeatedly
-    looping through parameter names.
-    """
-    
-    def __init__(self, indices, labels, model_specs, obs_vars, output_dir=None):
-        """
-        Initialize the parameter mapper with information about the model structure.
-        
-        Args:
-            indices: Dictionary with model dimension information
-            labels: Dictionary with variable labels
-            model_specs: Dictionary with specifications for observed variables
-            obs_vars: List of observed variable names
-            output_dir: Directory to save/load mapping information (optional)
-        """
-        self.indices = indices
-        self.labels = labels
-        self.model_specs = model_specs
-        self.obs_vars = obs_vars
-        self.output_dir = output_dir
-        
-        # Extract dimensions
-        self.n_endogenous = indices['n_endogenous']
-        self.n_exo_states = indices['n_exo_states']
-        self.n_states = indices['n_states']
-        self.n_shocks = indices['n_shocks']
-        self.n_controls = indices['n_controls']
-        
-        # Try to load mappings from file first
-        if output_dir and self._load_mappings():
-            print("Parameter mappings loaded from file.")
-        else:
-            # Build the mappings from scratch
-            self._build_mappings()
-            # Save mappings if output directory is provided
-            if output_dir:
-                self._save_mappings()
-    
-    def _build_mappings(self):
-        """
-        Build the mappings between parameters and matrix locations.
-        """
-        # Calculate trend information
-        self.trend_info = calculate_trend_positions(
-            self.model_specs, 
-            self.obs_vars, 
-            self.n_states, 
-            self.n_shocks
-        )
-        
-        # Dictionary to map parameters to their locations in matrices
-        self.param_map = {}
-        
-        # 1. Map DSGE model parameters to the Jacobian parameter vector
-        # These should come from the model.json file
-        model_params = self.labels.get('param_labels', [])
-        for i, param in enumerate(model_params):
-            self.param_map[param] = ('DSGE', i)  # (matrix_type, position)
-        
-        # 2. Map shock standard deviations to Q matrix (process noise covariance)
-        # a. DSGE shocks (map to original shock positions)
-        shock_labels = self.labels['shock_labels']
-        for i, shock in enumerate(shock_labels):
-            param_name = f"{shock}_shock"
-            # Map to position in the process noise covariance matrix (diagonal elements)
-            self.param_map[param_name] = ('Q', i, i)
-        
-        # b. Add trend shock parameter mappings from trend_info
-        self.param_map.update(self.trend_info['param_positions'])
-        
-        # 3. Map measurement error standard deviations to R matrix
-        for i, obs_var in enumerate(self.obs_vars):
-            # Find base variable (without _obs)
-            base_var = obs_var.replace("_obs", "")
-            # Find position in observation vector
-            try:
-                var_idx = self.labels['observable_labels'].index(base_var)
-                # Map to position in the measurement noise covariance matrix
-                self.param_map[f"{obs_var}_meas_error"] = ('R', var_idx, var_idx)
-            except ValueError:
-                # Skip if variable not found in observable_labels
-                pass
-    
-    def _save_mappings(self):
-        """
-        Save parameter mappings to a file for efficient reuse.
-        """
-        if not self.output_dir:
-            return
-        
-        # Create output path
-        mapping_file = os.path.join(self.output_dir, "parameter_mappings.pkl")
-        
-        # Data to save
-        data = {
-            'param_map': self.param_map,
-            'trend_info': self.trend_info
-        }
-        
-        # Save to file
-        with open(mapping_file, 'wb') as f:
-            pickle.dump(data, f)
-        
-        # Also save a JSON version for human readability
-        json_file = os.path.join(self.output_dir, "parameter_mappings.json")
-        
-        # Convert to JSON-serializable format
-        json_data = {
-            'param_map': {k: list(v) for k, v in self.param_map.items()},
-            'trend_info': self.trend_info
-        }
-        
-        with open(json_file, 'w') as f:
-            json.dump(json_data, f, indent=2)
-        
-        print(f"Parameter mappings saved to {mapping_file} and {json_file}")
-    
-    def _load_mappings(self):
-        """
-        Load parameter mappings from file.
-        
-        Returns:
-            bool: True if mappings were successfully loaded, False otherwise
-        """
-        if not self.output_dir:
-            return False
-        
-        mapping_file = os.path.join(self.output_dir, "parameter_mappings.pkl")
-        
-        if not os.path.exists(mapping_file):
-            return False
-        
-        try:
-            with open(mapping_file, 'rb') as f:
-                data = pickle.load(f)
-            
-            self.param_map = data['param_map']
-            self.trend_info = data['trend_info']
-            return True
-        except Exception as e:
-            print(f"Error loading parameter mappings: {e}")
-            return False
-    
-    def build_process_noise_covariance(self, parameters):
-        """
-        Build the process noise covariance matrix (Q) using parameter values.
-        
-        Args:
-            parameters: Dictionary mapping parameter names to values
-            
-        Returns:
-            Q: Process noise covariance matrix
-        """
-        # Total number of shocks
-        n_total_shocks = self.n_shocks + self.trend_info['total_states']
-        
-        # Initialize process noise covariance matrix
-        Q = np.zeros((n_total_shocks, n_total_shocks))
-        
-        # Fill diagonal elements based on parameter mapping
-        for param_name, param_value in parameters.items():
-            if param_name in self.param_map:
-                mapping = self.param_map[param_name]
-                if mapping[0] == 'Q':
-                    # Square the parameter value to get variance
-                    Q[mapping[1], mapping[2]] = param_value**2
-        
-        return Q
-    
-    def build_measurement_noise_covariance(self, parameters):
-        """
-        Build the measurement noise covariance matrix (R) using parameter values.
-        
-        Args:
-            parameters: Dictionary mapping parameter names to values
-            
-        Returns:
-            R: Measurement noise covariance matrix
-        """
-        # Number of observables
-        n_observables = self.n_controls + self.n_states
-        
-        # Initialize measurement noise covariance matrix (diagonal)
-        R = np.zeros((n_observables, n_observables))
-        
-        # Fill diagonal elements based on parameter mapping
-        for param_name, param_value in parameters.items():
-            if param_name in self.param_map:
-                mapping = self.param_map[param_name]
-                if mapping[0] == 'R':
-                    # Square the parameter value to get variance
-                    R[mapping[1], mapping[2]] = param_value**2
-        
-        # Set a small default value for stability if no parameters mapped
-        if np.all(R == 0):
-            R = np.eye(n_observables) * 1e-5
-        
-        return R
-    
-    def get_dsge_parameters(self, parameters):
-        """
-        Extract DSGE model parameters in the correct order for the Jacobian evaluator.
-        
-        Args:
-            parameters: Dictionary mapping parameter names to values
-            
-        Returns:
-            dsge_params: List of parameter values in the correct order for evaluate_jacobians
-        """
-        # Find maximum index for DSGE parameters
-        max_idx = -1
-        for param_name, mapping in self.param_map.items():
-            if mapping[0] == 'DSGE':
-                max_idx = max(max_idx, mapping[1])
-        
-        # Initialize parameter vector with zeros
-        dsge_params = np.zeros(max_idx + 1)
-        
-        # Fill parameter vector based on mapping
-        for param_name, param_value in parameters.items():
-            if param_name in self.param_map:
-                mapping = self.param_map[param_name]
-                if mapping[0] == 'DSGE':
-                    dsge_params[mapping[1]] = param_value
-        
-        return dsge_params
-
-
 class ModelSolver:
     """
-    Enhanced ModelSolver class with improved state space construction
-    and efficient parameter handling.
+    Solves the DSGE model and updates the state-space representation based
+    on parameter values using a dedicated update function.
     """
-    
     def __init__(self, output_dir, model_specs, obs_vars):
         """
         Initialize the ModelSolver.
-        
+
         Args:
-            output_dir: Directory containing model files
-            model_specs: Dictionary with specifications for observed variables
-            obs_vars: List of observed variable names
+            output_dir: Directory containing model files ('model.json',
+                        'jacobian_evaluator.py', 'model_structure.py').
+            model_specs: Dictionary with specifications for observed variables.
+            obs_vars: List of observed variable names (must match data columns).
         """
         self.output_dir = output_dir
         self.model_specs = model_specs
         self.obs_vars = obs_vars
-        
+
         # Load model components
-        self.load_model()
-        self.load_jacobian_evaluator()
-        self.load_model_structure()
-        
-        # Initialize matrices for state space
-        self.ss = None  # Will hold state space representation
-        self.kf = None  # Will hold Kalman filter object
-        
-        # Create the parameter mapper
-        self._create_parameter_mapper()
-        
-        # Validate model specifications
+        self.load_model()               # Loads self.model (from model.json)
+        self.load_jacobian_evaluator()  # Loads self.evaluate_jacobians
+        self.load_model_structure()     # Loads self.indices, self.labels, self.R
+
+        # --- Pre-calculate trend structure ---
+        # Needs n_states and n_shocks from the core DSGE model structure
+        self.trend_info = calculate_trend_positions(
+            self.model_specs,
+            self.obs_vars,
+            self.indices['n_states'],
+            self.indices['n_shocks']
+        )
+        # --- Store the order of parameters expected by theta ---
+        self._define_theta_order()
+
+        # Validate model specifications against loaded model/labels
         self.check_spec_vars()
-    
+
+        # Initialize solved state (optional)
+        self.f = None # Policy function
+        self.p = None # DSGE state transition
+
     def load_model(self):
         """Load the model from the JSON file."""
         model_path = os.path.join(self.output_dir, "model.json")
-        with open(model_path, 'r') as f:
-            self.model = json.load(f)
-    
+        try:
+            with open(model_path, 'r') as f:
+                self.model = json.load(f)
+            # Ensure essential keys are present
+            if 'parameters' not in self.model:
+                 raise KeyError("'parameters' key missing in model.json")
+            if 'all_variables' not in self.model:
+                 raise KeyError("'all_variables' key missing in model.json")
+
+        except FileNotFoundError:
+            print(f"Error: model.json not found at {model_path}")
+            raise
+        except json.JSONDecodeError:
+            print(f"Error: Could not decode JSON from {model_path}")
+            raise
+        except KeyError as e:
+             print(f"Error: Missing essential key in model.json: {e}")
+             raise
+
+
     def load_jacobian_evaluator(self):
-        """Load the Jacobian evaluator function from the Python file."""
+        """Load the Jacobian evaluator function."""
         jac_path = os.path.join(self.output_dir, "jacobian_evaluator.py")
-        spec = importlib.util.spec_from_file_location("jacobian_evaluator", jac_path)
-        self.jacobian_module = importlib.util.module_from_spec(spec)
-        sys.modules["jacobian_evaluator"] = self.jacobian_module
-        spec.loader.exec_module(self.jacobian_module)
-        self.evaluate_jacobians = self.jacobian_module.evaluate_jacobians
-    
+        try:
+            spec = importlib.util.spec_from_file_location("jacobian_evaluator", jac_path)
+            if spec is None or spec.loader is None:
+                 raise ImportError(f"Could not create spec for {jac_path}")
+            self.jacobian_module = importlib.util.module_from_spec(spec)
+            sys.modules["jacobian_evaluator"] = self.jacobian_module # Add to sys.modules
+            spec.loader.exec_module(self.jacobian_module)
+            self.evaluate_jacobians = getattr(self.jacobian_module, 'evaluate_jacobians')
+        except FileNotFoundError:
+            print(f"Error: jacobian_evaluator.py not found at {jac_path}")
+            raise
+        except AttributeError:
+            print(f"Error: 'evaluate_jacobians' function not found in {jac_path}")
+            raise
+        except Exception as e:
+             print(f"Error loading Jacobian evaluator from {jac_path}: {e}")
+             raise
+
     def load_model_structure(self):
-        """Load the pre-computed model structure from the Python file."""
+        """Load the pre-computed model structure."""
         struct_path = os.path.join(self.output_dir, "model_structure.py")
-        spec = importlib.util.spec_from_file_location("model_structure", struct_path)
-        struct_module = importlib.util.module_from_spec(spec)
-        sys.modules["model_structure"] = struct_module
-        spec.loader.exec_module(struct_module)
-        
-        self.indices = struct_module.indices
-        self.R = struct_module.R
-        self.B_structure = struct_module.B_structure
-        self.C_structure = struct_module.C_structure
-        self.D = struct_module.D
-        self.labels = struct_module.labels
-    
-    def _create_parameter_mapper(self):
-        """Create the parameter mapper for efficient parameter handling."""
-        self.param_mapper = ParameterMapper(
-            indices=self.indices,
-            labels=self.labels,
-            model_specs=self.model_specs,
-            obs_vars=self.obs_vars,
-            output_dir=self.output_dir
-        )
-        
-        # Store trend info for easy access
-        self.trend_info = self.param_mapper.trend_info
-    
+        try:
+            spec = importlib.util.spec_from_file_location("model_structure", struct_path)
+            if spec is None or spec.loader is None:
+                 raise ImportError(f"Could not create spec for {struct_path}")
+
+            struct_module = importlib.util.module_from_spec(spec)
+            sys.modules["model_structure"] = struct_module # Add to sys.modules
+            spec.loader.exec_module(struct_module)
+
+            # Load required attributes
+            self.indices = getattr(struct_module, 'indices')
+            self.labels = getattr(struct_module, 'labels')
+            self.R = getattr(struct_module, 'R') # Shock-to-state mapping
+
+            # Validate loaded structure
+            required_indices = ['n_states', 'n_shocks', 'n_controls', 'n_observables', 'n_endogenous']
+            if not all(k in self.indices for k in required_indices):
+                 raise AttributeError(f"Missing required keys in 'indices' from {struct_path}")
+            required_labels = ['state_labels', 'observable_labels', 'shock_labels', 'param_labels']
+            if not all(k in self.labels for k in required_labels):
+                 raise AttributeError(f"Missing required keys in 'labels' from {struct_path}")
+            # Basic check on R dimensions
+            n_exo_states = self.indices['n_states'] - self.indices['n_endogenous']
+            if self.R.shape != (n_exo_states, self.indices['n_shocks']):
+                 print(f"Warning: Shape of loaded R {self.R.shape} does not match expected ({n_exo_states}, {self.indices['n_shocks']})")
+
+
+        except FileNotFoundError:
+            print(f"Error: model_structure.py not found at {struct_path}")
+            raise
+        except AttributeError as e:
+            print(f"Error: Missing expected attribute in {struct_path}: {e}")
+            raise
+        except Exception as e:
+             print(f"Error loading model structure from {struct_path}: {e}")
+             raise
+
+
+    def _define_theta_order(self):
+        """
+        Defines the strict order of parameters expected in the 'theta' vector.
+        Stores the order in self.theta_param_names.
+        """
+        # 1. DSGE core parameters (must match jacobian_evaluator expectation)
+        #    Load this order from self.labels['param_labels'] which came from parser
+        dsge_core_params = list(self.labels['param_labels'])
+
+        # 2. DSGE shock standard deviations (use order from shock_labels)
+        dsge_shock_std_params = [f"{shock}_std" for shock in self.labels['shock_labels']]
+
+        # 3. Trend shock standard deviations (use order from trend_info calculation)
+        trend_shock_std_params = list(self.trend_info['shock_std_param_names'])
+
+        # 4. Measurement error standard deviations (use order of self.obs_vars)
+        #    We assume zero for now, but define the names for future use
+        meas_error_std_params = [f"{obs_var}_meas_error_std" for obs_var in self.obs_vars]
+
+        # Combine all parameter names IN ORDER
+        self.theta_param_names = dsge_core_params + dsge_shock_std_params + trend_shock_std_params # + meas_error_std_params (Add when needed)
+
+        # Store counts for easy splitting later
+        self.n_dsge_core_params = len(dsge_core_params)
+        self.n_dsge_shock_std_params = len(dsge_shock_std_params)
+        self.n_trend_shock_std_params = len(trend_shock_std_params)
+        # self.n_meas_error_std_params = len(meas_error_std_params) # Add when needed
+
+        # Total expected length of theta
+        self.expected_theta_length = self.n_dsge_core_params + self.n_dsge_shock_std_params + self.n_trend_shock_std_params # + self.n_meas_error_std_params
+
+        print(f"Theta vector order defined. Expected length: {self.expected_theta_length}")
+        # print(f"Theta order: {self.theta_param_names}") # Uncomment for debugging
+
+
     def check_spec_vars(self):
         """Check that model specifications match variables in the model."""
-        # Check observation variable specifications
+        if not hasattr(self, 'model') or not hasattr(self, 'labels'):
+            print("Warning: Cannot check spec vars, model or labels not loaded.")
+            return
+
+        list_model_names = self.model.get('all_variables', [])
+        if not list_model_names:
+             print("Warning: 'all_variables' empty in model.json, cannot check cycle vars.")
+             return
+
+        all_cycle_vars_found = True
         for obs_var, spec in self.model_specs.items():
-            # Use the cycle variable directly for matching
-            cycle_var = spec['cycle']
-            if cycle_var not in self.model['all_variables']:
-                raise ValueError(f"Cycle variable {cycle_var} for {obs_var} not found.")
-            
-            # Check trend specification
+            # Check cycle variable existence
+            cycle_var = spec.get('cycle')
+            if cycle_var is None:
+                print(f"Warning: 'cycle' key missing in model_specs for {obs_var}.")
+                continue # Skip if spec incomplete
+            if cycle_var not in list_model_names:
+                print(f"Error: Cycle variable '{cycle_var}' for '{obs_var}' not found in model variables.")
+                all_cycle_vars_found = False
+
+            # Check trend specification existence and type
             if 'trend' not in spec:
-                raise ValueError(f"Trend specification missing for {obs_var}")
-                
+                print(f"Error: Trend specification missing for {obs_var}")
+                all_cycle_vars_found = False # Treat as error
+                continue
             trend_type = spec['trend']
             valid_trends = ['random_walk', 'second_difference', 'constant_mean']
             if trend_type not in valid_trends:
-                raise ValueError(f"Invalid trend type '{trend_type}' for {obs_var}. "
-                               f"Must be one of {valid_trends}")
-            
-            # Check that names match observed variables
-        # Check that all cycle variables (not base names) are in the model
-        list_cycle_names = [spec['cycle'] for spec in self.model_specs.values()]
-        list_model_names = self.model['all_variables']
-        if not all(item in list_model_names for item in list_cycle_names):
-            raise ValueError('Not all cycle variable names match those from the .mod file')
-    
-    def solve_and_create_state_space(self, params):
+                print(f"Error: Invalid trend type '{trend_type}' for {obs_var}. Must be one of {valid_trends}")
+                all_cycle_vars_found = False
+
+        if not all_cycle_vars_found:
+             raise ValueError("Model specification check failed. See errors above.")
+        print("Model specification check passed.")
+
+
+    def update_state_space(self, theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Solve the model and create the state-space representation.
-        
+        Updates and returns the numerical state-space matrices (T, Q_state, Z, H)
+        based on the provided parameter vector 'theta'.
+
+        Assumes zero measurement error for now (H=0).
+
         Args:
-            params: List or array of parameter values.
-            
+            theta: NumPy array containing parameter values in the predefined order:
+                   1. DSGE core parameters
+                   2. DSGE shock standard deviations
+                   3. Trend shock standard deviations
+                   (Measurement error std devs would be next if used)
+
         Returns:
-            dict: State-space representation (A, B, C, D matrices and metadata).
+            T: Augmented state transition matrix (n_aug_states x n_aug_states)
+            Q_state: Augmented process noise covariance matrix (n_aug_states x n_aug_states)
+            Z: Augmented observation matrix (n_observables x n_aug_states)
+            H: Measurement noise covariance matrix (n_observables x n_observables)
         """
-        # Evaluate Jacobians
-        a, b, c = self.evaluate_jacobians(params)
-        
-        # Import klein function from appropriate place
-        # If you have the function in this file, you can call it directly
-        f, p, stab, eig = klein(a, b, self.indices['n_states'])
-        
-        # Store solution matrices
-        self.f = f
-        self.p = p
-        self.stab = stab
-        self.eig = eig
-        
-        # Create state space representation
-        ss = {
-            'A': p.copy(),
-            'B': self.B_structure.copy(),
-            'C': self.C_structure.copy(),
-            'D': self.D.copy(),
-        }
-        
-        # Fill in policy function part of C matrix
-        ss['C'][:self.indices['n_controls'], :] = f
-        
-        # Fill in B matrix (shock impacts on states)
-        ss['B'][self.indices['n_endogenous']:, :] = self.R
-        
-        # Add metadata
-        ss.update({
-            'state_labels': self.labels['state_labels'],
-            'observable_labels': self.labels['observable_labels'],
-            'shock_labels': self.labels['shock_labels'],
-            'n_states': self.indices['n_states'],
-            'n_shocks': self.indices['n_shocks'],
-            'n_observables': self.indices['n_observables'],
-        })
-        
-        return ss
-    
-    def augment_state_space(self):
-        """
-        Augment the state space model with stochastic trends.
-        
-        Returns:
-            dict: Augmented state space representation.
-        """
-        # Get dimensions
+        # --- 1. Input Validation and Parameter Splitting ---
+        if not isinstance(theta, np.ndarray):
+             theta = np.array(theta) # Ensure theta is a numpy array
+        if theta.ndim != 1:
+             raise ValueError(f"Input 'theta' must be a 1D array, but got shape {theta.shape}")
+        if len(theta) != self.expected_theta_length:
+            raise ValueError(f"Incorrect length for 'theta'. Expected {self.expected_theta_length}, got {len(theta)}.")
+
+        # Split theta based on pre-calculated counts
+        split1 = self.n_dsge_core_params
+        split2 = split1 + self.n_dsge_shock_std_params
+        split3 = split2 + self.n_trend_shock_std_params
+
+        dsge_core_params = theta[:split1]
+        dsge_shock_stds = theta[split1:split2]
+        trend_shock_stds = theta[split2:split3]
+        # meas_error_stds = theta[split3:] # Uncomment when using measurement errors
+
+        # --- 2. Get Dimensions ---
         n_states = self.indices['n_states']
         n_shocks = self.indices['n_shocks']
         n_controls = self.indices['n_controls']
-        n_observables = n_controls + n_states
-        
-        # Total trend states from trend_info
+        n_observables = self.indices['n_observables'] # n_controls + n_states typically
+        n_endogenous = self.indices['n_endogenous']
+        n_exo_states = n_states - n_endogenous
+
         n_trend_states = self.trend_info['total_states']
-        
-        # Total dimensions in augmented system
+        n_trend_shocks = self.trend_info['total_shocks']
+
         n_aug_states = n_states + n_trend_states
-        n_aug_shocks = n_shocks + n_trend_states
-        
-        # Create augmented state labels
-        augmented_states = self.labels['state_labels'] + self.trend_info['state_labels']
-        
-        # Create augmented transition matrix (A matrix)
-        T_augmented = np.zeros((n_aug_states, n_aug_states))
-        
-        # Fill in DSGE state transition part (upper left block)
-        T_augmented[:n_states, :n_states] = self.p
-        
-        # Fill in trend transition blocks
-        build_trend_transition(T_augmented, self.trend_info, n_states)
-        
-        # Create augmented selection matrix (B matrix)
-        R_augmented = np.zeros((n_aug_states, n_aug_shocks))
-        
-        # Fill in DSGE selection part (upper left block)
-        R_augmented[:n_states, :n_shocks] = self.B_structure
-        
-        # Fill in trend selection blocks
-        build_trend_selection(R_augmented, self.trend_info, n_states, n_shocks)
-        
-        # Create augmented observation matrix (C matrix)
-        Z_augmented = np.zeros((n_observables, n_aug_states))
-        
-        # Fill in DSGE observation part (left columns)
-        Z_augmented[:, :n_states] = self.C_structure
-        
-        # Fill in trend observation blocks
-        build_trend_observation(Z_augmented, self.trend_info, self.obs_vars, self.labels['observable_labels'])
-        
-        # Store augmented state space
-        self.ss = {
-            "augmented_states": augmented_states,
-            "transition": T_augmented,
-            "selection": R_augmented,
-            "design": Z_augmented,
-            "trend_info": self.trend_info  # Store for reference
-        }
-        
-        return self.ss
-    
-    def create_simdkalman_filter(self, parameters):
+        n_aug_shocks = n_shocks + n_trend_shocks
+
+        # --- 3. Solve DSGE Part ---
+        try:
+            a, b, c_jac = self.evaluate_jacobians(dsge_core_params)
+            # Note: c_jac from evaluator might differ from Klein's C if shocks map differently
+        except Exception as e:
+             print(f"Error during Jacobian evaluation: {e}")
+             raise
+
+        try:
+            # Pass only n_states (predetermined vars) to Klein
+            f, p, stab, eig = klein(a, b, n_states)
+            self.f = f # Store policy function
+            self.p = p # Store DSGE state transition
+            if stab != 0:
+                 print("Warning: Klein solver indicates potential instability.")
+        except Exception as e:
+            print(f"Error during Klein solution: {e}")
+            raise
+
+        # --- 4. Build Augmented State Transition Matrix T ---
+        T = np.zeros((n_aug_states, n_aug_states))
+        if n_states > 0: # Avoid indexing errors if no DSGE states
+             T[:n_states, :n_states] = self.p
+        # Add trend dynamics using the utility function
+        build_trend_transition(T, self.trend_info, n_states)
+
+        # --- 5. Build Augmented Shock Selection Matrix `selection` ---
+        selection = np.zeros((n_aug_states, n_aug_shocks))
+        # Place DSGE shock-to-state mapping (self.R)
+        if n_exo_states > 0 and n_shocks > 0: # Bounds check
+             selection[n_endogenous:n_states, :n_shocks] = self.R
+        # Add trend shock selection using the utility function
+        build_trend_selection(selection, self.trend_info, n_states, n_shocks)
+
+        # --- 6. Build Process Noise Covariance Q_state ---
+        # Combine all shock std devs
+        all_shock_stds = np.concatenate((dsge_shock_stds, trend_shock_stds))
+        # Square them to get variances
+        all_shock_vars = all_shock_stds ** 2
+        # Check for negative variances (from negative std devs in theta)
+        if np.any(all_shock_vars < 0):
+             print("Warning: Negative variances detected from squaring shock std devs in theta. Taking absolute value.")
+             all_shock_vars = np.abs(all_shock_vars) # Or raise error?
+
+        # Create diagonal matrix of shock variances
+        Q_param = np.diag(all_shock_vars)
+        # Calculate the state process noise covariance
+        Q_state = selection @ Q_param @ selection.T
+
+        # --- 7. Build Augmented Observation Matrix Z ---
+        Z = np.zeros((n_observables, n_aug_states))
+        # Place policy function `f` for control variables
+        if n_controls > 0 and n_states > 0: # Bounds check
+             Z[:n_controls, :n_states] = self.f
+        # Place identity for state variables observed directly
+        if n_states > 0: # Bounds check
+             Z[n_controls:, :n_states] = np.eye(n_states)
+        # Add trend contributions to observations
+        build_trend_observation(Z, self.trend_info, self.obs_vars, self.labels['observable_labels'])
+
+        # --- 8. Build Measurement Noise Covariance H ---
+        # Assuming zero measurement error for now
+        H = np.zeros((n_observables, n_observables))
+
+        # --- (Future Enhancement for Measurement Error) ---
+        # if self.n_meas_error_std_params > 0:
+        #     meas_error_vars = meas_error_stds ** 2
+        #     if np.any(meas_error_vars < 0):
+        #          print("Warning: Negative measurement error variances detected. Taking absolute value.")
+        #          meas_error_vars = np.abs(meas_error_vars)
+        #
+        #     # Map these variances to the correct diagonal positions in H
+        #     # This requires knowing which observable corresponds to which meas_error_std
+        #     obs_label_to_index = {label: i for i, label in enumerate(self.labels['observable_labels'])}
+        #     for i, obs_var_name in enumerate(self.obs_vars):
+        #           # Find the cycle variable corresponding to the obs_var
+        #           cycle_var = self.model_specs.get(obs_var_name, {}).get('cycle')
+        #           if cycle_var and cycle_var in obs_label_to_index:
+        #                obs_idx = obs_label_to_index[cycle_var]
+        #                if i < len(meas_error_vars): # Safety check
+        #                     H[obs_idx, obs_idx] = meas_error_vars[i]
+        #           else:
+        #                print(f"Warning: Could not map measurement error for {obs_var_name} to H matrix.")
+        # --- (End Future Enhancement) ---
+
+
+        # --- 9. Return the constructed matrices ---
+        return T, Q_state, Z, H
+
+    # --- Methods for running the filter (can be added here or kept outside) ---
+    def run_filter_smoother(self, theta: np.ndarray, data_array: np.ndarray):
         """
-        Create simdkalman.KalmanFilter object with the augmented state space.
-        
+        Updates state space, creates Kalman filter, and runs smoother.
+
         Args:
-            parameters: Dictionary of parameter values
-            
+            theta: Parameter vector.
+            data_array: Observed data, shape (1, n_timesteps, n_observables).
+
         Returns:
-            simdkalman.KalmanFilter: Configured Kalman filter
+            simdkalman results object.
         """
-        if self.ss is None:
-            raise ValueError("State space not created. Call augment_state_space first.")
-        
-        # Build process noise covariance matrix using parameter mapper
-        Q = self.param_mapper.build_process_noise_covariance(parameters)
-        
-        # Build measurement noise covariance matrix
-        R = self.param_mapper.build_measurement_noise_covariance(parameters)
-        
-        # Create actual process noise in state space
-        Q_state = self.ss["selection"] @ Q @ self.ss["selection"].T
-        
-        # Create the filter
-        self.kf = simdkalman.KalmanFilter(
-            state_transition=self.ss["transition"],
+        # 1. Get updated state-space matrices
+        T, Q_state, Z, H = self.update_state_space(theta)
+
+        # 2. Create simdkalman filter
+        kf = simdkalman.KalmanFilter(
+            state_transition=T,
             process_noise=Q_state,
-            observation_model=self.ss["design"],
-            observation_noise=R
+            observation_model=Z,
+            observation_noise=H
         )
-        
-        return self.kf
-    
-    def simulate_states_with_trends(self, data_array):
-        """
-        Simulate states with stochastic trends using simdkalman.
-        
-        Args:
-            data_array: Data array with shape (1, n_timesteps, n_observed_vars)
-            
-        Returns:
-            Results from simdkalman.KalmanFilter.smooth()
-        """
-        if self.kf is None:
-            raise ValueError("simdkalman filter not initialized. Call create_simdkalman_filter first.")
-        
-        # Run simulation smoother
-        results = self.kf.smooth(data_array)
-        
-        return results
+
+        # 3. Run smoother
+        # Ensure data_array matches expected n_observables dimension
+        if data_array.shape[2] != H.shape[0]:
+             raise ValueError(f"Data array's last dimension ({data_array.shape[2]}) does not match number of observables ({H.shape[0]})")
+
+        # Handle potential NaNs or Infs in matrices before filtering
+        if not np.all(np.isfinite(T)): print("Warning: Non-finite values in T matrix"); T = np.nan_to_num(T)
+        if not np.all(np.isfinite(Q_state)): print("Warning: Non-finite values in Q_state matrix"); Q_state = np.nan_to_num(Q_state)
+        if not np.all(np.isfinite(Z)): print("Warning: Non-finite values in Z matrix"); Z = np.nan_to_num(Z)
+        if not np.all(np.isfinite(H)): print("Warning: Non-finite values in H matrix"); H = np.nan_to_num(H)
+
+        # Re-create filter if matrices were modified
+        kf = simdkalman.KalmanFilter(state_transition=T, process_noise=Q_state, observation_model=Z, observation_noise=H)
+
+
+        try:
+            smoothed_results = kf.smooth(data_array)
+            return smoothed_results
+        except Exception as e:
+             print(f"Error during Kalman smoothing: {e}")
+             # You might want to inspect the matrices T, Q_state, Z, H here
+             # print("T:\n", T)
+             # print("Q_state:\n", Q_state)
+             # print("Z:\n", Z)
+             # print("H:\n", H)
+             raise # Re-raise the error after printing info
+
+
 
 
 class DataProcessor:
@@ -2118,135 +2016,139 @@ def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
     return f, p, stab, eig
 
 
-def run_smoother(data, parameters, model_specs, observed_variables, output_dir):
-    """
-    Run the simulation smoother on the augmented state space model.
-    All parameter mappings and matrix positions are cached for efficiency.
-    
-    Args:
-        data: Pandas DataFrame with observed data
-        parameters: Dictionary mapping parameter names to values
-        model_specs: Dictionary with specifications for observed variables
-        observed_variables: List of observed variable names
-        output_dir: Directory containing model files
-        
-    Returns:
-        solver: ModelSolver instance
-        results: Results from the simulation smoother
-    """
-    # 1. Create data processor
-    data_processor = DataProcessor(observed_variables)
-    
-    # 2. Prepare data - only done once
-    reshaped_data, dates = data_processor.prepare_data(data)
-    
-    # 3. Create ModelSolver instance
-    solver = ModelSolver(output_dir, model_specs, observed_variables)
-    
-    # 4. Get DSGE parameters from mapper
-    dsge_params = solver.param_mapper.get_dsge_parameters(parameters)
-    
-    # 5. Solve the DSGE model
-    solver.solve_and_create_state_space(dsge_params)
-    
-    # 6. Augment the state space with stochastic trends
-    solver.augment_state_space()
-    
-    # 7. Create simdkalman filter with parameters
-    # This already uses the parameter mapper to efficiently build noise matrices
-    solver.create_simdkalman_filter(parameters)
-    
-    # 8. Run simulation smoother
-    simdkalman_results = solver.simulate_states_with_trends(reshaped_data)
-    
-    # 9. Process results
-    processed_results = data_processor.process_results(
-        simdkalman_results, 
-        solver.ss["augmented_states"]
-    )
-    
-    return solver, processed_results
-
-
 
 # Example usage - Main script
 if __name__ == "__main__":
-    import pandas as pd
-    
-    # Get the absolute path of the current script
+
+    # --- Assume these steps were run previously ---
+    # 1. DynareParser generated model.json, jacobian_evaluator.py, model_structure.py
+    # ----------------------------------------------
     script_path = os.path.abspath(__file__)
-
-    # Extract the directory from the script path
     script_dir = os.path.dirname(script_path)
-
-    # Change the current working directory
     os.chdir(script_dir)
-
-    # Verify the change
     print(f"Current working directory: {os.getcwd()}")
 
-    # 1. Parse the Dynare model and generate model files
-    dynare_file = "qpm_simpl1.dyn"  # Replace with your Dynare model file
-    output_dir = "model_files"
-    
-    # Create the output directory if it doesn't exist
+    output_dir = "model_files" # Directory containing generated files
+    dynare_file = "qpm_simpl1.dyn" # Just needed for reference if re-parsing
+
+    # Ensure output directory exists (it should if parser ran)
     if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+         print(f"Error: Output directory '{output_dir}' not found. Run DynareParser first.")
+         sys.exit(1)
 
-    # Observed variables and their specifications. 
-    # This dictionary provides important structural information for setting up the model.
+
+    # Define model specifications (as used by parser and solver)
     model_specs = {
-        "rs_obs": {"trend": "random_walk", "cycle": "RS"},  # rs_obs has a random walk trend
-        "dla_cpi_obs": {"trend": "random_walk", "cycle": "DLA_CPI"},  # dla_cpi_obs has a random-walk trend
-        "l_gdp_obs": {"trend": "random_walk", "cycle": "L_GDP_GAP"}  # l_gdp_obs has a random walk trend
+        "rs_obs": {"trend": "random_walk", "cycle": "RS"},
+        "dla_cpi_obs": {"trend": "random_walk", "cycle": "DLA_CPI"},
+        "l_gdp_obs": {"trend": "random_walk", "cycle": "L_GDP_GAP"}
     }
-    observed_variables = list(model_specs.keys())  # The observed variables used in the estimation
+    observed_variables = list(model_specs.keys())
 
-    DynareParser.parse_and_generate_files(
-        dynare_file, output_dir, obs_vars=observed_variables, model_specs=model_specs
-    )
-    
-    
-    # 2. Load and prepare the data
-    us_data = pd.read_csv('transformed_data_us.csv', index_col='Date', parse_dates=True)
-    
-    # 3. Set initial parameter values. Make sure these match your Dynare model parameters.
-   # Define filtration parameters
-    initial_param_values = {
-        'b1': 0.7,
-        'b4': 0.7,
-        'a1': 0.5,
-        'a2': 0.1,
-        'g1': 0.7,
-        'g2': 0.3,
-        'g3': 0.25,
-        'rho_DLA_CPI': 0.75,
-        'rho_L_GDP_GAP': 0.75,
-        'rho_rs': 0.8,
-        'rho_rs2': 0.1,
-        "RES_L_GDP_GAP_lag_shock": 1,
-        "RES_RS_lag_shock": 1,
-        "RES_DLA_CPI_lag_shock": 1,
-        "rs_obs_level_shock": 0.5,
-        "dla_cpi_obs_level_shock": 0.5,        
-        "l_gdp_gap_obs_mean_shock": 0.1,
-        "rs_obs_meas_error": 0.1,
-        "dla_cpi_obs_meas_error": 0.1,
-        "l_gdp_gap_obs_meas_error": 0.1
+    # --- Main workflow ---
+    # 1. Create ModelSolver instance (loads structure, defines theta order)
+    try:
+         solver = ModelSolver(output_dir, model_specs, observed_variables)
+    except Exception as e:
+         print(f"Failed to initialize ModelSolver: {e}")
+         sys.exit(1)
+
+
+    # 2. Load and prepare data (using DataProcessor or similar)
+    try:
+        us_data = pd.read_csv('transformed_data_us.csv', index_col='Date', parse_dates=True)
+        # Ensure data has the 'observed_variables' columns
+        if not all(v in us_data.columns for v in observed_variables):
+             missing_vars = [v for v in observed_variables if v not in us_data.columns]
+             raise ValueError(f"Data file missing required columns: {missing_vars}")
+
+        # Use only the necessary columns in the correct order
+        data_for_filter = us_data[observed_variables].values
+        # Reshape for simdkalman: (1, n_timesteps, n_observables)
+        data_array = data_for_filter.reshape(1, data_for_filter.shape[0], data_for_filter.shape[1])
+        data_array = data_array.astype(float) # Ensure float type
+        dates = us_data.index # Keep dates for results processing
+
+    except FileNotFoundError:
+         print("Error: Data file 'transformed_data_us.csv' not found.")
+         sys.exit(1)
+    except ValueError as e:
+         print(f"Error preparing data: {e}")
+         sys.exit(1)
+
+
+    # 3. Define parameter values `theta` IN THE CORRECT ORDER
+    #    Get the order from solver.theta_param_names
+    #    Example values (replace with your actual draw/initial values)
+    initial_param_dict = {
+        # DSGE Core Params (Order from labels['param_labels'])
+        'b1': 0.7, 'b4': 0.7, 'a1': 0.5, 'a2': 0.1, 'g1': 0.7, 'g2': 0.3, 'g3': 0.25,
+        'rho_DLA_CPI': 0.75, 'rho_L_GDP_GAP': 0.75, 'rho_rs': 0.8, 'rho_rs2': 0.1,
+        # DSGE Shock STDs (Order from labels['shock_labels']) - Assuming shocks are RES_...
+        'RES_L_GDP_GAP_std': 1.0, # Parameter name should end in _std
+        'RES_RS_std': 1.0,
+        'RES_DLA_CPI_std': 1.0,
+        # Trend Shock STDs (Order from trend_info calculation)
+        'rs_obs_level_shock_std': 0.5,
+        'dla_cpi_obs_level_shock_std': 0.5,
+        'l_gdp_obs_level_shock_std': 0.1 # Adjust name based on trend_info output
+        # Measurement Error STDs (Order from obs_vars) - OMITTED FOR NOW
+        # 'rs_obs_meas_error_std': 0.1,
+        # 'dla_cpi_obs_meas_error_std': 0.1,
+        # 'l_gdp_obs_meas_error_std': 0.1
     }
-    
-    
-    # 4. Run the smoother. This uses the parsed model and data.
-    solver, results = run_smoother(
-        us_data, initial_param_values, model_specs, observed_variables, output_dir
-    )
-    
-    # 5. Process and analyze the results
-    print("Smoothed trend components:")
-    trend_columns = [col for col in results['smoothed_states'].columns if any(x in col for x in ['level', 'slope', 'curvature', 'mean'])]
-    print(results['smoothed_states'][trend_columns].head())
-    
-    print("\nSmoothed cyclical components:")
-    cycle_columns = [col for col in results['smoothed_states'].columns if col in ['RS', 'DLA_CPI', 'L_GDP_GAP']]  # Select cyclical component columns
-    print(results['smoothed_states'][cycle_columns].head())
 
+    # Construct theta array using the defined order
+    try:
+        theta_values = [initial_param_dict[pname] for pname in solver.theta_param_names]
+        theta = np.array(theta_values)
+        print(f"Constructed theta vector with {len(theta)} values.")
+    except KeyError as e:
+        print(f"Error: Parameter '{e}' not found in initial_param_dict. Check parameter names.")
+        # Find missing/mismatched names:
+        provided_keys = set(initial_param_dict.keys())
+        expected_keys = set(solver.theta_param_names)
+        print(f"Missing from dict: {expected_keys - provided_keys}")
+        print(f"Extra in dict: {provided_keys - expected_keys}")
+        sys.exit(1)
+
+
+    # 4. Update state space and run smoother
+    try:
+        # Option 1: Call update_state_space then create filter manually
+        # T, Q_state, Z, H = solver.update_state_space(theta)
+        # kf = simdkalman.KalmanFilter(state_transition=T, process_noise=Q_state, observation_model=Z, observation_noise=H)
+        # simdkalman_results = kf.smooth(data_array)
+
+        # Option 2: Use helper method if defined
+        simdkalman_results = solver.run_filter_smoother(theta, data_array)
+
+        print("Smoother run successfully.")
+
+    except Exception as e:
+        print(f"Error running smoother: {e}")
+        # Add more diagnostics here if needed
+        sys.exit(1)
+
+    # 5. Process results (using DataProcessor or manually)
+    # Get state labels (including augmented trend states)
+    augmented_state_labels = solver.labels['state_labels'] + solver.trend_info['state_labels']
+
+    # Extract smoothed means
+    smoothed_means = simdkalman_results.smoothed_means[0] # Get first batch
+
+    # Create DataFrame
+    results_df = pd.DataFrame(smoothed_means, index=dates, columns=augmented_state_labels)
+
+    print("\nSmoothed States (Head):")
+    print(results_df.head())
+
+    # Extract and print specific components as before
+    print("\nSmoothed trend components:")
+    trend_columns = [col for col in results_df.columns if any(x in col for x in ['level', 'slope', 'curvature', 'mean'])]
+    print(results_df[trend_columns].head())
+
+    print("\nSmoothed cyclical components (DSGE states):")
+    # Assuming cycle vars match DSGE state names (adjust if needed)
+    cycle_columns = [spec['cycle'] for spec in model_specs.values() if spec['cycle'] in results_df.columns]
+    print(results_df[cycle_columns].head())
