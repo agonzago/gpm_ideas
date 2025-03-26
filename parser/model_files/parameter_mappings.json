@@ -1,0 +1,88 @@
+{
+  "param_map": {
+    "SHK_L_GDP_GAP_shock": [
+      "Q",
+      0,
+      0
+    ],
+    "SHK_DLA_CPI_shock": [
+      "Q",
+      1,
+      1
+    ],
+    "SHK_RS_shock": [
+      "Q",
+      2,
+      2
+    ],
+    "rs_obs_level_shock": [
+      "Q",
+      3,
+      3
+    ],
+    "dla_cpi_obs_level_shock": [
+      "Q",
+      4,
+      4
+    ],
+    "l_gdp_obs_level_shock": [
+      "Q",
+      5,
+      5
+    ]
+  },
+  "trend_info": {
+    "state_labels": [
+      "rs_obs_level",
+      "dla_cpi_obs_level",
+      "l_gdp_obs_level"
+    ],
+    "components": {
+      "rs_obs": {
+        "type": "random_walk",
+        "components": {
+          "level": {
+            "state_pos": 7,
+            "shock_pos": 3
+          }
+        }
+      },
+      "dla_cpi_obs": {
+        "type": "random_walk",
+        "components": {
+          "level": {
+            "state_pos": 8,
+            "shock_pos": 4
+          }
+        }
+      },
+      "l_gdp_obs": {
+        "type": "random_walk",
+        "components": {
+          "level": {
+            "state_pos": 9,
+            "shock_pos": 5
+          }
+        }
+      }
+    },
+    "total_states": 3,
+    "param_positions": {
+      "rs_obs_level_shock": [
+        "Q",
+        3,
+        3
+      ],
+      "dla_cpi_obs_level_shock": [
+        "Q",
+        4,
+        4
+      ],
+      "l_gdp_obs_level_shock": [
+        "Q",
+        5,
+        5
+      ]
+    }
+  }
+}

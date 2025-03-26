@@ -18,10 +18,13 @@ df = load_and_format_data(file_path=file_path)
 df['l_gdp_obs'] = np.log(df['GDP'])
 df['l_cpi_obs'] = np.log(df['CPI'])
 df['dla_cpi_obs'] = 400*np.diff(df['l_cpi_obs'], prepend=True)
+df['dla_gdp_obs'] = 400*np.diff(df['l_gdp_obs'], prepend=True)
 df['rs_obs'] = df['RS']
 #Drop the first observation 
 df = df.iloc[1:,:]
-df = df[['l_gdp_obs', 'dla_cpi_obs', 'rs_obs']]
+df = df[['l_gdp_obs', 'dla_cpi_obs', 'rs_obs', 'dla_gdp_obs']]
 df.to_csv('/home/laptopubuntu/work/gpm_ideas/parser/data/transformed_data_us.csv')
 
-df[['dla_cpi_obs', 'rs_obs']].plot()
+df[['dla_cpi_obs', 'rs_obs', 'dla_gdp_obs']].plot()
+
+ 

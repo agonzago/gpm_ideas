@@ -1,48 +1,224 @@
-#%%
-import re
-import json
-import os
-import numpy as np
-import scipy.linalg as la
-import sys
-import sympy as sy
-import matplotlib.pyplot as plt
-import numpy as np
-from scipy.linalg import lu_factor, lu_solve, norm
-
-import numpy as np
-import pandas as pd
-import importlib.util
-
-import pandas as pd
-import matplotlib.pyplot as plt
-import simdkalman
-from typing import Optional, List
-
-import numpy as np
-import simdkalman
-
+# dsge_trend_filter.py
 
 import numpy as np
 import pandas as pd
 import json
 import os
 import sys
-import importlib.util
-import simdkalman
-from typing import Dict, List, Optional, Tuple, Any
-
-import numpy as np
-import json
-import os
 import pickle
+import importlib.util
+import simdkalman
+import re
+import scipy.linalg as la
+from scipy.linalg import lu_factor, lu_solve, norm
 from typing import Dict, List, Optional, Tuple, Any
+import sympy as sy  # Import sympy
+# Utility functions for trend components
+def calculate_trend_positions(model_specs, obs_vars, n_states, n_shocks):
+    """
+    Calculate positions for each trend component in the augmented state vector.
+    
+    Args:
+        model_specs: Dictionary with specifications for observed variables
+        obs_vars: List of observed variable names
+        n_states: Number of original state variables
+        n_shocks: Number of original shock variables
+        
+    Returns:
+        dict: Information about trend component positions
+    """
+    trend_info = {
+        'state_labels': [],       # Labels for trend state components
+        'components': {},         # Component info for each observed variable
+        'total_states': 0,        # Total number of trend states
+        'param_positions': {}     # Maps parameter names to matrix positions
+    }
+    
+    # Start position after original states
+    pos = n_states
+    shock_pos = n_shocks
+    
+    # Process each observed variable
+    for obs_var in obs_vars:
+        trend_type = model_specs[obs_var]['trend']
+        var_info = {'type': trend_type, 'components': {}}
+        
+        # Add appropriate state components based on trend type
+        if trend_type == 'random_walk':
+            # Only level component
+            var_info['components']['level'] = {
+                'state_pos': pos,
+                'shock_pos': shock_pos
+            }
+            
+            # Add shock parameter mapping
+            param_name = f"{obs_var}_level_shock"
+            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+            
+            trend_info['state_labels'].append(f"{obs_var}_level")
+            pos += 1
+            shock_pos += 1
+            
+        elif trend_type == 'second_difference':
+            # Level, slope, and curvature components
+            var_info['components']['level'] = {
+                'state_pos': pos,
+                'shock_pos': shock_pos
+            }
+            
+            # Add shock parameter mapping
+            param_name = f"{obs_var}_level_shock"
+            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+            
+            trend_info['state_labels'].append(f"{obs_var}_level")
+            pos += 1
+            shock_pos += 1
+            
+            var_info['components']['slope'] = {
+                'state_pos': pos,
+                'shock_pos': shock_pos
+            }
+            
+            # Add shock parameter mapping
+            param_name = f"{obs_var}_slope_shock"
+            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+            
+            trend_info['state_labels'].append(f"{obs_var}_slope")
+            pos += 1
+            shock_pos += 1
+            
+            var_info['components']['curvature'] = {
+                'state_pos': pos,
+                'shock_pos': shock_pos
+            }
+            
+            # Add shock parameter mapping
+            param_name = f"{obs_var}_curvature_shock"
+            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+            
+            trend_info['state_labels'].append(f"{obs_var}_curvature")
+            pos += 1
+            shock_pos += 1
+            
+        elif trend_type == 'constant_mean':
+            # Only constant level (no dynamics)
+            var_info['components']['level'] = {
+                'state_pos': pos,
+                'shock_pos': shock_pos
+            }
+            
+            # Add shock parameter mapping
+            param_name = f"{obs_var}_mean_shock"
+            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+            
+            trend_info['state_labels'].append(f"{obs_var}_mean")
+            pos += 1
+            shock_pos += 1
+        
+        # Store information for this variable
+        trend_info['components'][obs_var] = var_info
+    
+    # Update total trend states
+    trend_info['total_states'] = pos - n_states
+    
+    return trend_info
 
-import numpy as np
-import pandas as pd
-#from model_solver_v2 import ModelSolver
-#from parameter_mapper import ParameterMapper
-from typing import Dict, List, Tuple, Any
+def build_trend_transition(T_matrix, trend_info, n_states):
+    """
+    Build the transition matrix blocks for trend components.
+    
+    Args:
+        T_matrix: Transition matrix to fill
+        trend_info: Trend component position information
+        n_states: Number of original state variables
+    """
+    # Process each observed variable
+    for obs_var, var_info in trend_info['components'].items():
+        trend_type = var_info['type']
+        
+        # Set transition dynamics based on trend type
+        if trend_type == 'random_walk':
+            # Level follows random walk: level_t = level_{t-1} + shock
+            level_pos = var_info['components']['level']['state_pos']
+            T_matrix[level_pos, level_pos] = 1.0
+            
+        elif trend_type == 'second_difference':
+            # Level follows: level_t = level_{t-1} + slope_{t-1} + shock
+            # Slope follows: slope_t = slope_{t-1} + curvature_{t-1} + shock
+            # Curvature follows: curvature_t = curvature_{t-1} + shock
+            level_pos = var_info['components']['level']['state_pos']
+            slope_pos = var_info['components']['slope']['state_pos']
+            curv_pos = var_info['components']['curvature']['state_pos']
+            
+            # Level depends on itself and slope
+            T_matrix[level_pos, level_pos] = 1.0
+            T_matrix[level_pos, slope_pos] = 1.0
+            
+            # Slope depends on itself and curvature
+            T_matrix[slope_pos, slope_pos] = 1.0
+            T_matrix[slope_pos, curv_pos] = 1.0
+            
+            # Curvature depends only on itself
+            T_matrix[curv_pos, curv_pos] = 1.0
+            
+        elif trend_type == 'constant_mean':
+            # Constant mean doesn't change: mean_t = mean_{t-1} + small_shock
+            mean_pos = var_info['components']['level']['state_pos']
+            T_matrix[mean_pos, mean_pos] = 1.0
+
+def build_trend_selection(R_matrix, trend_info, n_states, n_shocks):
+    """
+    Build the selection matrix blocks for trend components.
+    
+    Args:
+        R_matrix: Selection matrix to fill
+        trend_info: Trend component position information
+        n_states: Number of original state variables
+        n_shocks: Number of original shock variables
+    """
+    # For each variable and its trend components
+    for obs_var, var_info in trend_info['components'].items():
+        for comp_name, comp_info in var_info['components'].items():
+            state_pos = comp_info['state_pos']
+            shock_pos = comp_info['shock_pos']
+            
+            # Direct mapping from shock to state
+            R_matrix[state_pos, shock_pos] = 1.0
+
+def build_trend_observation(Z_matrix, trend_info, obs_vars, observable_labels):
+    """
+    Build the observation matrix blocks for trend components.
+    
+    Args:
+        Z_matrix: Observation matrix to fill
+        trend_info: Trend component position information
+        obs_vars: List of observed variable names
+        observable_labels: List of all observable labels
+    """
+    # For each observed variable
+    for obs_var in obs_vars:
+        # Find base variable (without _obs)
+        base_var = obs_var.replace("_obs", "")
+        
+        # Find the index in the observable list
+        try:
+            var_idx = observable_labels.index(base_var)
+        except ValueError:
+            continue  # Skip if not found
+        
+        # Get trend components for this variable
+        var_info = trend_info['components'].get(obs_var, {})
+        if not var_info:
+            continue
+            
+        # Map the appropriate trend component to the observation
+        if 'level' in var_info['components']:
+            level_pos = var_info['components']['level']['state_pos']
+            Z_matrix[var_idx, level_pos] = 1.0
+
+
+
+
 
 class DynareParser:
     def __init__(self, file_path):
@@ -1221,257 +1397,6 @@ class DynareParser:
 
 
 
-class ModelSolver:
-    def __init__(self, output_dir, model_specs, obs_vars):
-        self.output_dir = output_dir
-        self.model_specs = model_specs
-        self.obs_vars = obs_vars #add observed vars to the main class
-
-        self.load_model()
-        self.load_jacobian_evaluator()
-        self.load_model_structure()
-
-        # New attributes for simdkalman setup
-        self.kf = None
-        self.ss = None
-        self.augmented_ss = None #added augmented state space
-
-        self.check_spec_vars() #check observed vars
-
-    def check_spec_vars(self):
-        #Check model specs with var and with cycle. Name must match.
-        for obs_var, spec in self.model_specs.items():
-
-            ##a) Check variable names
-            var = obs_var.replace("_obs", "")
-            if var not in self.model['all_variables']:
-                raise ValueError(f"Variable {var} not found in the Dynare model.")
-
-            ##b) Check if Cycle variable name match variables in model
-            cycle_var = spec['cycle']
-            if cycle_var not in self.model['all_variables']:
-                raise ValueError(f"Cycle variable {cycle_var} for {obs_var} not found in the Dynare model.")
-
-            ##c) Check that names match to variables to be observed
-            list_obs_names = [str(i).replace('_obs', '') for i in self.obs_vars]
-            list_model_names = [str(i) for i in self.model['all_variables']]
-
-            # Check that each name in list_obs_names is in list_model_names
-            if not all(item in list_model_names for item in list_obs_names):
-                raise ValueError('Not all variable names match those from the .mod file')
-
-    def load_model(self):
-        """Loads the model from the JSON file."""
-        model_path = os.path.join(self.output_dir, "model.json")
-        with open(model_path, 'r') as f:
-            self.model = json.load(f)
-
-    def load_jacobian_evaluator(self):
-        """Loads the Jacobian evaluator function from the Python file."""
-        jac_path = os.path.join(self.output_dir, "jacobian_evaluator.py")
-        spec = importlib.util.spec_from_file_location("jacobian_evaluator", jac_path)
-        self.jacobian_module = importlib.util.module_from_spec(spec)
-        sys.modules["jacobian_evaluator"] = self.jacobian_module
-        spec.loader.exec_module(self.jacobian_module)
-        self.evaluate_jacobians = self.jacobian_module.evaluate_jacobians
-
-    def load_model_structure(self):
-        """Loads the pre-computed model structure from the Python file."""
-        struct_path = os.path.join(self.output_dir, "model_structure.py")
-        spec = importlib.util.spec_from_file_location("model_structure", struct_path)
-        struct_module = importlib.util.module_from_spec(spec)
-        sys.modules["model_structure"] = struct_module
-        spec.loader.exec_module(struct_module)
-
-        self.indices = struct_module.indices
-        self.R = struct_module.R
-        self.B_structure = struct_module.B_structure
-        self.C_structure = struct_module.C_structure
-        self.D = struct_module.D
-        self.labels = struct_module.labels
-        try:
-            self.T_trend_structure = struct_module.T_trend_structure
-            self.R_trend_structure = struct_module.R_trend_structure
-            self.C_trend_structure = struct_module.C_trend_structure
-        except:
-            print("Not loading trends")
-
-    def solve_and_create_state_space(self, params):
-        """
-        Solves the model and creates the state-space representation.
-
-        Args:
-            params (list): List of parameter values.
-
-        Returns:
-            dict: State-space matrices, names and descriptions are in the return function.
-        """
-        # Evaluate Jacobians
-        a, b, c = self.evaluate_jacobians(params)
-
-        # Solve model with Klein's method
-        f, p, stab, eig = klein(a, b, self.indices['n_states'])
-
-        # Create state space
-        self.f = f  # Store f and p for IRF generation
-        self.p = p
-        self.stab = stab
-        self.eig = eig
-
-        ss = {
-            'A': p.copy(),
-            'B': self.B_structure.copy(),
-            'C': self.C_structure.copy(),
-            'D': self.D.copy(),
-        }
-
-        # Fill in policy function part of C matrix
-        ss['C'][:self.indices['n_controls'], :] = f
-
-        # Fill in B matrix (shock impacts on states)
-        ss['B'][self.indices['n_endogenous']:, :] = self.R  # Ensure R is still used
-
-        # Add metadata
-        ss.update({
-            'state_labels': self.labels['state_labels'],
-            'observable_labels': self.labels['observable_labels'],
-            'shock_labels': self.labels['shock_labels'],
-            'n_states': self.indices['n_states'],
-            'n_shocks': self.indices['n_shocks'],
-            'n_observables': self.indices['n_observables'],
-        })
-
-        return ss
-
-    def augment_state_space(self):
-        """Augment the state space model with stochastic trends."""
-        # 1. Define Dimensions
-        self.n_obs_vars = len(self.obs_vars)
-        self.n_trend_states = 3 * self.n_obs_vars #level, mu, delta for trend
-
-        # 2. Build Augmented Matrices
-        self.augmented_states= self.labels['state_labels'] + [f"{var}_level" for var in self.obs_vars] + [f"{var}_mu" for var in self.obs_vars] + [f"{var}_delta" for var in self.obs_vars]
-
-        # Build new selection matrix
-        R_augmented = self.augment_selection_matrix()
-
-        # Build new transition matrix
-        T_augmented = self.augment_transition_matrix()
-
-        # Build new observation matrix
-        Z_augmented = self.augment_observation_matrix()
-
-        augmented_ss =  {
-            "augmented_states" : self.augmented_states,
-            "transition" : T_augmented,
-            "selection" : R_augmented,
-            "design": Z_augmented
-        }
-        return augmented_ss
-
-    def augment_transition_matrix(self):
-        '''Build Transition Matrix. We are using 3 states: level, slope, and curvature'''
-
-        state_names = self.labels['state_labels']
-        original_states = len(state_names)
-        T = np.zeros((len(self.labels['state_labels']) + (3* self.n_obs_vars), len(self.labels['state_labels']) + (3* self.n_obs_vars)))
-
-        # 1) Set the original transition
-        T[:len(self.labels['state_labels']), :len(self.labels['state_labels'])] = self.p #get the p matrix in the right position
-
-        # 2) Add stochastic trends components
-        T[len(self.labels['state_labels']):, len(self.labels['state_labels']):] = self.T_trend_structure
-        return T
-
-    def augment_selection_matrix(self):
-        '''Build Transition Matrix. We are using 3 states: level, slope, and curvature'''
-
-        R = np.zeros((len(self.labels['state_labels']) + (3* self.n_obs_vars), self.indices['n_shocks'] + (3* self.n_obs_vars)))
-
-        # 1) Set the original transition
-        R[:len(self.labels['state_labels']), :self.indices['n_shocks']] = self.B_structure #get the original selection matrix
-        R[len(self.labels['state_labels']):, self.indices['n_shocks']:] = self.R_trend_structure
-
-        return R
-
-    def augment_observation_matrix(self):
-        original_obs = len(self.labels['observable_labels'])
-        obs = np.zeros((original_obs, len(self.labels['state_labels']) + (3* self.n_obs_vars)))
-
-        # 1) Load in the values from the design matrix
-
-        obs[:len(self.labels['observable_labels']), :len(self.labels['state_labels'])] = self.C_structure #copy the same strutcutre
-        original_obs = len(self.labels['observable_labels'])
-
-        # Now itterate of the obs var to load them to the level
-        # 2) Set up
-        for counter, obs_var in enumerate(self.obs_vars):
-            var = obs_var.replace("_obs", "")
-            state = self.labels['observable_labels'].index(var)
-
-            obs[state, len(self.labels['state_labels']) + (counter*3)] = 1.0  # load on level
-
-        return obs
-        
-    def create_simdkalman_filter(self, augmented_parameters):
-        """Create simdkalman.KalmanFilter object."""
-
-        # 1) Check that the DSGE is not None object
-        if self.ss is None:
-            raise ValueError("DSGE model solution does not converges, we cannot run the simulation")
-
-        # 2) The most important object that you need is augmented state.
-        self.augmented_ss = self.augment_state_space()
-
-        # 3) Get dimensions
-        n_augmented_states = len(self.augmented_ss['augmented_states'])
-        n_observable = len(self.labels['observable_labels'])
-
-        # 4) Create the process noise covariance matrix (Q)
-        Q = np.zeros((n_augmented_states, n_augmented_states))
-
-        # 5) Fill diagonal with shock standard deviations from augmented_parameters
-        for i, shock in enumerate(self.labels['shock_labels']):
-            if f"{shock}" in augmented_parameters:
-                try:
-                    shock_index = self.labels['shock_labels'].index(shock)
-                    Q[shock_index, shock_index] = augmented_parameters[f"{shock}"]**2 #set the square
-                except ValueError as e:
-                    print(f"Shock name is not valid on the labels list {e}")
-
-        initial_trend_position =  len(self.labels['shock_labels'])
-        for j,var in enumerate(self.obs_vars):
-            # print('Iterar sobre la lista de las variables para setear las varianzas')
-            q =   initial_trend_position  + (j*3)
-            Q[q,q] = augmented_parameters[f'trend_var_{var}']
-            Q[q+1,q+1] = augmented_parameters[f'trend_slope_{var}']
-            Q[q+2,q+2] = augmented_parameters[f'trend_curve_{var}']
-
-        # 6) Stabilizitation with obervation diagonal.
-        H = np.eye(len(self.labels['observable_labels']))*1e-5 # Remember to stabilize this value        #observation noise
-
-        # 7) Set simdkalman parameters
-        self.kf = simdkalman.KalmanFilter(
-            state_transition = self.augmented_ss["transition"],
-            process_noise = Q,  # process_noise,
-            observation_model = self.augmented_ss["design"],
-            observation_noise = H
-        )
-
-    def simulate_states_with_trends(self, data):
-        """Simulate states with stochastic trends using simdkalman."""
-        # Check if simdkalman filter exists
-        if self.kf is None:
-            raise ValueError("simdkalman filter not initialized. Call create_simdkalman_filter first.")
-
-         # Now correctly handle dimensions using model's data
-        data_array = data.reshape(1, -1, len(self.obs_vars))
-
-        # Run simulation smoother
-        results = self.kf.smooth(data_array)
-
-        return results
-
 
 class ParameterMapper:
     """
@@ -1518,9 +1443,6 @@ class ParameterMapper:
         """
         Build the mappings between parameters and matrix locations.
         """
-        # Import trend utils for calculations
-        from trend_utils import calculate_trend_positions
-        
         # Calculate trend information
         self.trend_info = calculate_trend_positions(
             self.model_specs, 
@@ -1641,10 +1563,10 @@ class ParameterMapper:
         # Fill diagonal elements based on parameter mapping
         for param_name, param_value in parameters.items():
             if param_name in self.param_map:
-                matrix_type, row, col = self.param_map[param_name]
-                if matrix_type == 'Q':
+                mapping = self.param_map[param_name]
+                if mapping[0] == 'Q':
                     # Square the parameter value to get variance
-                    Q[row, col] = param_value**2
+                    Q[mapping[1], mapping[2]] = param_value**2
         
         return Q
     
@@ -1667,10 +1589,10 @@ class ParameterMapper:
         # Fill diagonal elements based on parameter mapping
         for param_name, param_value in parameters.items():
             if param_name in self.param_map:
-                matrix_type, row, col = self.param_map[param_name]
-                if matrix_type == 'R':
+                mapping = self.param_map[param_name]
+                if mapping[0] == 'R':
                     # Square the parameter value to get variance
-                    R[row, col] = param_value**2
+                    R[mapping[1], mapping[2]] = param_value**2
         
         # Set a small default value for stability if no parameters mapped
         if np.all(R == 0):
@@ -1700,13 +1622,275 @@ class ParameterMapper:
         # Fill parameter vector based on mapping
         for param_name, param_value in parameters.items():
             if param_name in self.param_map:
-                matrix_type, position = self.param_map[param_name][:2]
-                if matrix_type == 'DSGE':
-                    dsge_params[position] = param_value
+                mapping = self.param_map[param_name]
+                if mapping[0] == 'DSGE':
+                    dsge_params[mapping[1]] = param_value
         
         return dsge_params
 
-# data_preparation.py
+
+class ModelSolver:
+    """
+    Enhanced ModelSolver class with improved state space construction
+    and efficient parameter handling.
+    """
+    
+    def __init__(self, output_dir, model_specs, obs_vars):
+        """
+        Initialize the ModelSolver.
+        
+        Args:
+            output_dir: Directory containing model files
+            model_specs: Dictionary with specifications for observed variables
+            obs_vars: List of observed variable names
+        """
+        self.output_dir = output_dir
+        self.model_specs = model_specs
+        self.obs_vars = obs_vars
+        
+        # Load model components
+        self.load_model()
+        self.load_jacobian_evaluator()
+        self.load_model_structure()
+        
+        # Initialize matrices for state space
+        self.ss = None  # Will hold state space representation
+        self.kf = None  # Will hold Kalman filter object
+        
+        # Create the parameter mapper
+        self._create_parameter_mapper()
+        
+        # Validate model specifications
+        self.check_spec_vars()
+    
+    def load_model(self):
+        """Load the model from the JSON file."""
+        model_path = os.path.join(self.output_dir, "model.json")
+        with open(model_path, 'r') as f:
+            self.model = json.load(f)
+    
+    def load_jacobian_evaluator(self):
+        """Load the Jacobian evaluator function from the Python file."""
+        jac_path = os.path.join(self.output_dir, "jacobian_evaluator.py")
+        spec = importlib.util.spec_from_file_location("jacobian_evaluator", jac_path)
+        self.jacobian_module = importlib.util.module_from_spec(spec)
+        sys.modules["jacobian_evaluator"] = self.jacobian_module
+        spec.loader.exec_module(self.jacobian_module)
+        self.evaluate_jacobians = self.jacobian_module.evaluate_jacobians
+    
+    def load_model_structure(self):
+        """Load the pre-computed model structure from the Python file."""
+        struct_path = os.path.join(self.output_dir, "model_structure.py")
+        spec = importlib.util.spec_from_file_location("model_structure", struct_path)
+        struct_module = importlib.util.module_from_spec(spec)
+        sys.modules["model_structure"] = struct_module
+        spec.loader.exec_module(struct_module)
+        
+        self.indices = struct_module.indices
+        self.R = struct_module.R
+        self.B_structure = struct_module.B_structure
+        self.C_structure = struct_module.C_structure
+        self.D = struct_module.D
+        self.labels = struct_module.labels
+    
+    def _create_parameter_mapper(self):
+        """Create the parameter mapper for efficient parameter handling."""
+        self.param_mapper = ParameterMapper(
+            indices=self.indices,
+            labels=self.labels,
+            model_specs=self.model_specs,
+            obs_vars=self.obs_vars,
+            output_dir=self.output_dir
+        )
+        
+        # Store trend info for easy access
+        self.trend_info = self.param_mapper.trend_info
+    
+    def check_spec_vars(self):
+        """Check that model specifications match variables in the model."""
+        # Check observation variable specifications
+        for obs_var, spec in self.model_specs.items():
+            # Use the cycle variable directly for matching
+            cycle_var = spec['cycle']
+            if cycle_var not in self.model['all_variables']:
+                raise ValueError(f"Cycle variable {cycle_var} for {obs_var} not found.")
+            
+            # Check trend specification
+            if 'trend' not in spec:
+                raise ValueError(f"Trend specification missing for {obs_var}")
+                
+            trend_type = spec['trend']
+            valid_trends = ['random_walk', 'second_difference', 'constant_mean']
+            if trend_type not in valid_trends:
+                raise ValueError(f"Invalid trend type '{trend_type}' for {obs_var}. "
+                               f"Must be one of {valid_trends}")
+            
+            # Check that names match observed variables
+        # Check that all cycle variables (not base names) are in the model
+        list_cycle_names = [spec['cycle'] for spec in self.model_specs.values()]
+        list_model_names = self.model['all_variables']
+        if not all(item in list_model_names for item in list_cycle_names):
+            raise ValueError('Not all cycle variable names match those from the .mod file')
+    
+    def solve_and_create_state_space(self, params):
+        """
+        Solve the model and create the state-space representation.
+        
+        Args:
+            params: List or array of parameter values.
+            
+        Returns:
+            dict: State-space representation (A, B, C, D matrices and metadata).
+        """
+        # Evaluate Jacobians
+        a, b, c = self.evaluate_jacobians(params)
+        
+        # Import klein function from appropriate place
+        # If you have the function in this file, you can call it directly
+        f, p, stab, eig = klein(a, b, self.indices['n_states'])
+        
+        # Store solution matrices
+        self.f = f
+        self.p = p
+        self.stab = stab
+        self.eig = eig
+        
+        # Create state space representation
+        ss = {
+            'A': p.copy(),
+            'B': self.B_structure.copy(),
+            'C': self.C_structure.copy(),
+            'D': self.D.copy(),
+        }
+        
+        # Fill in policy function part of C matrix
+        ss['C'][:self.indices['n_controls'], :] = f
+        
+        # Fill in B matrix (shock impacts on states)
+        ss['B'][self.indices['n_endogenous']:, :] = self.R
+        
+        # Add metadata
+        ss.update({
+            'state_labels': self.labels['state_labels'],
+            'observable_labels': self.labels['observable_labels'],
+            'shock_labels': self.labels['shock_labels'],
+            'n_states': self.indices['n_states'],
+            'n_shocks': self.indices['n_shocks'],
+            'n_observables': self.indices['n_observables'],
+        })
+        
+        return ss
+    
+    def augment_state_space(self):
+        """
+        Augment the state space model with stochastic trends.
+        
+        Returns:
+            dict: Augmented state space representation.
+        """
+        # Get dimensions
+        n_states = self.indices['n_states']
+        n_shocks = self.indices['n_shocks']
+        n_controls = self.indices['n_controls']
+        n_observables = n_controls + n_states
+        
+        # Total trend states from trend_info
+        n_trend_states = self.trend_info['total_states']
+        
+        # Total dimensions in augmented system
+        n_aug_states = n_states + n_trend_states
+        n_aug_shocks = n_shocks + n_trend_states
+        
+        # Create augmented state labels
+        augmented_states = self.labels['state_labels'] + self.trend_info['state_labels']
+        
+        # Create augmented transition matrix (A matrix)
+        T_augmented = np.zeros((n_aug_states, n_aug_states))
+        
+        # Fill in DSGE state transition part (upper left block)
+        T_augmented[:n_states, :n_states] = self.p
+        
+        # Fill in trend transition blocks
+        build_trend_transition(T_augmented, self.trend_info, n_states)
+        
+        # Create augmented selection matrix (B matrix)
+        R_augmented = np.zeros((n_aug_states, n_aug_shocks))
+        
+        # Fill in DSGE selection part (upper left block)
+        R_augmented[:n_states, :n_shocks] = self.B_structure
+        
+        # Fill in trend selection blocks
+        build_trend_selection(R_augmented, self.trend_info, n_states, n_shocks)
+        
+        # Create augmented observation matrix (C matrix)
+        Z_augmented = np.zeros((n_observables, n_aug_states))
+        
+        # Fill in DSGE observation part (left columns)
+        Z_augmented[:, :n_states] = self.C_structure
+        
+        # Fill in trend observation blocks
+        build_trend_observation(Z_augmented, self.trend_info, self.obs_vars, self.labels['observable_labels'])
+        
+        # Store augmented state space
+        self.ss = {
+            "augmented_states": augmented_states,
+            "transition": T_augmented,
+            "selection": R_augmented,
+            "design": Z_augmented,
+            "trend_info": self.trend_info  # Store for reference
+        }
+        
+        return self.ss
+    
+    def create_simdkalman_filter(self, parameters):
+        """
+        Create simdkalman.KalmanFilter object with the augmented state space.
+        
+        Args:
+            parameters: Dictionary of parameter values
+            
+        Returns:
+            simdkalman.KalmanFilter: Configured Kalman filter
+        """
+        if self.ss is None:
+            raise ValueError("State space not created. Call augment_state_space first.")
+        
+        # Build process noise covariance matrix using parameter mapper
+        Q = self.param_mapper.build_process_noise_covariance(parameters)
+        
+        # Build measurement noise covariance matrix
+        R = self.param_mapper.build_measurement_noise_covariance(parameters)
+        
+        # Create actual process noise in state space
+        Q_state = self.ss["selection"] @ Q @ self.ss["selection"].T
+        
+        # Create the filter
+        self.kf = simdkalman.KalmanFilter(
+            state_transition=self.ss["transition"],
+            process_noise=Q_state,
+            observation_model=self.ss["design"],
+            observation_noise=R
+        )
+        
+        return self.kf
+    
+    def simulate_states_with_trends(self, data_array):
+        """
+        Simulate states with stochastic trends using simdkalman.
+        
+        Args:
+            data_array: Data array with shape (1, n_timesteps, n_observed_vars)
+            
+        Returns:
+            Results from simdkalman.KalmanFilter.smooth()
+        """
+        if self.kf is None:
+            raise ValueError("simdkalman filter not initialized. Call create_simdkalman_filter first.")
+        
+        # Run simulation smoother
+        results = self.kf.smooth(data_array)
+        
+        return results
 
 
 class DataProcessor:
@@ -1854,6 +2038,86 @@ class DataProcessor:
         
         return processed_results
 
+
+def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
+    """
+    Solves linear dynamic models with the form of:
+    
+    a*Et[x(t+1)] = b*x(t)       
+            
+    [s(t); u(t)] where s(t) is a vector of predetermined (state) variables and u(t) is
+    a vector of nonpredetermined costate variables.
+    
+    The solution to the model is a set of matrices f, p such that:
+    
+    u(t)   = f*s(t)
+    s(t+1) = p*s(t)
+    
+    The solution algorithm is based on Klein (2000) and his solab.m Matlab program.
+    
+    Args:
+        a: Coefficient matrix on future-dated variables
+        b: Coefficient matrix on current-dated variables
+        n_states: Number of state variables
+        eigenvalue_warnings: Whether to print warnings about eigenvalues
+        
+    Returns:
+        f: Solution matrix coefficients on s(t) for u(t)
+        p: Solution matrix coefficients on s(t) for s(t+1)
+        stab: Stability indicator
+        eig: Generalized eigenvalues
+    """
+    s, t, alpha, beta, q, z = la.ordqz(A=a, B=b, sort='ouc', output='complex')
+
+    # Components of the z matrix
+    z11 = z[0:n_states, 0:n_states]
+    z21 = z[n_states:, 0:n_states]
+    
+    # number of nonpredetermined variables
+    n_costates = np.shape(a)[0] - n_states
+    
+    if n_states > 0:
+        if np.linalg.matrix_rank(z11) < n_states:
+            sys.exit("Invertibility condition violated. Check model equations or parameter values.")
+
+    s11 = s[0:n_states, 0:n_states]
+    if n_states > 0:
+        z11i = la.inv(z11)
+    else:
+        z11i = z11
+
+    # Components of the s, t, and q matrices   
+    t11 = t[0:n_states, 0:n_states]
+    
+    # Verify that there are exactly n_states stable eigenvalues:
+    stab = 0
+
+    # Compute the generalized eigenvalues
+    tii = np.diag(t)
+    sii = np.diag(s)
+    eig = np.zeros(np.shape(tii), dtype=np.complex128)
+
+    for k in range(len(tii)):
+        if np.abs(sii[k]) > 0:
+            eig[k] = tii[k]/sii[k]    
+        else:
+            eig[k] = np.inf
+
+    # Solution matrix coefficients on the endogenous state
+    if n_states > 0:
+        dyn = np.linalg.solve(s11, t11)
+    else:
+        dyn = np.array([])
+
+    f = z21.dot(z11i)
+    p = z11.dot(dyn).dot(z11i)
+
+    f = np.real(f)
+    p = np.real(p)
+
+    return f, p, stab, eig
+
+
 def run_smoother(data, parameters, model_specs, observed_variables, output_dir):
     """
     Run the simulation smoother on the augmented state space model.
@@ -1903,998 +2167,86 @@ def run_smoother(data, parameters, model_specs, observed_variables, output_dir):
     
     return solver, processed_results
 
-def solve_quadratic_matrix_equation_doubling(A, B, C, initial_guess=None, tol=1e-14, max_iter=100, verbose=False):
-    """
-    Solve the quadratic matrix equation A*X^2 + B*X + C = 0 using the structure-preserving doubling algorithm.
-    
-    This is a Python translation of the Julia function from quadratic_matrix_equation.jl.
-    
-    Args:
-        A: Matrix for future variables (coefficient on t+1 variables)
-        B: Matrix for current variables (coefficient on t variables)
-        C: Matrix for past variables (coefficient on t-1 variables)
-        initial_guess: Initial guess for the solution (optional)
-        tol: Tolerance for convergence
-        max_iter: Maximum number of iterations
-        verbose: Whether to print progress
-        
-    Returns:
-        X: Solution matrix
-        iter_count: Number of iterations performed
-        reached_tol: Final residual
-    """
-    # Check if initial guess is provided
-    guess_provided = True
-    if initial_guess is None or initial_guess.size == 0:
-        guess_provided = False
-        initial_guess = np.zeros_like(A)
-    
-    # Initialize matrices
-    E = C.copy()
-    F = A.copy()
-    
-    # Compute B̄ = B + A*initial_guess
-    B_bar = B.copy()
-    B_bar += A @ initial_guess
-    
-    # LU factorization of B̄
-    try:
-        B_lu, B_piv = lu_factor(B_bar)
-    except:
-        if verbose:
-            print("LU factorization of B_bar failed")
-        return A, 0, 1.0
-    
-    # Compute initial values E and F
-    E = lu_solve((B_lu, B_piv), C)
-    F = lu_solve((B_lu, B_piv), A)
-    
-    # Initial X and Y
-    X = -E - initial_guess
-    Y = -F
-    
-    # Preallocate temporary matrices
-    X_new = np.zeros_like(X)
-    Y_new = np.zeros_like(Y)
-    E_new = np.zeros_like(E)
-    F_new = np.zeros_like(F)
-    
-    temp1 = np.zeros_like(Y)
-    temp2 = np.zeros_like(Y)
-    temp3 = np.zeros_like(Y)
-    
-    n = X.shape[0]
-    II = np.eye(n)
-    
-    Xtol = 1.0
-    Ytol = 1.0
-    
-    solved = False
-    iter_count = max_iter
-    
-    # Main iteration loop
-    for i in range(1, max_iter + 1):
-        # Compute EI = I - Y*X
-        np.matmul(Y, X, out=temp1)
-        temp1 = II - temp1
-        
-        # Factorize EI
-        try:
-            EI_lu, EI_piv = lu_factor(temp1)
-        except:
-            if verbose:
-                print(f"LU factorization of EI failed at iteration {i}")
-            return A, i, 1.0
-        
-        # Compute E = E * EI^(-1) * E
-        temp3 = lu_solve((EI_lu, EI_piv), E)
-        np.matmul(E, temp3, out=E_new)
-        
-        # Compute FI = I - X*Y
-        np.matmul(X, Y, out=temp2)
-        temp2 = II - temp2
-        
-        # Factorize FI
-        try:
-            FI_lu, FI_piv = lu_factor(temp2)
-        except:
-            if verbose:
-                print(f"LU factorization of FI failed at iteration {i}")
-            return A, i, 1.0
-        
-        # Compute F = F * FI^(-1) * F
-        temp3 = lu_solve((FI_lu, FI_piv), F)
-        np.matmul(F, temp3, out=F_new)
-        
-        # Compute X_new = X + F * FI^(-1) * X * E
-        np.matmul(X, E, out=temp3)
-        temp3 = lu_solve((FI_lu, FI_piv), temp3)
-        np.matmul(F, temp3, out=X_new)
-        
-        if i > 5 or guess_provided:
-            Xtol = norm(X_new)
-        
-        X_new += X
-        
-        # Compute Y_new = Y + E * EI^(-1) * Y * F
-        np.matmul(Y, F, out=temp3)
-        temp3 = lu_solve((EI_lu, EI_piv), temp3)
-        np.matmul(E, temp3, out=Y_new)
-        
-        if i > 5 or guess_provided:
-            Ytol = norm(Y_new)
-        
-        Y_new += Y
-        
-        # Check for convergence
-        if Xtol < tol:
-            solved = True
-            iter_count = i
-            break
-        
-        # Update values for next iteration
-        X[:] = X_new
-        Y[:] = Y_new
-        E[:] = E_new
-        F[:] = F_new
-    
-    # Compute the final X
-    X_new += initial_guess
-    X = X_new
-    
-    # Compute the residual
-    AXX = A @ X @ X
-    AXXnorm = norm(AXX)
-    AXX += B @ X
-    AXX += C
-    
-    reached_tol = norm(AXX) / (AXXnorm + 1e-20)
-    
-    if verbose:
-        print(f"Doubling algorithm finished in {iter_count} iterations with tolerance {reached_tol}")
-    
-    return X, iter_count, reached_tol
-
-def solve_quadratic_matrix_equation(A, B, C, T, initial_guess=None, 
-                                quadratic_matrix_equation_algorithm="doubling",
-                                tol=1e-14, acceptance_tol=1e-8, verbose=False):
-    """
-    Wrapper function for solving the quadratic matrix equation, similar to the Julia implementation.
-    
-    Args:
-        A: Matrix for future variables 
-        B: Matrix for current variables
-        C: Matrix for past variables
-        T: Timing structure (from parser)
-        initial_guess: Initial guess for the solution (optional)
-        quadratic_matrix_equation_algorithm: Algorithm to use (only 'doubling' is fully implemented)
-        tol: Tolerance for convergence
-        acceptance_tol: Acceptance tolerance for convergence
-        verbose: Whether to print progress
-        
-    Returns:
-        sol: Solution matrix
-        converged: Whether the solution converged
-    """
-    # Check if initial guess is valid
-    if initial_guess is not None and initial_guess.size > 0:
-        X = initial_guess
-        
-        # Check if initial guess is already a solution
-        AXX = A @ X @ X
-        AXXnorm = norm(AXX)
-        AXX += B @ X
-        AXX += C
-        
-        reached_tol = norm(AXX) / (AXXnorm + 1e-20)
-        
-        if reached_tol < (acceptance_tol * len(initial_guess) / 1e6):
-            if verbose:
-                print(f"Quadratic matrix equation solver: previous solution has tolerance {reached_tol}")
-            return initial_guess, True
-    
-    # Solve using doubling algorithm
-    sol, iterations, reached_tol = solve_quadratic_matrix_equation_doubling(
-        A, B, C, 
-        initial_guess=initial_guess, 
-        tol=tol, 
-        max_iter=100, 
-        verbose=verbose
-    )
-    
-    if verbose:
-        print(f"Quadratic matrix equation solver: doubling - converged: {reached_tol < acceptance_tol} in {iterations} iterations to tolerance: {reached_tol}")
-    
-    return sol, reached_tol < acceptance_tol
-
-def solve_quadratic_matrix_equation_doubling(A, B, C, initial_guess=None, tol=1e-14, max_iter=100, verbose=False):
-    """
-    Solve the quadratic matrix equation A*X^2 + B*X + C = 0 using the structure-preserving doubling algorithm.
-    
-    Parameters:
-    -----------
-    A : ndarray
-        Coefficient matrix for X^2 term
-    B : ndarray
-        Coefficient matrix for X term
-    C : ndarray
-        Constant term
-    initial_guess : ndarray, optional
-        Initial guess for X
-    tol : float, optional
-        Tolerance for convergence
-    max_iter : int, optional
-        Maximum number of iterations
-    verbose : bool, optional
-        Whether to print progress
-    
-    Returns:
-    --------
-    X : ndarray
-        Solution to the quadratic matrix equation
-    iter_count : int
-        Number of iterations performed
-    reached_tol : float
-        Final error tolerance reached
-    """
-    guess_provided = True
-    
-    if initial_guess is None or initial_guess.size == 0:
-        guess_provided = False
-        initial_guess = np.zeros_like(A)
-    
-    # Initialize matrices
-    E = C.copy()
-    F = A.copy()
-    
-    # Compute B̄ = B + A*initial_guess
-    B_bar = B.copy()
-    B_bar += A @ initial_guess
-    
-    # LU factorization of B̄
-    try:
-        B_lu, B_piv = lu_factor(B_bar)
-    except:
-        return A, 0, 1.0
-    
-    # Compute initial values
-    E = lu_solve((B_lu, B_piv), C)
-    F = lu_solve((B_lu, B_piv), A)
-    
-    X = -E - initial_guess
-    Y = -F
-    
-    # Preallocate temporary matrices
-    X_new = np.zeros_like(X)
-    Y_new = np.zeros_like(Y)
-    E_new = np.zeros_like(E)
-    F_new = np.zeros_like(F)
-    
-    temp1 = np.zeros_like(Y)
-    temp2 = np.zeros_like(Y)
-    temp3 = np.zeros_like(Y)
-    
-    n = X.shape[0]
-    II = np.eye(n)
-    
-    Xtol = 1.0
-    Ytol = 1.0
-    
-    solved = False
-    iter_count = max_iter
-    
-    # Main iteration loop
-    for i in range(1, max_iter + 1):
-        # Compute EI = I - Y*X
-        np.matmul(Y, X, out=temp1)
-        temp1 = II - temp1
-        
-        # Factorize EI
-        try:
-            EI_lu, EI_piv = lu_factor(temp1)
-        except:
-            return A, i, 1.0
-        
-        # Compute E = E * EI^(-1) * E
-        temp3 = lu_solve((EI_lu, EI_piv), E)
-        np.matmul(E, temp3, out=E_new)
-        
-        # Compute FI = I - X*Y
-        np.matmul(X, Y, out=temp2)
-        temp2 = II - temp2
-        
-        # Factorize FI
-        try:
-            FI_lu, FI_piv = lu_factor(temp2)
-        except:
-            return A, i, 1.0
-        
-        # Compute F = F * FI^(-1) * F
-        temp3 = lu_solve((FI_lu, FI_piv), F)
-        np.matmul(F, temp3, out=F_new)
-        
-        # Compute X_new = X + F * FI^(-1) * X * E
-        np.matmul(X, E, out=temp3)
-        temp3 = lu_solve((FI_lu, FI_piv), temp3)
-        np.matmul(F, temp3, out=X_new)
-        
-        if i > 5 or guess_provided:
-            Xtol = norm(X_new)
-        
-        X_new += X
-        
-        # Compute Y_new = Y + E * EI^(-1) * Y * F
-        np.matmul(Y, F, out=temp3)
-        temp3 = lu_solve((EI_lu, EI_piv), temp3)
-        np.matmul(E, temp3, out=Y_new)
-        
-        if i > 5 or guess_provided:
-            Ytol = norm(Y_new)
-        
-        Y_new += Y
-        
-        # Check for convergence
-        if Xtol < tol:
-            solved = True
-            iter_count = i
-            break
-        
-        # Update values for next iteration
-        X[:] = X_new
-        Y[:] = Y_new
-        E[:] = E_new
-        F[:] = F_new
-    
-    # Compute the final X
-    X_new += initial_guess
-    X = X_new
-    
-    # Compute the residual
-    AXX = A @ X @ X
-    AXXnorm = norm(AXX)
-    AXX += B @ X
-    AXX += C
-    
-    reached_tol = norm(AXX) / AXXnorm
-    
-    return X, iter_count, reached_tol
-
-def build_state_space_from_solution_doubling(F, P, shock_impact, state_indices, control_indices):
-    """
-    Convert the solution matrices F and P to state space form.
-    
-    Args:
-        F: Control-to-state mapping from solution
-        P: State transition matrix from solution
-        shock_impact: Shock impact matrix
-        state_indices: Indices of state variables
-        control_indices: Indices of control variables
-        
-    Returns:
-        A: State transition matrix
-        B: Shock impact matrix
-    """
-    n_states = len(state_indices)
-    n_controls = len(control_indices)
-    n_shocks = shock_impact.shape[1]
-    n_variables = n_states + n_controls
-    
-    # Create state space matrices
-    A = np.zeros((n_variables, n_variables))
-    B = np.zeros((n_variables, n_shocks))
-    
-    # Fill state transition matrix
-    # Controls depend on states
-    A[:n_controls, n_controls:] = F
-    
-    # States transition according to P
-    A[n_controls:, n_controls:] = P
-    
-    # Shock impact matrix
-    # Controls directly affected by shocks
-    B[:n_controls, :] = shock_impact[:n_controls, :]
-    
-    # States affected by shocks
-    B[n_controls:, :] = shock_impact[n_controls:, :]
-    
-    return A, B
-
-def impulse_response_doubling(A, B, periods=40, shock_idx=0, shock_size=1.0):
-    """
-    Compute impulse response function for a given shock.
-    
-    Args:
-        A: State transition matrix
-        B: Shock impact matrix
-        periods: Number of periods to simulate
-        shock_idx: Index of the shock
-        shock_size: Size of the shock
-        
-    Returns:
-        irf: Impulse response matrix (periods x variables)
-    """
-    n_variables = A.shape[0]
-    
-    # Initialize impulse response matrix
-    irf = np.zeros((periods, n_variables))
-    
-    # Initial shock
-    irf[0, :] = B[:, shock_idx] * shock_size
-    
-    # Propagate through the state space
-    for t in range(1, periods):
-        irf[t, :] = A @ irf[t-1, :]
-    
-    return irf
-
-def solve_dsge_klein_representation(A_plus, A_zero, A_minus, 
-                                    state_indices, control_indices,
-                                    initial_guess=None, tol=1e-14, max_iter=100, verbose=False):
-    """
-    Solves a DSGE model using the doubling algorithm and returns the Klein representation matrices.
-    
-    Parameters:
-    -----------
-    A_plus : ndarray
-        Jacobian with respect to future variables (t+1)
-    A_zero : ndarray
-        Jacobian with respect to current variables (t)
-    A_minus : ndarray
-        Jacobian with respect to past variables (t-1)
-    state_indices : list
-        Indices of predetermined state variables in the model
-    control_indices : list
-        Indices of control variables in the model
-    initial_guess : ndarray, optional
-        Initial guess for X
-    tol : float, optional
-        Tolerance for convergence
-    max_iter : int, optional
-        Maximum number of iterations
-    verbose : bool, optional
-        Whether to print progress
-    
-    Returns:
-    --------
-    F : ndarray
-        Policy function matrix (control variables as function of state variables)
-    P : ndarray
-        State transition matrix (evolution of state variables)
-    converged : bool
-        Whether the solution converged
-    X : ndarray
-        The original solution to the quadratic matrix equation
-    """
-    # First solve the quadratic matrix equation using the doubling algorithm
-    X, iterations, residual = solve_quadratic_matrix_equation_doubling(
-        A_plus, A_zero, A_minus, initial_guess, tol, max_iter, verbose
-    )
-    
-    if residual > tol:
-        if verbose:
-            print(f"Solution did not converge. Residual: {residual}")
-        return None, None, False, X
-    
-    # Construct the full transition matrix
-    n_vars = A_zero.shape[0]
-    full_transition = np.zeros((n_vars, n_vars))
-    
-    # The structure depends on how the model is arranged, but generally:
-    # 1. For predetermined variables (states), we use the law of motion from the model
-    # 2. For control variables, we use the policy function X
-    
-    # Extract state-to-state transition (P matrix)
-    n_states = len(state_indices)
-    P = np.zeros((n_states, n_states))
-    
-    # Assuming X gives the full set of relationships
-    # We need to extract the parts relevant to state transitions
-    for i, row_idx in enumerate(state_indices):
-        for j, col_idx in enumerate(state_indices):
-            # This assumes X contains the full transition structure
-            # The exact indexing depends on the structure of X
-            P[i, j] = X[row_idx, col_idx]
-    
-    # Extract control-to-state relationships (F matrix)
-    n_controls = len(control_indices)
-    F = np.zeros((n_controls, n_states))
-    
-    for i, row_idx in enumerate(control_indices):
-        for j, col_idx in enumerate(state_indices):
-            F[i, j] = X[row_idx, col_idx]
-    
-    return F, P, True, X
-
-def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
-
-    '''Solves linear dynamic models with the form of:
-    
-                a*Et[x(t+1)] = b*x(t)       
-                
-        [s(t); u(t)] where s(t) is a vector of predetermined (state) variables and u(t) is
-        a vector of nonpredetermined costate variables. z(t) is a vector of exogenous forcing variables with 
-        autocorrelation matrix phi. The solution to the model is a set of matrices f, n, p, l such that:
-
-                u(t)   = f*s(t)
-                s(t+1) = p*s(t).
-
-        The solution algorithm is based on Klein (2000) and his solab.m Matlab program.
-
-    Args:
-        a:                      (Numpy ndarray) Coefficient matrix on future-dated variables
-        b:                      (Numpy ndarray) Coefficient matrix on current-dated variables
-        c:                      (Numpy ndarray) Coefficient matrix on exogenous forcing variables
-        n_states:               (int) Number of state variables
-        eigenvalue_warnings:    (bool) Whether to print warnings that there are too many or few eigenvalues. Default: True
-
-    Returns:
-        f:          (Numpy ndarray) Solution matrix coeffients on s(t) for u(t)
-        p:          (Numpy ndarray) Solution matrix coeffients on s(t) for s(t+1)
-        stab:       (int) Indicates solution stability and uniqueness
-                        stab == 1: too many stable eigenvalues
-                        stab == -1: too few stable eigenvalues
-                        stab == 0: just enoughstable eigenvalues
-        eig:        The generalized eigenvalues from the Schur decomposition
-
-    '''
-
-    s,t,alpha,beta,q,z = la.ordqz(A=a,B=b,sort='ouc',output='complex')
-
-    # Components of the z matrix
-    z11 = z[0:n_states,0:n_states]
-    
-    z21 = z[n_states:,0:n_states]
-    
-    # number of nonpredetermined variables
-    n_costates = np.shape(a)[0] - n_states
-    
-    if n_states>0:
-        if np.linalg.matrix_rank(z11)<n_states:
-            sys.exit("Invertibility condition violated. Check model equations or parameter values.")
-
-    s11 = s[0:n_states,0:n_states];
-    if n_states>0:
-        z11i = la.inv(z11)
-
-    else:
-        z11i = z11
 
 
-    # Components of the s,t,and q matrices   
-    t11 = t[0:n_states,0:n_states]
-    # Verify that there are exactly n_states stable (inside the unit circle) eigenvalues:
-    stab = 0
-
-    # if n_states>0:
-    #     if np.abs(t[n_states-1,n_states-1])>np.abs(s[n_states-1,n_states-1]):
-    #         if eigenvalue_warnings:
-    #             print('Warning: Too few stable eigenvalues. Check model equations or parameter values.')
-    #         stab = -1
-
-    # if n_states<n_states+n_costates:
-    #     if np.abs(t[n_states,n_states])<np.abs(s[n_states,n_states]):
-    #         if eigenvalue_warnings:
-    #             print('Warning: Too many stable eigenvalues. Check model equations or parameter values.')
-    #         stab = 1
-
-    # Compute the generalized eigenvalues
-    tii = np.diag(t)
-    sii = np.diag(s)
-    eig = np.zeros(np.shape(tii),dtype=np.complex128)
-    # eig = np.zeros(np.shape(tii))
-
-    for k in range(len(tii)):
-        if np.abs(sii[k])>0:
-            # eig[k] = np.abs(tii[k])/np.abs(sii[k])
-            eig[k] = tii[k]/sii[k]    
-        else:
-            eig[k] = np.inf
-
-
-
-    # Solution matrix coefficients on the endogenous state
-    if n_states>0:
-            dyn = np.linalg.solve(s11,t11)
-    else:
-        dyn = np.array([])
-
-
-    f = z21.dot(z11i)
-    p = z11.dot(dyn).dot(z11i)
-
-    f = np.real(f)
-    p = np.real(p)
-
-    return f, p,stab,eig
-
-def create_state_space_representation(parser, f, p):
-    """
-    Create state space representation from Klein solution matrices
-    
-    Args:
-        parser: DynareParser instance with model information
-        f: Control policy function matrix from Klein solution
-        p: State transition matrix from Klein solution
-        
-    Returns:
-        A: State transition matrix for state space representation
-        B: Shock impact matrix for state space representation
-        C: Observation matrix
-        D: Direct shock impact on observables (often zero)
-    """
-    # Get variable counts
-    n_endogenous = len(parser.endogenous_states)
-    n_exo_with_shocks = len(parser.exo_with_shocks)
-    n_exo_without_shocks = len(parser.exo_without_shocks)
-    n_controls = len(parser.control_variables)
-    n_shocks = len(parser.varexo_list)
-    
-    # Total exogenous states
-    n_exo_states = n_exo_with_shocks + n_exo_without_shocks
-    n_states = n_endogenous + n_exo_states
-    
-    # Extract submatrices from F (control policy functions)
-    # F maps states to controls: c_t = F s_t
-    Fcx = f[:, :n_endogenous]  # Control responses to endogenous states
-    Fcz = f[:, n_endogenous:]  # Control responses to exogenous states
-    
-    # Extract submatrices from P (state transitions)
-    # P maps current states to future states: s_{t+1} = P s_t
-    Pxx = p[:n_endogenous, :n_endogenous]  # Endogenous state transitions
-    Pxz = p[:n_endogenous, n_endogenous:]  # Impact of exogenous on endogenous
-    Pzz = p[n_endogenous:, n_endogenous:]  # Exogenous AR processes
-    
-    # Create shock selection matrix R
-    # This maps structural shocks to exogenous states: z_t = Pzz z_{t-1} + R ε_t
-    R = np.zeros((n_exo_states, n_shocks))
-    
-    # Fill R matrix using shock_to_state_map
-    for shock_idx, shock_name in enumerate(parser.varexo_list):
-        if shock_name in parser.shock_to_state_map:
-            state_var = parser.shock_to_state_map[shock_name]
-            # Find position of this state in the exogenous states
-            try:
-                # First find position in full state list
-                state_full_idx = parser.state_variables.index(state_var)
-                # Calculate position in exogenous state vector
-                exo_state_idx = state_full_idx - n_endogenous
-                if 0 <= exo_state_idx < n_exo_states:
-                    R[exo_state_idx, shock_idx] = 1.0
-            except ValueError:
-                print(f"Warning: State variable {state_var} not found in state_variables")
-    
-    # ---- STATE SPACE MATRICES ----
-    
-    # A matrix: state transition
-    A = p.copy()  # The P matrix already captures the state transition
-    
-    # B matrix: shock impacts on states
-    # Only exogenous states are directly affected by shocks
-    B = np.zeros((n_states, n_shocks))
-    B[n_endogenous:, :] = R
-    
-    # C matrix: maps states to observables
-    # By default, we'll use the controls and states as observables
-    n_observables = n_controls + n_states
-    C = np.zeros((n_observables, n_states))
-    
-    # First rows: controls as functions of states (via policy function F)
-    C[:n_controls, :] = f
-    
-    # Next rows: states mapped one-to-one (identity matrix)
-    C[n_controls:, :] = np.eye(n_states)
-    
-    # D matrix: direct shock impact on observables
-    # Usually zero in DSGE models, but controls might be directly affected
-    D = np.zeros((n_observables, n_shocks))
-    
-    # Create labels for the state space
-    state_labels = parser.state_variables
-    observable_labels = parser.control_variables + parser.state_variables
-    shock_labels = parser.varexo_list
-    
-    return {
-        'A': A,
-        'B': B,
-        'C': C,
-        'D': D,
-        'state_labels': state_labels,
-        'observable_labels': observable_labels,
-        'shock_labels': shock_labels,
-        'n_states': n_states,
-        'n_shocks': n_shocks,
-        'n_observables': n_observables
-    }
-
-def simulate_irf_state_space(ss, shock_idx=0, shock_size=1.0, periods=40):
-    """
-    Simulate impulse responses using state space representation
-    
-    Args:
-        ss: State space representation (output from create_state_space_representation)
-        shock_idx: Index of shock to simulate
-        shock_size: Size of the shock
-        periods: Number of periods for IRF
-        
-    Returns:
-        DataFrame with IRF results
-    """
-    import pandas as pd
-    
-    # Get state space matrices
-    A = ss['A']
-    B = ss['B']
-    C = ss['C']
-    
-    # Initialize state vector
-    x = np.zeros(ss['n_states'])
-    
-    # Initialize arrays for IRFs
-    states_irf = np.zeros((periods, ss['n_states']))
-    obs_irf = np.zeros((periods, ss['n_observables']))
-    
-    # Apply shock at t=0
-    # The shock affects the state via B matrix
-    shock = np.zeros(ss['n_shocks'])
-    shock[shock_idx] = shock_size
-    x = B @ shock
-    
-    # Store period 0 results
-    states_irf[0, :] = x
-    obs_irf[0, :] = C @ x
-    
-    # Simulate forward
-    for t in range(1, periods):
-        x = A @ states_irf[t-1, :]
-        states_irf[t, :] = x
-        obs_irf[t, :] = C @ x
-    
-    # Create DataFrame with results
-    irf_data = {}
-    
-    # Add observable variables
-    for i, var in enumerate(ss['observable_labels']):
-        irf_data[var] = obs_irf[:, i]
-    
-    # Create DataFrame
-    irf_df = pd.DataFrame(irf_data)
-    
-    # Add shock name for reference
-    shock_name = ss['shock_labels'][shock_idx] if shock_idx < len(ss['shock_labels']) else f"shock_{shock_idx}"
-    irf_df.attrs['shock_name'] = shock_name
-    
-    return irf_df
-
-def compare_irf_methods(parser, f, p):
-    """
-    Compare IRFs from different methods
-    
-    Args:
-        parser: DynareParser instance
-        f: Control policy matrix
-        p: State transition matrix
-    """
-    # Original IRF method
-    irf_original = generate_irfs(parser, f, p)
-    
-    # State space IRF method
-    ss = create_state_space_representation(parser, f, p)
-    
-    # Compare for each shock
-    for shock_idx, shock_name in enumerate(parser.varexo_list):
-        if shock_name in irf_original:
-            print(f"Comparing IRFs for shock: {shock_name}")
-            
-            # Generate IRF using state space
-            irf_ss = simulate_irf_state_space(ss, shock_idx=shock_idx)
-            
-            # Select some key variables to compare
-            vars_to_compare = ['RS', 'DLA_CPI', 'L_GDP_GAP', 'RR_GAP']
-            vars_to_compare = [v for v in vars_to_compare if v in irf_original[shock_name].columns]
-            
-            # Compare values
-            for var in vars_to_compare:
-                original = irf_original[shock_name][var].values[:10]
-                ss_method = irf_ss[var].values[:10]
-                
-                # Calculate difference
-                max_diff = np.max(np.abs(original - ss_method))
-                print(f"  {var}: Max difference = {max_diff:.8f}")
-                
-                if max_diff > 1e-6:
-                    print(f"    Warning: Differences detected for {var}")
-                    print(f"    Original: {original[:5]}")
-                    print(f"    SS method: {ss_method[:5]}")
-
-def generate_irfs(parser, F, P, shock_size=1.0, T=40):
-    """
-    Generate IRFs using Klein's state-space representation with proper AR(1) dynamics.
-    
-    Args:
-        parser: DynareParser instance with model information
-        F: Control policy function matrix from Klein solution
-        P: State transition matrix from Klein solution
-        shock_size: Size of the shock impulse
-        T: Number of periods for IRF
-        
-    Returns:
-        irf_results: Dictionary mapping shock names to IRF DataFrames
-    """
-    irf_results = {}
-    n_states = len(parser.state_variables)
-    
-    # For each shock
-    for shock_name in parser.varexo_list:
-        # Use shock-to-state mappings to find which state variable receives this shock
-        if shock_name in parser.shock_to_state_map:
-            # Get state variable that receives this shock
-            state_var = parser.shock_to_state_map[shock_name]
-            
-            # Find state variable index in the state_variables list
-            state_idx = parser.state_variables.index(state_var)
-            
-            # Create initial state vector
-            x0 = np.zeros(n_states)
-            x0[state_idx] = shock_size  # Apply shock of given size
-            
-            # Compute IRF
-            irf_df = ir(F, P, x0, T=T, parser=parser)
-            
-            # Store results
-            irf_results[shock_name] = irf_df
-        else:
-            print(f"Warning: No state variable mapping found for shock {shock_name}")
-    
-    return irf_results
-
-def ir(F, P, x0, T=40, parser=None):
-    """
-    Compute impulse responses and return as pandas DataFrame
-    
-    Args:
-        F: Control policy function matrix
-        P: State transition matrix
-        x0: Initial state vector
-        T: Number of periods
-        parser: DynareParser instance with variable names
-        
-    Returns:
-        DataFrame with IRF results
-    """
-    import pandas as pd
-    
-    nx = P.shape[0]  # Number of state variables
-    ny = F.shape[0]  # Number of control variables
-    
-    # Create augmented observation matrix that maps states to all variables
-    MX = np.vstack([F, np.eye(nx)])
-    
-    # Initialize responses
-    IR = np.zeros((T, ny + nx))
-    
-    # Set initial state
-    x = x0.copy()
-    
-    # Compute responses
-    for t in range(T):
-        IR[t, :] = MX @ x  # Map states to all variables
-        x = P @ x          # Transition states to next period
-    
-    # Get variable names from parser
-    variable_names = parser.control_variables + parser.state_variables
-    
-    # Create DataFrame
-    df = pd.DataFrame(IR, columns=variable_names)
-    
-    return df
-
-def plot_irf(irf_df, variables_to_plot, shock_name, figsize=(12, 8)):
-    """
-    Plot selected variables from IRF results
-    
-    Args:
-        irf_df: DataFrame with IRF results
-        variables_to_plot: List of variables to plot
-        shock_name: Name of the shock (for title)
-        figsize: Figure size
-    """
-    plt.figure(figsize=figsize)
-    
-    for var in variables_to_plot:
-        if var in irf_df.columns:
-            plt.plot(irf_df.index, irf_df[var], label=var)
-        else:
-            print(f"Warning: Variable {var} not found in IRF results")
-    
-    plt.xlabel('Periods')
-    plt.ylabel('Deviation from Steady State')
-    plt.title(f'Impulse Responses to {shock_name} Shock')
-    plt.legend()
-    plt.grid(True)
-    plt.axhline(y=0, color='k', linestyle='-', alpha=0.2)
-    plt.tight_layout()
-    plt.show()
-
-def print_model_details(parser):
-    """Print detailed model information from parser components we've seen in the code context"""
-    # Header
-    print("="*60)
-    print("MODEL DETAILS".center(60))
-    print("="*60)
-    
-    # Variables (from Context 3)
-    print("\nVARIABLES:")
-    print(f"State variables ({len(parser.state_variables)}): {', '.join(parser.state_variables)}")
-    print(f"Control variables ({len(parser.control_variables)}): {', '.join(parser.control_variables)}")
-    print(f"Exogenous shocks ({len(parser.varexo_list)}): {', '.join(parser.varexo_list)}")  # From Context 2
-    
-    # Equations (from Context 2)
-    print(f"\nEQUATIONS: {len(parser.equations)} total")  # From equations list in Context 2
-    
-    # Solution matrices (from Context 3)
-    print("\nKLEIN SOLUTION MATRICES:")
-    print(f"f matrix ({parser.f.shape}): Policy functions mapping states to controls")
-    print("First 3 rows/columns:")
-    print(parser.f[:3, :3])  # Show top-left corner
-    
-    print(f"\np matrix ({parser.p.shape}): State transition matrix")
-    print("First 3 rows/columns:")
-    print(parser.p[:3, :3])
-    
-    # Matrix-var relationships (from Context 3)
-    print("\nSTRUCTURE:")
-    print(f"Total equations: {len(parser.equations)}")
-    print(f"State variables: {len(parser.state_variables)}")
-    print(f"Control variables: {len(parser.control_variables)}")
-    print(f"Exogenous shocks: {len(parser.varexo_list)}")
-
-    # Eigenvalues (from Context 3)
-    print('Eigenvalues:')
-    for i, val in enumerate(np.abs(parser.eig)):
-        print(f"  λ_{i+1}: {val:.6e}")
-
-    print("="*60)
-
-#Example
+# Example usage - Main script
 if __name__ == "__main__":
-    import os
-    import numpy as np
-    #from parse_claude import DynareParser  # Import your parser
-    #from model_solver import ModelSolver  # Import the new ModelSolver
+    import pandas as pd
+    
+    # Get the absolute path of the current script
+    script_path = os.path.abspath(__file__)
 
-    # Define the output directory for storing the generated files
-    output_dir = "model_files"  # Or any directory you prefer
-    os.makedirs(output_dir, exist_ok=True)
+    # Extract the directory from the script path
+    script_dir = os.path.dirname(script_path)
 
-    # Define your model specifications
+    # Change the current working directory
+    os.chdir(script_dir)
+
+    # Verify the change
+    print(f"Current working directory: {os.getcwd()}")
+
+    # 1. Parse the Dynare model and generate model files
+    dynare_file = "qpm_simpl1.dyn"  # Replace with your Dynare model file
+    output_dir = "model_files"
+    
+    # Create the output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Observed variables and their specifications. 
+    # This dictionary provides important structural information for setting up the model.
     model_specs = {
-        "RS_obs": {"trend": "random_walk", "cycle" : "RS"},
-        "DLA_CPI_obs": {"trend": "second_difference", "cycle": "DLA_CPI"},
-        "L_GDP_GAP_obs": {"trend": "constant_mean", "cycle": "L_GDP_GAP"}
+        "rs_obs": {"trend": "random_walk", "cycle": "RS"},  # rs_obs has a random walk trend
+        "dla_cpi_obs": {"trend": "random_walk", "cycle": "DLA_CPI"},  # dla_cpi_obs has a random-walk trend
+        "l_gdp_obs": {"trend": "random_walk", "cycle": "L_GDP_GAP"}  # l_gdp_obs has a random walk trend
     }
+    observed_variables = list(model_specs.keys())  # The observed variables used in the estimation
 
-    # Define the list of observed variables
-    observed_variables = ["RS_obs", "DLA_CPI_obs", "L_GDP_GAP_obs"]
-
-    # Define the path to your Dynare model file
-    dynare_file = "qpm_simpl1.dyn"
-
-    # 1. Generate the necessary files (JSON model, Jacobian, structure)
-    DynareParser.parse_and_generate_files(dynare_file, output_dir, obs_vars=observed_variables)
-
-    # 2. Create an instance of the ModelSolver
-    solver = ModelSolver(output_dir, model_specs, observed_variables)
-
-    # 3. Define parameter values
-    # Example: Use the parameter values from the JSON file
-    with open(os.path.join(output_dir, "model.json"), 'r') as f:
-        model_data = json.load(f)
-    initial_params = [model_data['param_values'][p] for p in model_data['parameters']]
-
-    # 4. Solve the model and get the state-space representation
-    state_space = solver.solve_and_create_state_space(initial_params)
-
-    # 5. Augment the state space with stochastic trends
-    augmented_state_space = solver.augment_state_space()
-
+    DynareParser.parse_and_generate_files(
+        dynare_file, output_dir, obs_vars=observed_variables, model_specs=model_specs
+    )
+    
+    
+    # 2. Load and prepare the data
+    us_data = pd.read_csv('transformed_data_us.csv', index_col='Date', parse_dates=True)
+    
+    # 3. Set initial parameter values. Make sure these match your Dynare model parameters.
+   # Define filtration parameters
+    initial_param_values = {
+        'b1': 0.7,
+        'b4': 0.7,
+        'a1': 0.5,
+        'a2': 0.1,
+        'g1': 0.7,
+        'g2': 0.3,
+        'g3': 0.25,
+        'rho_DLA_CPI': 0.75,
+        'rho_L_GDP_GAP': 0.75,
+        'rho_rs': 0.8,
+        'rho_rs2': 0.1,
+        "RES_L_GDP_GAP_lag_shock": 1,
+        "RES_RS_lag_shock": 1,
+        "RES_DLA_CPI_lag_shock": 1,
+        "rs_obs_level_shock": 0.5,
+        "dla_cpi_obs_level_shock": 0.5,        
+        "l_gdp_gap_obs_mean_shock": 0.1,
+        "rs_obs_meas_error": 0.1,
+        "dla_cpi_obs_meas_error": 0.1,
+        "l_gdp_gap_obs_meas_error": 0.1
+    }
+    
+    
+    # 4. Run the smoother. This uses the parsed model and data.
+    solver, results = run_smoother(
+        us_data, initial_param_values, model_specs, observed_variables, output_dir
+    )
+    
+    # 5. Process and analyze the results
+    print("Smoothed trend components:")
+    trend_columns = [col for col in results['smoothed_states'].columns if any(x in col for x in ['level', 'slope', 'curvature', 'mean'])]
+    print(results['smoothed_states'][trend_columns].head())
+    
+    print("\nSmoothed cyclical components:")
+    cycle_columns = [col for col in results['smoothed_states'].columns if col in ['RS', 'DLA_CPI', 'L_GDP_GAP']]  # Select cyclical component columns
+    print(results['smoothed_states'][cycle_columns].head())
 
