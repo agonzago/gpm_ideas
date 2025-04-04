@@ -1,24 +1,27 @@
 import numpy as np
 import importlib.util
 
-def load_state_space(filename):
-    """Loads the A, B, C, and H matrices from a Python file."""
+def load_state_space(filename, matrix_names):
+    """Loads the specified matrices from a Python file."""
     spec = importlib.util.spec_from_file_location("model", filename)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # Assuming the matrices are named A, B, C, H
-    return module.A, module.B, module.C, module.H
 
-def compare_matrices(A1, B1, C1, H1, A2, B2, C2, H2):
-    """Compares the A, B, C, and H matrices and highlights differences."""
-    print("Comparing A matrices:")
-    compare_matrix(A1, A2)
-    print("\nComparing B matrices:")
-    compare_matrix(B1, B2)
-    print("\nComparing C matrices:")
-    compare_matrix(C1, C2)
-    print("\nComparing H matrices:")
-    compare_matrix(H1, H2)
+    matrices = []
+    for name in matrix_names:
+        matrices.append(getattr(module, name))  # Get the matrix by name
+
+    return matrices
+
+def compare_matrices(matrices1, matrix_names1, matrices2, matrix_names2):
+    """Compares the matrices and highlights differences."""
+    if len(matrices1) != len(matrices2):
+        print("Different number of matrices to compare.")
+        return
+
+    for i in range(len(matrices1)):
+        print(f"\nComparing {matrix_names1[i]} from file 1 with {matrix_names2[i]} from file 2:")
+        compare_matrix(matrices1[i], matrices2[i])
 
 def compare_matrix(M1, M2):
     """Compares two matrices and highlights differences."""
@@ -32,9 +35,20 @@ def compare_matrix(M1, M2):
             if not np.isclose(M1[i, j], M2[i, j]):
                 print(f"Difference at ({i}, {j}): {M1[i, j]} vs {M2[i, j]}")
 
+# Specify the matrix names for each file
+matrix_names_file1 = ["A", "B", "H", "Q"]
+matrix_names_file2 = ["A", "B", "H", "Q"]
+
 # Load the state-space matrices from both files
-A1, B1, C1, H1 = load_state_space("parser_gpm.py")
-A2, B2, C2, H2 = load_state_space("full_code_includes_parser.py")
+matrices1 = None  # Initialize to None
+matrices2 = None  # Initialize to None
+try:
+    matrices1 = load_state_space("parser_gpm.py", matrix_names_file1)
+    matrices2 = load_state_space("full_code_includes_parser.py", matrix_names_file2)
+except AttributeError as e:
+    print(f"Error: {e}.  Check the matrix names in each file and update matrix_names_file1 and matrix_names_file2 accordingly.")
+    exit()
 
 # Compare the matrices
-compare_matrices(A1, B1, C1, H1, A2, B2, C2, H2)
+if matrices1 is not None and matrices2 is not None: # Only compare if loading was successful
+    compare_matrices(matrices1, matrix_names_file1, matrices2, matrix_names_file2)
