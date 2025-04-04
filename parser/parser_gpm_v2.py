@@ -2880,6 +2880,7 @@ if __name__ == "__main__":
     dynare_file = "qpm_simpl1.dyn"
 
     # 1. Generate the necessary files (JSON model, Jacobian, structure)
+    
     DynareParser.parse_and_generate_files(dynare_file, output_dir, obs_vars=observed_variables)
 
     # 2. Create an instance of the ModelSolver

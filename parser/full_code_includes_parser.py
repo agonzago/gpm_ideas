@@ -16,111 +16,102 @@ import sympy as sy  # Import sympy
 # Utility functions for trend components
 def calculate_trend_positions(model_specs, obs_vars, n_states, n_shocks):
     """
-    Calculate positions for each trend component in the augmented state vector.
-    
-    Args:
-        model_specs: Dictionary with specifications for observed variables
-        obs_vars: List of observed variable names
-        n_states: Number of original state variables
-        n_shocks: Number of original shock variables
-        
+    Calculate positions and parameter names for trend components.
+
     Returns:
-        dict: Information about trend component positions
+        dict: Information about trend component positions and parameters
     """
     trend_info = {
-        'state_labels': [],       # Labels for trend state components
-        'components': {},         # Component info for each observed variable
-        'total_states': 0,        # Total number of trend states
-        'param_positions': {}     # Maps parameter names to matrix positions
+        'state_labels': [],
+        'components': {},
+        'total_states': 0,
+        'param_positions': {},
+        'shock_std_param_names': [],
+        'total_trend_shocks': 0  # New: Total number of trend shocks
     }
-    
-    # Start position after original states
+
     pos = n_states
     shock_pos = n_shocks
-    
-    # Process each observed variable
+    total_trend_shocks = 0 # Initialize counter
+
     for obs_var in obs_vars:
         trend_type = model_specs[obs_var]['trend']
         var_info = {'type': trend_type, 'components': {}}
-        
-        # Add appropriate state components based on trend type
+
         if trend_type == 'random_walk':
-            # Only level component
             var_info['components']['level'] = {
                 'state_pos': pos,
                 'shock_pos': shock_pos
             }
-            
-            # Add shock parameter mapping
-            param_name = f"{obs_var}_level_shock"
+            param_name = f"{obs_var}_level_shock_std"  # Add _std suffix
             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            
+            trend_info['shock_std_param_names'].append(param_name)
+            total_trend_shocks += 1  # Increment counter
+
             trend_info['state_labels'].append(f"{obs_var}_level")
             pos += 1
             shock_pos += 1
-            
+
         elif trend_type == 'second_difference':
-            # Level, slope, and curvature components
+            # ... (Similar modifications for other trend types)
             var_info['components']['level'] = {
                 'state_pos': pos,
                 'shock_pos': shock_pos
             }
-            
-            # Add shock parameter mapping
-            param_name = f"{obs_var}_level_shock"
+            param_name = f"{obs_var}_level_shock_std"  # Add _std suffix
             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            
+            trend_info['shock_std_param_names'].append(param_name)
+            total_trend_shocks += 1 # Increment counter
+
             trend_info['state_labels'].append(f"{obs_var}_level")
             pos += 1
             shock_pos += 1
-            
+
             var_info['components']['slope'] = {
                 'state_pos': pos,
                 'shock_pos': shock_pos
             }
-            
-            # Add shock parameter mapping
-            param_name = f"{obs_var}_slope_shock"
+            param_name = f"{obs_var}_slope_shock_std"  # Add _std suffix
             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            
+            trend_info['shock_std_param_names'].append(param_name)
+            total_trend_shocks += 1 # Increment counter
             trend_info['state_labels'].append(f"{obs_var}_slope")
             pos += 1
             shock_pos += 1
-            
+
             var_info['components']['curvature'] = {
                 'state_pos': pos,
                 'shock_pos': shock_pos
             }
-            
-            # Add shock parameter mapping
-            param_name = f"{obs_var}_curvature_shock"
+            param_name = f"{obs_var}_curvature_shock_std"  # Add _std suffix
             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            
+            trend_info['shock_std_param_names'].append(param_name)
+            total_trend_shocks += 1 # Increment counter
             trend_info['state_labels'].append(f"{obs_var}_curvature")
             pos += 1
             shock_pos += 1
-            
+
         elif trend_type == 'constant_mean':
-            # Only constant level (no dynamics)
+            # ... (Similar modifications for other trend types)
             var_info['components']['level'] = {
                 'state_pos': pos,
                 'shock_pos': shock_pos
             }
-            
-            # Add shock parameter mapping
-            param_name = f"{obs_var}_mean_shock"
+            param_name = f"{obs_var}_mean_shock_std"  # Add _std suffix
             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            
+            trend_info['shock_std_param_names'].append(param_name)
+            total_trend_shocks += 1  # Increment counter
+
             trend_info['state_labels'].append(f"{obs_var}_mean")
             pos += 1
             shock_pos += 1
-        
+
         # Store information for this variable
         trend_info['components'][obs_var] = var_info
-    
-    # Update total trend states
+
     trend_info['total_states'] = pos - n_states
-    
+    trend_info['total_trend_shocks'] = total_trend_shocks # Store the total count
+
     return trend_info
 
 def build_trend_transition(T_matrix, trend_info, n_states):
@@ -617,6 +608,13 @@ class DynareParser:
                 for _, var in process_lags[1:]:
                     exo_without_shocks.append(var)
         
+        # Identify direct shock states
+        direct_shock_states = [process_lags[0][1] for process_name, process_lags in exo_processes.items() if process_lags]
+        self.direct_shock_states = direct_shock_states
+
+        # Format equations for output
+        formatted_equations = self.format_transformed_equations(transformed_equations, aux_equations)
+
         # Store these categorizations for later use - NO SORTING
         self.endogenous_states = endogenous_states  
         self.exo_with_shocks = exo_with_shocks      
@@ -624,7 +622,7 @@ class DynareParser:
         
         # Update the state_variables list with the correct ordering for state space
         self.state_variables = self.endogenous_states + self.exo_with_shocks + self.exo_without_shocks
-        # ---- END ENHANCED CODE ----
+    
         
         # Control variables are endogenous variables that are not state variables
         self.control_variables = list(endogenous_vars - set(self.state_variables))
@@ -648,7 +646,8 @@ class DynareParser:
             'exo_with_shocks': self.exo_with_shocks,
             'exo_without_shocks': self.exo_without_shocks,
             'shock_to_state_map': self.shock_to_state_map,
-            'state_to_shock_map': self.state_to_shock_map
+            'state_to_shock_map': self.state_to_shock_map,
+            'direct_shock_states': self.direct_shock_states #   Keep track of states with direct shocks
         }
 
     def format_transformed_equations(self, main_equations, aux_equations):
@@ -1031,226 +1030,6 @@ class DynareParser:
         
         return complete_code
 
-    def generate_doubling_jacobian_evaluator(self, output_file=None):
-        """
-        Generate Python code for the Jacobian matrices needed for the doubling algorithm.
-        
-        The model follows the structure:
-        0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t
-        
-        Args:
-            self: A DynareParser instance with parsed model
-            output_file (str, optional): Path to save the generated Python code
-                
-        Returns:
-            str: The generated Python code for the Jacobian evaluator
-        """
-        print("Generating Jacobian evaluator for doubling algorithm...")
-        
-        # Get model components from parser
-        variables = self.state_variables + self.control_variables
-        exogenous = self.varexo_list
-        parameters = list(self.parameters.keys())
-        
-        # Variables with "_p" suffix for t+1 variables
-        variables_p = [var + "_p" for var in variables]
-        
-        # Create symbolic variables for all model components
-        var_symbols = {var: sy.symbols(var) for var in variables}
-        var_p_symbols = {var_p: sy.symbols(var_p) for var_p in variables_p}
-        exo_symbols = {exo: sy.symbols(exo) for exo in exogenous}
-        param_symbols = {param: sy.symbols(param) for param in parameters}
-        
-        # Combine all symbols for equation parsing
-        all_symbols = {**var_symbols, **var_p_symbols, **exo_symbols, **param_symbols}
-        
-        # Get equations from the transformed model
-        formatted_equations = self.format_transformed_equations(
-            self.transformed_equations, 
-            self.auxiliary_equations
-        )
-        
-        # Parse endogenous equations into sympy expressions
-        equations = []
-        success_count = 0
-        error_count = 0
-        
-        for eq_dict in formatted_equations:
-            for eq_name, eq_str in eq_dict.items():
-                # Convert string to sympy expression
-                eq_expr = eq_str
-                for name, symbol in all_symbols.items():
-                    # Use regex to match whole words only
-                    pattern = r'\b' + re.escape(name) + r'\b'
-                    eq_expr = re.sub(pattern, str(symbol), eq_expr)
-                
-                # Try to parse the expression
-                try:
-                    expr = sy.sympify(eq_expr)
-                    equations.append(expr)
-                    success_count += 1
-                except Exception as e:
-                    print(f"Failed to parse equation {eq_name}: {eq_str}")
-                    print(f"Error: {str(e)}")
-                    # Try to recover by using a placeholder
-                    equations.append(sy.sympify("0"))
-                    error_count += 1
-        
-        print(f"Parsed {success_count} equations successfully, {error_count} with errors")
-        
-        # Create system as sympy Matrix
-        F = sy.Matrix(equations)
-        
-        # Get variable counts for matrix dimensions
-        n_states = len(self.state_variables)
-        n_vars = len(variables)
-        n_shocks = len(exogenous)
-        
-        # Extract symbols for different variable types
-        future_symbols = [var_p_symbols[var_p] for var_p in variables_p]
-        current_symbols = [var_symbols[var] for var in variables]
-        # State variables at t-1 (for past variables)
-        past_symbols = [var_symbols[var] for var in self.state_variables]
-        shock_symbols = [exo_symbols[exo] for exo in exogenous]
-        
-        # Compute Jacobians for the model structure:
-        # 0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t
-        print("Computing A matrix (coefficient on future variables)...")
-        A_symbolic = F.jacobian(future_symbols)
-        
-        print("Computing B matrix (coefficient on current variables)...")
-        B_symbolic = F.jacobian(current_symbols)
-        
-        print("Computing C matrix (coefficient on past state variables)...")
-        # Only state variables have t-1 values
-        C_symbolic = sy.zeros(n_vars, n_states)
-        for i in range(len(equations)):
-            for j, state_var in enumerate(self.state_variables):
-                lag_var = state_var + "_lag"
-                if lag_var in all_symbols:
-                    C_symbolic[i, j] = sy.diff(equations[i], all_symbols[lag_var])
-        
-        print("Computing D matrix (coefficient on shock variables)...")
-        D_symbolic = F.jacobian(shock_symbols)
-        
-        print("Generating output code...")
-        
-        # Generate code for the doubling algorithm Jacobian evaluation function
-        function_code = [
-            "import numpy as np",
-            "",
-            "def evaluate_doubling_jacobians(theta):",
-            "    \"\"\"",
-            "    Evaluates Jacobian matrices for the doubling algorithm",
-            "    ",
-            "    For the model structure: 0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t",
-            "    ",
-            "    Args:",
-            "        theta: List or array of parameter values in the order of:",
-            f"            {parameters}",
-            "        ",
-            "    Returns:",
-            "        A_plus: Matrix for future variables (coefficient on t+1 variables)",
-            "        A_zero: Matrix for current variables (coefficient on t variables)",
-            "        A_minus: Matrix for past variables (coefficient on t-1 variables)",
-            "        shock_impact: Matrix for shock impacts (n_vars x n_shocks)",
-            "        state_indices: Indices of state variables",
-            "        control_indices: Indices of control variables",
-            "    \"\"\"",
-            "    # Unpack parameters from theta"
-        ]
-        
-        # Add parameter unpacking
-        for i, param in enumerate(parameters):
-            function_code.append(f"    {param} = theta[{i}]")
-        
-        # Initialize matrices
-        function_code.extend([
-            "",
-            f"    n_vars = {n_vars}",
-            f"    n_states = {n_states}",
-            f"    n_shocks = {n_shocks}",
-            f"    A_plus = np.zeros((n_vars, n_vars))",
-            f"    A_zero = np.zeros((n_vars, n_vars))",
-            f"    A_minus = np.zeros((n_vars, n_states))",
-            f"    shock_impact = np.zeros((n_vars, n_shocks))"   
-        ])
-        
-        # Add A_plus matrix elements (future variables)
-        function_code.append("")
-        function_code.append("    # A_plus matrix elements (future variables)")
-        for i in range(A_symbolic.rows):
-            for j in range(A_symbolic.cols):
-                if A_symbolic[i, j] != 0:
-                    expr = str(A_symbolic[i, j])
-                    # Clean up the expression
-                    for param in parameters:
-                        # Replace symbol with parameter name
-                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
-                        expr = re.sub(pattern, param, expr)
-                    function_code.append(f"    A_plus[{i}, {j}] = {expr}")
-        
-        # Add A_zero matrix elements (current variables)
-        function_code.append("")
-        function_code.append("    # A_zero matrix elements (current variables)")
-        for i in range(B_symbolic.rows):
-            for j in range(B_symbolic.cols):
-                if B_symbolic[i, j] != 0:
-                    expr = str(B_symbolic[i, j])
-                    # Clean up the expression
-                    for param in parameters:
-                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
-                        expr = re.sub(pattern, param, expr)
-                    function_code.append(f"    A_zero[{i}, {j}] = {expr}")
-        
-        # Add A_minus matrix elements (past variables)
-        function_code.append("")
-        function_code.append("    # A_minus matrix elements (past variables)")
-        for i in range(C_symbolic.rows):
-            for j in range(C_symbolic.cols):
-                if C_symbolic[i, j] != 0:
-                    expr = str(C_symbolic[i, j])
-                    # Clean up the expression
-                    for param in parameters:
-                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
-                        expr = re.sub(pattern, param, expr)
-                    function_code.append(f"    A_minus[{i}, {j}] = {expr}")
-        
-        # Add shock_impact matrix elements (shock terms)
-        function_code.append("")
-        function_code.append("    # shock_impact matrix elements (shock impacts)")
-        for i in range(D_symbolic.rows):
-            for j in range(D_symbolic.cols):
-                if D_symbolic[i, j] != 0:
-                    expr = str(D_symbolic[i, j])
-                    # Clean up the expression
-                    for param in parameters:
-                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
-                        expr = re.sub(pattern, param, expr)
-                    function_code.append(f"    shock_impact[{i}, {j}] = {expr}")
-        
-        # Add state and control indices
-        function_code.extend([
-            "",
-            "    # Indices of state and control variables",
-            f"    state_indices = {list(range(n_states))}",
-            f"    control_indices = {list(range(n_states, n_vars))}"
-        ])
-        
-        # Return matrices
-        function_code.append("")
-        function_code.append("    return A_plus, A_zero, A_minus, shock_impact, state_indices, control_indices")
-        
-        # Join all lines to form the complete function code
-        complete_code = "\n".join(function_code)
-        
-        # Save to file if specified
-        if output_file:
-            with open(output_file, 'w') as f:
-                f.write(complete_code)
-            print(f"Doubling algorithm Jacobian evaluator saved to {output_file}")
-        
-        return complete_code
 
     def generate_model_structure(self):
         """
@@ -1273,14 +1052,17 @@ class DynareParser:
         n_exo_states = n_exo_with_shocks + n_exo_without_shocks
         n_states = n_endogenous + n_exo_states
 
-        # Create indices dictionary (ALWAYS defined)
+        # Correctly define n_observables based on observed variables
+        n_observables = len(self.obs_vars) if hasattr(self, 'obs_vars') and self.obs_vars else 0
+
+        # Create indices dictionary with corrected dimensions
         indices = {
             'n_endogenous': n_endogenous,
             'n_exo_states': n_exo_states,
             'n_controls': n_controls,
             'n_shocks': n_shocks,
             'n_states': n_states,
-            'n_observables': n_controls + n_states  # Corrected: Use n_controls + n_states
+            'n_observables': n_observables
         }
         
         # Create shock selection matrix R
@@ -1304,12 +1086,8 @@ class DynareParser:
         B_structure = np.zeros((n_states, n_shocks))
         B_structure[n_endogenous:, :] = R
 
-        # Create C matrix structure (maps states to observables)
-        n_observables =  n_controls + n_states
+        # Create C matrix structure with correct dimensions
         C_structure = np.zeros((n_observables, n_states))
-
-        # States mapped one-to-one (identity matrix part)
-        C_structure[n_controls:, :] = np.eye(n_states)
 
         # D matrix (direct shock impact on observables)
         D = np.zeros((n_observables, n_shocks))
@@ -1322,80 +1100,157 @@ class DynareParser:
             'param_labels': list(self.parameters.keys())
         }
 
-        # 2. Add constant components for trend augmentation
-        n_obs_vars = len(self.obs_vars) if hasattr(self, 'obs_vars') and self.obs_vars else 0 # Safe check if obs_vars
-        n_trend_states = 3 * n_obs_vars
-
-        # Create constant structure for augmented transition matrix
-        T_trend_structure = np.zeros((n_trend_states, n_trend_states))
-        for i in range(0, n_trend_states, 3):
-            T_trend_structure[i, i] = 1.0  # Level on itself
-            T_trend_structure[i, i + 1] = 1.0  # Level on slope
-            T_trend_structure[i + 1, i + 1] = 1.0  # Slope on itself
-            T_trend_structure[i + 1, i + 2] = 1.0  # Slope on curvature
-            T_trend_structure[i + 2, i + 2] = 1.0  # Curvature on itself
-
-        # Create constant structure for augmented selection matrix
-        R_trend_structure = np.eye(n_trend_states)
-
-        # Create constant structure for augmented observation matrix (mapping trends)
-        C_trend_structure = np.zeros((len(self.all_variables), n_trend_states))
-
+        # Initialize structure dictionary
         structure = {
             'indices': indices,
             'R': R,
             'B_structure': B_structure,
             'C_structure': C_structure,
             'D': D,
-            'labels': labels,
+            'labels': labels
         }
 
-        if hasattr(self, 'obs_vars') and self.obs_vars:  # Only add if obs_vars exists
-
-            structure['T_trend_structure'] = T_trend_structure.tolist()  # Convert to lists for JSON
-            structure['R_trend_structure'] = R_trend_structure.tolist()
-            structure['C_trend_structure'] = C_trend_structure.tolist()
+        # Only process trend and observation mapping if we have observed variables and model specs
+        if hasattr(self, 'obs_vars') and self.obs_vars and hasattr(self, 'model_specs'):
+            # First pass: Count total trend states
+            n_trend_states = 0
+            for obs_var in self.obs_vars:
+                trend_type = self.model_specs[obs_var]['trend']
+                if trend_type == 'random_walk':
+                    n_trend_states += 1
+                elif trend_type == 'second_difference':
+                    n_trend_states += 3
+                elif trend_type == 'constant_mean':
+                    n_trend_states += 1
+            
+            # If we have trend states, create the trend matrices
+            if n_trend_states > 0:
+                # Create matrices with correct dimensions
+                T_trend_structure = np.zeros((n_trend_states, n_trend_states))
+                R_trend_structure = np.eye(n_trend_states)  # Identity for direct shock mapping
+                C_trend_structure = np.zeros((n_observables, n_trend_states))
+                
+                # Second pass: Fill in structures
+                trend_pos = 0
+                for i, obs_var in enumerate(self.obs_vars):
+                    trend_type = self.model_specs[obs_var]['trend']
+                    
+                    if trend_type == 'random_walk':
+                        # Level maps directly to observation
+                        C_trend_structure[i, trend_pos] = 1.0
+                        # Level follows random walk
+                        T_trend_structure[trend_pos, trend_pos] = 1.0
+                        trend_pos += 1
+                        
+                    elif trend_type == 'second_difference':
+                        # Level maps directly to observation
+                        C_trend_structure[i, trend_pos] = 1.0
+                        # Set transition dynamics
+                        T_trend_structure[trend_pos, trend_pos] = 1.0  # Level on itself
+                        T_trend_structure[trend_pos, trend_pos+1] = 1.0  # Level on slope
+                        T_trend_structure[trend_pos+1, trend_pos+1] = 1.0  # Slope on itself
+                        T_trend_structure[trend_pos+1, trend_pos+2] = 1.0  # Slope on curvature
+                        T_trend_structure[trend_pos+2, trend_pos+2] = 1.0  # Curvature on itself
+                        trend_pos += 3
+                        
+                    elif trend_type == 'constant_mean':
+                        # Mean maps directly to observation
+                        C_trend_structure[i, trend_pos] = 1.0
+                        # Mean follows AR(1) with coefficient near 1
+                        T_trend_structure[trend_pos, trend_pos] = 1.0
+                        trend_pos += 1
+                
+                # Add trend structures to output
+                structure['T_trend_structure'] = T_trend_structure.tolist()
+                structure['R_trend_structure'] = R_trend_structure.tolist()
+                structure['C_trend_structure'] = C_trend_structure.tolist()
+                structure['n_trend_states'] = n_trend_states
+            
+            # Create observation mapping
+            obs_mapping = {}
+            for i, obs_var in enumerate(self.obs_vars):
+                cycle_var = self.model_specs[obs_var]['cycle']
+                if cycle_var in self.control_variables:
+                    obs_mapping[obs_var] = {
+                        'type': 'control',
+                        'index': self.control_variables.index(cycle_var),
+                        'obs_index': i
+                    }
+                elif cycle_var in self.state_variables:
+                    obs_mapping[obs_var] = {
+                        'type': 'state',
+                        'index': self.state_variables.index(cycle_var),
+                        'obs_index': i
+                    }
+                    # Update C_structure for direct state observations
+                    C_structure[i, self.state_variables.index(cycle_var)] = 1.0
+                else:
+                    print(f"Warning: Cycle variable {cycle_var} for {obs_var} not found in model variables")
+            
+            # Add observation mapping to structure
+            structure['obs_mapping'] = obs_mapping
 
         return structure
     
-    def parse_and_generate_files(dynare_file, output_dir, obs_vars=None, model_specs=None):
-        """Run the parser and generate all required files, including trend
-        structures.
+def parse_and_generate_files(dynare_file, output_dir, obs_vars=None, model_specs=None):
+    """Run the parser and generate all required files, including trend
+    structures.
 
-        Args:
-            dynare_file (str): Path to the Dynare model file.
-            output_dir (str): Path to the output directory.
-            obs_vars (list, optional): List of observed variables. Defaults to None.
-            model_specs (dict, optional): Model specifications dictionary. Defaults to None.
-        """
-
-        parser = DynareParser(dynare_file) # create a parser without obs var
-        if obs_vars is not None:
-            parser.obs_vars = obs_vars # Add observed vars if available
-
-        model_json = parser.save_json(os.path.join(output_dir, "model.json"))
-
-        parser.generate_jacobian_evaluator(os.path.join(output_dir, "jacobian_evaluator.py"))
-
-        structure = parser.generate_model_structure()
-        with open(os.path.join(output_dir, "model_structure.py"), 'w') as f:
-            f.write("import numpy as np\n\n")
-            f.write(f"indices = {repr(structure['indices'])}\n\n")
-            f.write(f"R = np.array({repr(structure['R'].tolist())})\n\n")
-            f.write(f"B_structure = np.array({repr(structure['B_structure'].tolist())})\n\n")
-            f.write(f"C_structure = np.array({repr(structure['C_structure'].tolist())})\n\n")
-            f.write(f"D = np.array({repr(structure['D'].tolist())})\n\n")
-            f.write(f"labels = {repr(structure['labels'])}\n")
-            try:
-                f.write(f"T_trend_structure = np.array({repr(structure['T_trend_structure'])})\n\n")
-                f.write(f"R_trend_structure = np.array({repr(structure['R_trend_structure'])})\n\n")
-                f.write(f"C_trend_structure = np.array({repr(structure['C_trend_structure'])})\n\n")
-            except KeyError:
-                print("Trend structure not found. If you are running a simple_model or a simple case you can ignore this.  ")
-
-        print(f"All model files generated in {output_dir}")
-
-
+    Args:
+        dynare_file (str): Path to the Dynare model file.
+        output_dir (str): Path to the output directory.
+        obs_vars (list, optional): List of observed variables. Defaults to None.
+        model_specs (dict, optional): Model specifications dictionary. Defaults to None.
+    """
+    # Ensure output directory exists
+    if not os.path.isfile(dynare_file):
+        raise FileNotFoundError(f"The Dynare file '{dynare_file}' does not exist.")
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Parse the Dynare file
+    print(f"Parsing Dynare file: {dynare_file}")            
+    parser = DynareParser(dynare_file)
+    
+    # Set observed variables and model specifications if provided
+    if obs_vars is not None:
+        parser.obs_vars = obs_vars
+    if model_specs is not None:
+        parser.model_specs = model_specs
+    
+    # Parse and save the model JSON
+    model_json = parser.save_json(os.path.join(output_dir, "model.json"))
+    
+    # Generate the Jacobian evaluator
+    parser.generate_jacobian_evaluator(os.path.join(output_dir, "jacobian_evaluator.py"))
+    
+    # Generate model structure with trend components
+    structure = parser.generate_model_structure()
+    
+    # Write model_structure.py with all components
+    with open(os.path.join(output_dir, "model_structure.py"), 'w') as f:
+        f.write("import numpy as np\n\n")
+        f.write(f"indices = {repr(structure['indices'])}\n\n")
+        f.write(f"R = np.array({repr(structure['R'].tolist())})\n\n")
+        f.write(f"B_structure = np.array({repr(structure['B_structure'].tolist())})\n\n")
+        f.write(f"C_structure = np.array({repr(structure['C_structure'].tolist())})\n\n")
+        f.write(f"D = np.array({repr(structure['D'].tolist())})\n\n")
+        f.write(f"labels = {repr(structure['labels'])}\n\n")
+        
+        # Write trend structures if they exist
+        if 'T_trend_structure' in structure:
+            f.write(f"T_trend_structure = np.array({repr(structure['T_trend_structure'])})\n\n")
+        if 'R_trend_structure' in structure:
+            f.write(f"R_trend_structure = np.array({repr(structure['R_trend_structure'])})\n\n")
+        if 'C_trend_structure' in structure:
+            f.write(f"C_trend_structure = np.array({repr(structure['C_trend_structure'])})\n\n")
+        if 'n_trend_states' in structure:
+            f.write(f"n_trend_states = {structure['n_trend_states']}\n\n")
+        if 'obs_mapping' in structure:
+            f.write(f"obs_mapping = {repr(structure['obs_mapping'])}\n\n")
+    
+    print(f"All model files generated in {output_dir}")
 
 class ModelSolver:
     """
@@ -1439,126 +1294,6 @@ class ModelSolver:
         self.f = None # Policy function
         self.p = None # DSGE state transition
 
-    def load_model(self):
-        """Load the model from the JSON file."""
-        model_path = os.path.join(self.output_dir, "model.json")
-        try:
-            with open(model_path, 'r') as f:
-                self.model = json.load(f)
-            # Ensure essential keys are present
-            if 'parameters' not in self.model:
-                 raise KeyError("'parameters' key missing in model.json")
-            if 'all_variables' not in self.model:
-                 raise KeyError("'all_variables' key missing in model.json")
-
-        except FileNotFoundError:
-            print(f"Error: model.json not found at {model_path}")
-            raise
-        except json.JSONDecodeError:
-            print(f"Error: Could not decode JSON from {model_path}")
-            raise
-        except KeyError as e:
-             print(f"Error: Missing essential key in model.json: {e}")
-             raise
-
-
-    def load_jacobian_evaluator(self):
-        """Load the Jacobian evaluator function."""
-        jac_path = os.path.join(self.output_dir, "jacobian_evaluator.py")
-        try:
-            spec = importlib.util.spec_from_file_location("jacobian_evaluator", jac_path)
-            if spec is None or spec.loader is None:
-                 raise ImportError(f"Could not create spec for {jac_path}")
-            self.jacobian_module = importlib.util.module_from_spec(spec)
-            sys.modules["jacobian_evaluator"] = self.jacobian_module # Add to sys.modules
-            spec.loader.exec_module(self.jacobian_module)
-            self.evaluate_jacobians = getattr(self.jacobian_module, 'evaluate_jacobians')
-        except FileNotFoundError:
-            print(f"Error: jacobian_evaluator.py not found at {jac_path}")
-            raise
-        except AttributeError:
-            print(f"Error: 'evaluate_jacobians' function not found in {jac_path}")
-            raise
-        except Exception as e:
-             print(f"Error loading Jacobian evaluator from {jac_path}: {e}")
-             raise
-
-    def load_model_structure(self):
-        """Load the pre-computed model structure."""
-        struct_path = os.path.join(self.output_dir, "model_structure.py")
-        try:
-            spec = importlib.util.spec_from_file_location("model_structure", struct_path)
-            if spec is None or spec.loader is None:
-                 raise ImportError(f"Could not create spec for {struct_path}")
-
-            struct_module = importlib.util.module_from_spec(spec)
-            sys.modules["model_structure"] = struct_module # Add to sys.modules
-            spec.loader.exec_module(struct_module)
-
-            # Load required attributes
-            self.indices = getattr(struct_module, 'indices')
-            self.labels = getattr(struct_module, 'labels')
-            self.R = getattr(struct_module, 'R') # Shock-to-state mapping
-
-            # Validate loaded structure
-            required_indices = ['n_states', 'n_shocks', 'n_controls', 'n_observables', 'n_endogenous']
-            if not all(k in self.indices for k in required_indices):
-                 raise AttributeError(f"Missing required keys in 'indices' from {struct_path}")
-            required_labels = ['state_labels', 'observable_labels', 'shock_labels', 'param_labels']
-            if not all(k in self.labels for k in required_labels):
-                 raise AttributeError(f"Missing required keys in 'labels' from {struct_path}")
-            # Basic check on R dimensions
-            n_exo_states = self.indices['n_states'] - self.indices['n_endogenous']
-            if self.R.shape != (n_exo_states, self.indices['n_shocks']):
-                 print(f"Warning: Shape of loaded R {self.R.shape} does not match expected ({n_exo_states}, {self.indices['n_shocks']})")
-
-
-        except FileNotFoundError:
-            print(f"Error: model_structure.py not found at {struct_path}")
-            raise
-        except AttributeError as e:
-            print(f"Error: Missing expected attribute in {struct_path}: {e}")
-            raise
-        except Exception as e:
-             print(f"Error loading model structure from {struct_path}: {e}")
-             raise
-
-
-    def _define_theta_order(self):
-        """
-        Defines the strict order of parameters expected in the 'theta' vector.
-        Stores the order in self.theta_param_names.
-        """
-        # 1. DSGE core parameters (must match jacobian_evaluator expectation)
-        #    Load this order from self.labels['param_labels'] which came from parser
-        dsge_core_params = list(self.labels['param_labels'])
-
-        # 2. DSGE shock standard deviations (use order from shock_labels)
-        dsge_shock_std_params = [f"{shock}_std" for shock in self.labels['shock_labels']]
-
-        # 3. Trend shock standard deviations (use order from trend_info calculation)
-        trend_shock_std_params = list(self.trend_info['shock_std_param_names'])
-
-        # 4. Measurement error standard deviations (use order of self.obs_vars)
-        #    We assume zero for now, but define the names for future use
-        meas_error_std_params = [f"{obs_var}_meas_error_std" for obs_var in self.obs_vars]
-
-        # Combine all parameter names IN ORDER
-        self.theta_param_names = dsge_core_params + dsge_shock_std_params + trend_shock_std_params # + meas_error_std_params (Add when needed)
-
-        # Store counts for easy splitting later
-        self.n_dsge_core_params = len(dsge_core_params)
-        self.n_dsge_shock_std_params = len(dsge_shock_std_params)
-        self.n_trend_shock_std_params = len(trend_shock_std_params)
-        # self.n_meas_error_std_params = len(meas_error_std_params) # Add when needed
-
-        # Total expected length of theta
-        self.expected_theta_length = self.n_dsge_core_params + self.n_dsge_shock_std_params + self.n_trend_shock_std_params # + self.n_meas_error_std_params
-
-        print(f"Theta vector order defined. Expected length: {self.expected_theta_length}")
-        # print(f"Theta order: {self.theta_param_names}") # Uncomment for debugging
-
-
     def check_spec_vars(self):
         """Check that model specifications match variables in the model."""
         if not hasattr(self, 'model') or not hasattr(self, 'labels'):
@@ -1567,8 +1302,8 @@ class ModelSolver:
 
         list_model_names = self.model.get('all_variables', [])
         if not list_model_names:
-             print("Warning: 'all_variables' empty in model.json, cannot check cycle vars.")
-             return
+            print("Warning: 'all_variables' empty in model.json, cannot check cycle vars.")
+            return
 
         all_cycle_vars_found = True
         for obs_var, spec in self.model_specs.items():
@@ -1593,9 +1328,150 @@ class ModelSolver:
                 all_cycle_vars_found = False
 
         if not all_cycle_vars_found:
-             raise ValueError("Model specification check failed. See errors above.")
+            raise ValueError("Model specification check failed. See errors above.")
         print("Model specification check passed.")
+        
+    def _define_theta_order(self):
+        """
+        Defines the strict order of parameters expected in the 'theta' vector.
+        Stores the order in self.theta_param_names.
+        """
+        # 1. DSGE core parameters (must match jacobian_evaluator expectation)
+        #    Load this order from self.labels['param_labels'] which came from parser
+        dsge_core_params = list(self.labels['param_labels'])
 
+        # 2. DSGE shock standard deviations (shock in exo_variables with shocks)
+        dsge_shock_std_params = [f"{state}_std" for state in self.model.get('direct_shock_states', [])]
+
+        # 3. Trend shock standard deviations (use order from trend_info calculation)
+        trend_shock_std_params = list(self.trend_info['shock_std_param_names'])
+
+        # 4. Measurement error standard deviations (use order of self.obs_vars)
+        #    We assume zero for now, but define the names for future use
+        meas_error_std_params = [f"{obs_var}_meas_error_std" for obs_var in self.obs_vars]
+
+        # Combine all parameter names IN ORDER
+        self.theta_param_names = dsge_core_params + dsge_shock_std_params + trend_shock_std_params # + meas_error_std_params (Add when needed)
+
+        # Store counts for easy splitting later
+        self.n_dsge_core_params = len(dsge_core_params)
+        self.n_dsge_shock_std_params = len(dsge_shock_std_params)
+        self.n_trend_shock_std_params = len(trend_shock_std_params)
+        # self.n_meas_error_std_params = len(meas_error_std_params) # Add when needed
+
+        # Total expected length of theta
+        self.expected_theta_length = self.n_dsge_core_params + self.n_dsge_shock_std_params + self.n_trend_shock_std_params # + self.n_meas_error_std_params
+
+        print(f"Theta vector order defined. Expected length: {self.expected_theta_length}")
+        # print(f"Theta order: {self.theta_param_names}") # Uncomment for debugging
+
+    def load_model(self):
+        """Load the model from the JSON file."""
+        model_path = os.path.join(self.output_dir, "model.json")
+        try:
+            with open(model_path, 'r') as f:
+                self.model = json.load(f)
+            # Ensure essential keys are present
+            if 'parameters' not in self.model:
+                raise KeyError("'parameters' key missing in model.json")
+            if 'all_variables' not in self.model:
+                raise KeyError("'all_variables' key missing in model.json")
+
+        except FileNotFoundError:
+            print(f"Error: model.json not found at {model_path}")
+            raise
+        except json.JSONDecodeError:
+            print(f"Error: Could not decode JSON from {model_path}")
+            raise
+        except KeyError as e:
+            print(f"Error: Missing essential key in model.json: {e}")
+            raise
+
+
+    def load_jacobian_evaluator(self):
+        """Load the Jacobian evaluator function."""
+        jac_path = os.path.join(self.output_dir, "jacobian_evaluator.py")
+        try:
+            spec = importlib.util.spec_from_file_location("jacobian_evaluator", jac_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not create spec for {jac_path}")
+            self.jacobian_module = importlib.util.module_from_spec(spec)
+            sys.modules["jacobian_evaluator"] = self.jacobian_module # Add to sys.modules
+            spec.loader.exec_module(self.jacobian_module)
+            self.evaluate_jacobians = getattr(self.jacobian_module, 'evaluate_jacobians')
+        except FileNotFoundError:
+            print(f"Error: jacobian_evaluator.py not found at {jac_path}")
+            raise
+        except AttributeError:
+            print(f"Error: 'evaluate_jacobians' function not found in {jac_path}")
+            raise
+        except Exception as e:
+            print(f"Error loading Jacobian evaluator from {jac_path}: {e}")
+            raise
+
+    def load_model_structure(self):
+        """Load the pre-computed model structure."""
+        struct_path = os.path.join(self.output_dir, "model_structure.py")
+        try:
+            spec = importlib.util.spec_from_file_location("model_structure", struct_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not create spec for {struct_path}")
+
+            struct_module = importlib.util.module_from_spec(spec)
+            sys.modules["model_structure"] = struct_module # Add to sys.modules
+            spec.loader.exec_module(struct_module)
+
+            # Load required attributes
+            self.indices = getattr(struct_module, 'indices')
+            self.labels = getattr(struct_module, 'labels')
+            self.R = getattr(struct_module, 'R') # Shock-to-state mapping
+            self.B_structure = getattr(struct_module, 'B_structure')
+            self.C_structure = getattr(struct_module, 'C_structure')
+            self.D = getattr(struct_module, 'D')
+
+            # Load observation mapping if available
+            if hasattr(struct_module, 'obs_mapping'):
+                self.obs_mapping = getattr(struct_module, 'obs_mapping')
+            
+            # Load trend structures if available
+            if hasattr(struct_module, 'T_trend_structure'):
+                self.T_trend_structure = getattr(struct_module, 'T_trend_structure')
+            if hasattr(struct_module, 'R_trend_structure'):
+                self.R_trend_structure = getattr(struct_module, 'R_trend_structure')
+            if hasattr(struct_module, 'C_trend_structure'):
+                self.C_trend_structure = getattr(struct_module, 'C_trend_structure')
+            if hasattr(struct_module, 'n_trend_states'):
+                self.n_trend_states = getattr(struct_module, 'n_trend_states')
+
+            # Validate loaded structure
+            required_indices = ['n_states', 'n_shocks', 'n_controls', 'n_observables', 'n_endogenous']
+            if not all(k in self.indices for k in required_indices):
+                raise AttributeError(f"Missing required keys in 'indices' from {struct_path}")
+            
+            required_labels = ['state_labels', 'observable_labels', 'shock_labels', 'param_labels']
+            if not all(k in self.labels for k in required_labels):
+                raise AttributeError(f"Missing required keys in 'labels' from {struct_path}")
+            
+            # Basic check on R dimensions
+            n_exo_states = self.indices['n_states'] - self.indices['n_endogenous']
+            if self.R.shape != (n_exo_states, self.indices['n_shocks']):
+                print(f"Warning: Shape of loaded R {self.R.shape} does not match expected ({n_exo_states}, {self.indices['n_shocks']})")
+
+            # Check C_structure dimensions
+            n_observables = self.indices['n_observables']
+            n_states = self.indices['n_states']
+            if self.C_structure.shape != (n_observables, n_states):
+                print(f"Warning: Shape of loaded C_structure {self.C_structure.shape} does not match expected ({n_observables}, {n_states})")
+
+        except FileNotFoundError:
+            print(f"Error: model_structure.py not found at {struct_path}")
+            raise
+        except AttributeError as e:
+            print(f"Error: Missing expected attribute in {struct_path}: {e}")
+            raise
+        except Exception as e:
+            print(f"Error loading model structure from {struct_path}: {e}")
+            raise
 
     def update_state_space(self, theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -1606,10 +1482,10 @@ class ModelSolver:
 
         Args:
             theta: NumPy array containing parameter values in the predefined order:
-                   1. DSGE core parameters
-                   2. DSGE shock standard deviations
-                   3. Trend shock standard deviations
-                   (Measurement error std devs would be next if used)
+                1. DSGE core parameters
+                2. DSGE shock standard deviations
+                3. Trend shock standard deviations
+                (Measurement error std devs would be next if used)
 
         Returns:
             T: Augmented state transition matrix (n_aug_states x n_aug_states)
@@ -1619,9 +1495,9 @@ class ModelSolver:
         """
         # --- 1. Input Validation and Parameter Splitting ---
         if not isinstance(theta, np.ndarray):
-             theta = np.array(theta) # Ensure theta is a numpy array
+            theta = np.array(theta) # Ensure theta is a numpy array
         if theta.ndim != 1:
-             raise ValueError(f"Input 'theta' must be a 1D array, but got shape {theta.shape}")
+            raise ValueError(f"Input 'theta' must be a 1D array, but got shape {theta.shape}")
         if len(theta) != self.expected_theta_length:
             raise ValueError(f"Incorrect length for 'theta'. Expected {self.expected_theta_length}, got {len(theta)}.")
 
@@ -1635,64 +1511,60 @@ class ModelSolver:
         trend_shock_stds = theta[split2:split3]
         # meas_error_stds = theta[split3:] # Uncomment when using measurement errors
 
-        # --- 2. Get Dimensions ---
+        # --- 2. Get Dimensions from loaded model structure ---
         n_states = self.indices['n_states']
         n_shocks = self.indices['n_shocks']
         n_controls = self.indices['n_controls']
-        n_observables = self.indices['n_observables'] # n_controls + n_states typically
+        n_observables = self.indices['n_observables']
         n_endogenous = self.indices['n_endogenous']
         n_exo_states = n_states - n_endogenous
 
         n_trend_states = self.trend_info['total_states']
-        n_trend_shocks = self.trend_info['total_shocks']
-
+        n_trend_shocks = self.trend_info['total_trend_shocks']
         n_aug_states = n_states + n_trend_states
         n_aug_shocks = n_shocks + n_trend_shocks
 
         # --- 3. Solve DSGE Part ---
         try:
             a, b, c_jac = self.evaluate_jacobians(dsge_core_params)
-            # Note: c_jac from evaluator might differ from Klein's C if shocks map differently
         except Exception as e:
-             print(f"Error during Jacobian evaluation: {e}")
-             raise
+            print(f"Error during Jacobian evaluation: {e}")
+            raise
 
         try:
             # Pass only n_states (predetermined vars) to Klein
             f, p, stab, eig = klein(a, b, n_states)
             self.f = f # Store policy function
             self.p = p # Store DSGE state transition
-            if stab != 0:
-                 print("Warning: Klein solver indicates potential instability.")
+            # if stab != 0:
+            #     print("Warning: Klein solver indicates potential instability.")
         except Exception as e:
             print(f"Error during Klein solution: {e}")
             raise
 
         # --- 4. Build Augmented State Transition Matrix T ---
         T = np.zeros((n_aug_states, n_aug_states))
-        if n_states > 0: # Avoid indexing errors if no DSGE states
-             T[:n_states, :n_states] = self.p
-        # Add trend dynamics using the utility function
-        build_trend_transition(T, self.trend_info, n_states)
+        # DSGE state transition
+        T[:n_states, :n_states] = self.p
+        # Trend component transition
+        T[n_states:, n_states:] = np.array(self.T_trend_structure)
 
         # --- 5. Build Augmented Shock Selection Matrix `selection` ---
         selection = np.zeros((n_aug_states, n_aug_shocks))
-        # Place DSGE shock-to-state mapping (self.R)
-        if n_exo_states > 0 and n_shocks > 0: # Bounds check
-             selection[n_endogenous:n_states, :n_shocks] = self.R
-        # Add trend shock selection using the utility function
-        build_trend_selection(selection, self.trend_info, n_states, n_shocks)
+        # DSGE shock selection
+        selection[n_endogenous:n_states, :n_shocks] = self.R
+        # Trend shock selection
+        selection[n_states:, n_shocks:] = np.array(self.R_trend_structure)
 
         # --- 6. Build Process Noise Covariance Q_state ---
         # Combine all shock std devs
         all_shock_stds = np.concatenate((dsge_shock_stds, trend_shock_stds))
         # Square them to get variances
         all_shock_vars = all_shock_stds ** 2
-        # Check for negative variances (from negative std devs in theta)
-        if np.any(all_shock_vars < 0):
-             print("Warning: Negative variances detected from squaring shock std devs in theta. Taking absolute value.")
-             all_shock_vars = np.abs(all_shock_vars) # Or raise error?
-
+        # Check for negative variances
+        # if np.any(all_shock_vars < 0):
+        #     print("Warning: Negative variances detected from shock std devs in theta. Taking absolute value.")
+        #     all_shock_vars = np.abs(all_shock_vars)
         # Create diagonal matrix of shock variances
         Q_param = np.diag(all_shock_vars)
         # Calculate the state process noise covariance
@@ -1700,45 +1572,335 @@ class ModelSolver:
 
         # --- 7. Build Augmented Observation Matrix Z ---
         Z = np.zeros((n_observables, n_aug_states))
-        # Place policy function `f` for control variables
-        if n_controls > 0 and n_states > 0: # Bounds check
-             Z[:n_controls, :n_states] = self.f
-        # Place identity for state variables observed directly
-        if n_states > 0: # Bounds check
-             Z[n_controls:, :n_states] = np.eye(n_states)
-        # Add trend contributions to observations
-        build_trend_observation(Z, self.trend_info, self.obs_vars, self.labels['observable_labels'])
+        
+        # Use observation mapping from structure
+        for obs_var, mapping in self.obs_mapping.items():
+            i = mapping['obs_index']
+            if mapping['type'] == 'control':
+                # Apply policy function for control variables
+                control_idx = mapping['index']
+                Z[i, :n_states] = self.f[control_idx, :]
+            elif mapping['type'] == 'state':
+                # Direct mapping for state variables
+                state_idx = mapping['index']
+                Z[i, state_idx] = 1.0
+        
+        # Add trend contributions
+        Z[:, n_states:] = np.array(self.C_trend_structure)
 
         # --- 8. Build Measurement Noise Covariance H ---
         # Assuming zero measurement error for now
         H = np.zeros((n_observables, n_observables))
 
-        # --- (Future Enhancement for Measurement Error) ---
-        # if self.n_meas_error_std_params > 0:
-        #     meas_error_vars = meas_error_stds ** 2
-        #     if np.any(meas_error_vars < 0):
-        #          print("Warning: Negative measurement error variances detected. Taking absolute value.")
-        #          meas_error_vars = np.abs(meas_error_vars)
-        #
-        #     # Map these variances to the correct diagonal positions in H
-        #     # This requires knowing which observable corresponds to which meas_error_std
-        #     obs_label_to_index = {label: i for i, label in enumerate(self.labels['observable_labels'])}
-        #     for i, obs_var_name in enumerate(self.obs_vars):
-        #           # Find the cycle variable corresponding to the obs_var
-        #           cycle_var = self.model_specs.get(obs_var_name, {}).get('cycle')
-        #           if cycle_var and cycle_var in obs_label_to_index:
-        #                obs_idx = obs_label_to_index[cycle_var]
-        #                if i < len(meas_error_vars): # Safety check
-        #                     H[obs_idx, obs_idx] = meas_error_vars[i]
-        #           else:
-        #                print(f"Warning: Could not map measurement error for {obs_var_name} to H matrix.")
-        # --- (End Future Enhancement) ---
-
-
         # --- 9. Return the constructed matrices ---
         return T, Q_state, Z, H
 
-    # --- Methods for running the filter (can be added here or kept outside) ---
+    def solve_and_filter_calibrated_model(self, param_dict, data_array):
+        """
+        Solves the model using calibrated parameters and runs the Kalman filter.
+        
+        Args:
+            param_dict: Dictionary of parameter names and values
+            data_array: Observed data (shape: 1, n_timesteps, n_observables)
+            
+        Returns:
+            filter_results: Results from Kalman filter/smoother
+            model_matrices: Dictionary with T, Q_state, Z, H matrices
+            
+        Raises:
+            ValueError: If parameters are missing or unexpected
+        """
+        # Validate parameters
+        missing_params = set(self.theta_param_names) - set(param_dict.keys())
+        if missing_params:
+            raise ValueError(f"Missing required parameters: {', '.join(missing_params)}")
+        
+        # Check for unexpected parameters
+        unexpected_params = set(param_dict.keys()) - set(self.theta_param_names)
+        if unexpected_params:
+            raise ValueError(f"Unexpected parameters not in model: {', '.join(unexpected_params)}")
+        
+        # Create ordered theta array
+        theta = np.array([param_dict[param] for param in self.theta_param_names])
+        
+        # Solve the model once
+        T, Q_state, Z, H = self.update_state_space(theta)
+        
+        # Create Kalman filter with solved model
+        kf = simdkalman.KalmanFilter(
+            state_transition=T, 
+            process_noise=Q_state,
+            observation_model=Z,
+            observation_noise=H
+        )
+        
+        # Run smoother
+        smoothed_results = kf.smooth(data_array)
+        
+        return {
+            'filter_results': smoothed_results,
+            'model_matrices': {
+                'T': T,
+                'Q_state': Q_state,
+                'Z': Z,
+                'H': H
+            }
+        }
+
+    def compute_irf(self, param_dict=None, theta=None, shock_name=None, shock_size=1.0, 
+                    periods=40, vars_to_plot=None, figsize=(15, 10)):
+        """
+        Computes and plots impulse response functions for the model.
+        
+        Args:
+            param_dict: Dictionary of parameter names and values (optional)
+            theta: Parameter vector in correct order (optional)
+            shock_name: Name of the shock to simulate (must be in self.labels['shock_labels'])
+            shock_size: Size of the shock in standard deviations
+            periods: Number of periods to simulate
+            vars_to_plot: List of variables to plot (if None, plots all observed variables and selected states)
+            figsize: Figure size for the plot
+            
+        Returns:
+            fig: The matplotlib figure containing the IRF plots
+            irf_data: DataFrame containing all IRF responses
+        """
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        
+        # Ensure we have parameters
+        if theta is None and param_dict is not None:
+            # Create ordered theta array
+            theta = np.array([param_dict[param] for param in self.theta_param_names])
+        elif theta is None and param_dict is None:
+            raise ValueError("Either param_dict or theta must be provided")
+        
+        # Validate shock name
+        if shock_name is None:
+            raise ValueError("shock_name must be provided")
+        
+        if shock_name not in self.labels['shock_labels']:
+            raise ValueError(f"Shock '{shock_name}' not found. Available shocks: {self.labels['shock_labels']}")
+        
+        # Get shock index
+        shock_idx = self.labels['shock_labels'].index(shock_name)
+        
+        # Get DSGE core parameters
+        core_params = theta[:self.n_dsge_core_params]
+        
+        # Get Jacobians
+        a, b, c = self.evaluate_jacobians(core_params)
+        
+        # Solve model with Klein's method
+        f, p, stab, eig = klein(a, b, self.indices['n_states'])
+        
+        # Create simple IRF calculation method
+        def compute_simple_irf(F, P, x0, periods):
+            # Number of state variables
+            n_states = P.shape[0]
+            # Number of control variables
+            n_controls = F.shape[0]
+            
+            # Create IRF storage
+            irf = np.zeros((periods, n_controls + n_states))
+            
+            # Set initial state
+            x = x0.copy()
+            
+            # Compute IRF
+            for t in range(periods):
+                # Controls = F * states
+                controls = F @ x
+                # Store results for this period
+                irf[t, :n_controls] = controls
+                irf[t, n_controls:] = x
+                # Transition to next period
+                x = P @ x
+            
+            return irf
+        
+        # Now we need to figure out which state receives the shock
+        # For now, let's directly use the shock index for mapping
+        n_states = self.indices['n_states']
+        n_endogenous = self.indices['n_endogenous']
+        n_shocks = self.indices['n_shocks']
+        
+        # Create initial state vector
+        x0 = np.zeros(n_states)
+        
+        # For shock in the DSGE part
+        if shock_idx < n_shocks:
+            # Check if we're dealing with an exogenous shock
+            if shock_name.startswith("SHK_"):
+                # Find corresponding state variable (usually starts with RES_)
+                # This is the most critical part - correctly mapping shocks to states
+                state_name = "RES_" + shock_name[4:] + "_lag"
+                
+                # Find position in state variables
+                if state_name in self.labels['state_labels']:
+                    state_idx = self.labels['state_labels'].index(state_name)
+                    
+                    # Get shock standard deviation
+                    shock_std_idx = self.n_dsge_core_params + shock_idx
+                    if shock_std_idx < len(theta):
+                        shock_std = theta[shock_std_idx]
+                        # Apply shock to the state
+                        x0[state_idx] = shock_size * shock_std
+                    else:
+                        x0[state_idx] = shock_size
+                else:
+                    # Try direct mapping based on R matrix
+                    if shock_idx < n_shocks:
+                        # Look at the R matrix to find which state receives this shock
+                        for i in range(self.R.shape[0]):
+                            if self.R[i, shock_idx] != 0:
+                                # Found the state that receives this shock
+                                state_idx = n_endogenous + i
+                                if state_idx < n_states:
+                                    # Get shock standard deviation
+                                    shock_std_idx = self.n_dsge_core_params + shock_idx
+                                    if shock_std_idx < len(theta):
+                                        shock_std = theta[shock_std_idx]
+                                        # Apply shock to the state
+                                        x0[state_idx] = shock_size * shock_std
+                                    else:
+                                        x0[state_idx] = shock_size
+                                    break
+            
+            # Compute DSGE IRF
+            dsge_irf = compute_simple_irf(f, p, x0, periods)
+            
+            # Get variable names
+            control_names = self.labels.get('control_labels', self.model.get('control_variables', []))
+            state_names = self.labels['state_labels']
+            
+            # If control_names is not available, derive it from all_variables and state_variables
+            if not control_names:
+                all_vars = self.model.get('all_variables', [])
+                control_names = [v for v in all_vars if v not in state_names]
+            
+            # Create DSGE IRF DataFrame
+            var_names = control_names + state_names
+            dsge_df = pd.DataFrame(dsge_irf, columns=var_names)
+            
+            # Now handle trend IRF if needed
+            if hasattr(self, 'trend_info') and self.trend_info['total_states'] > 0:
+                # Get trend state space matrices
+                n_trend = self.trend_info['total_states']
+                
+                # Create trend transition matrix if available
+                if hasattr(self, 'T_trend_structure'):
+                    T_trend = np.array(self.T_trend_structure)
+                    
+                    # Initialize trend state
+                    trend_state = np.zeros(n_trend)
+                    
+                    # Create trend IRF storage
+                    trend_irf = np.zeros((periods, n_trend))
+                    
+                    # Compute trend IRF
+                    for t in range(periods):
+                        trend_irf[t, :] = trend_state
+                        trend_state = T_trend @ trend_state
+                    
+                    # Create trend DataFrame
+                    trend_df = pd.DataFrame(trend_irf, columns=self.trend_info['state_labels'])
+                    
+                    # Combine DSGE and trend
+                    combined_df = pd.concat([dsge_df, trend_df], axis=1)
+                else:
+                    combined_df = dsge_df
+            else:
+                combined_df = dsge_df
+            
+            # Create base variable names mapping (without _lag suffix)
+            base_vars = {}
+            for var in var_names:
+                if var.endswith('_lag'):
+                    base_name = var[:-4]
+                    base_vars[base_name] = var
+                else:
+                    base_vars[var] = var
+            
+            # Determine variables to plot
+            if vars_to_plot is None:
+                # Choose sensible defaults
+                vars_to_plot = []
+                
+                # Add main model variables (excluding RES_ variables)
+                for var in base_vars.keys():
+                    if not var.startswith('RES_'):
+                        vars_to_plot.append(var)
+                
+                # Limit to at most 12 variables
+                vars_to_plot = vars_to_plot[:12]
+            
+            # Create figure for plotting
+            n_vars = len(vars_to_plot)
+            n_cols = min(3, n_vars)
+            n_rows = (n_vars + n_cols - 1) // n_cols
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+            if n_rows * n_cols == 1:
+                axes = np.array([axes])
+            axes = axes.flatten()
+            
+            # Plot each variable
+            for i, var in enumerate(vars_to_plot):
+                if i < len(axes):
+                    ax = axes[i]
+                    
+                    # Check if variable exists directly in results
+                    if var in combined_df.columns:
+                        column = var
+                    elif var in base_vars:
+                        # Use the base variable mapping
+                        column = base_vars[var]
+                        if column not in combined_df.columns:
+                            ax.text(0.5, 0.5, f"Variable '{var}' mapped to '{column}' not found", 
+                                ha='center', va='center')
+                            continue
+                    else:
+                        # Try to find a fuzzy match
+                        matches = [col for col in combined_df.columns 
+                                if col == var or col.startswith(var + '_')]
+                        
+                        if matches:
+                            column = matches[0]
+                        else:
+                            ax.text(0.5, 0.5, f"Variable '{var}' not found", 
+                                ha='center', va='center')
+                            continue
+                    
+                    # Plot the variable
+                    combined_df[column].plot(ax=ax, color='blue', linewidth=2)
+                    
+                    # Display original name for clarity
+                    display_name = var if var == column else f"{var} (as {column})"
+                    ax.set_title(display_name)
+                    ax.axhline(y=0, color='black', linestyle='--', alpha=0.3)
+                    ax.grid(True, alpha=0.3)
+                    ax.set_xlabel('Periods')
+                    ax.set_ylabel('Deviation')
+            
+            # Hide unused subplots
+            for i in range(n_vars, len(axes)):
+                axes[i].set_visible(False)
+            
+            # Add overall title
+            fig.suptitle(f"Impulse Response Functions for {shock_size}σ {shock_name} Shock", 
+                        fontsize=16, y=1.02)
+            fig.tight_layout()
+            
+            # Print available variables for debugging
+            print("Available variables in IRF results:", sorted(combined_df.columns.tolist()))
+            
+            return fig, combined_df
+        else:
+            raise ValueError(f"Unable to properly map shock {shock_name} to a state variable")
+
+
     def run_filter_smoother(self, theta: np.ndarray, data_array: np.ndarray):
         """
         Updates state space, creates Kalman filter, and runs smoother.
@@ -1753,40 +1915,24 @@ class ModelSolver:
         # 1. Get updated state-space matrices
         T, Q_state, Z, H = self.update_state_space(theta)
 
-        # 2. Create simdkalman filter
-        kf = simdkalman.KalmanFilter(
-            state_transition=T,
-            process_noise=Q_state,
-            observation_model=Z,
-            observation_noise=H
-        )
-
-        # 3. Run smoother
-        # Ensure data_array matches expected n_observables dimension
-        if data_array.shape[2] != H.shape[0]:
-             raise ValueError(f"Data array's last dimension ({data_array.shape[2]}) does not match number of observables ({H.shape[0]})")
-
-        # Handle potential NaNs or Infs in matrices before filtering
-        if not np.all(np.isfinite(T)): print("Warning: Non-finite values in T matrix"); T = np.nan_to_num(T)
-        if not np.all(np.isfinite(Q_state)): print("Warning: Non-finite values in Q_state matrix"); Q_state = np.nan_to_num(Q_state)
-        if not np.all(np.isfinite(Z)): print("Warning: Non-finite values in Z matrix"); Z = np.nan_to_num(Z)
-        if not np.all(np.isfinite(H)): print("Warning: Non-finite values in H matrix"); H = np.nan_to_num(H)
-
         # Re-create filter if matrices were modified
-        kf = simdkalman.KalmanFilter(state_transition=T, process_noise=Q_state, observation_model=Z, observation_noise=H)
+        kf = simdkalman.KalmanFilter(state_transition=T, 
+                                    process_noise=Q_state, 
+                                    observation_model=Z, 
+                                    observation_noise=H)
 
 
         try:
             smoothed_results = kf.smooth(data_array)
             return smoothed_results
         except Exception as e:
-             print(f"Error during Kalman smoothing: {e}")
-             # You might want to inspect the matrices T, Q_state, Z, H here
-             # print("T:\n", T)
-             # print("Q_state:\n", Q_state)
-             # print("Z:\n", Z)
-             # print("H:\n", H)
-             raise # Re-raise the error after printing info
+            print(f"Error during Kalman smoothing: {e}")
+            # You might want to inspect the matrices T, Q_state, Z, H here
+            # print("T:\n", T)
+            # print("Q_state:\n", Q_state)
+            # print("Z:\n", Z)
+            # print("H:\n", H)
+            raise # Re-raise the error after printing info
 
 
 
@@ -2030,12 +2176,7 @@ if __name__ == "__main__":
 
     output_dir = "model_files" # Directory containing generated files
     dynare_file = "qpm_simpl1.dyn" # Just needed for reference if re-parsing
-
-    # Ensure output directory exists (it should if parser ran)
-    if not os.path.exists(output_dir):
-         print(f"Error: Output directory '{output_dir}' not found. Run DynareParser first.")
-         sys.exit(1)
-
+   
 
     # Define model specifications (as used by parser and solver)
     model_specs = {
@@ -2045,22 +2186,33 @@ if __name__ == "__main__":
     }
     observed_variables = list(model_specs.keys())
 
+
+    # 1. Generate the necessary files (JSON model, Jacobian, structure)
+    parse_and_generate_files(dynare_file, output_dir, 
+                            obs_vars=observed_variables, 
+                            model_specs=model_specs)
+
+
+    # Ensure output directory exists (it should if parser ran)
+    if not os.path.exists(output_dir):
+        print(f"Error: Output directory '{output_dir}' not found. Ensure DynareParser ran successfully.")
+        sys.exit(1)
+
     # --- Main workflow ---
     # 1. Create ModelSolver instance (loads structure, defines theta order)
-    try:
-         solver = ModelSolver(output_dir, model_specs, observed_variables)
-    except Exception as e:
-         print(f"Failed to initialize ModelSolver: {e}")
-         sys.exit(1)
-
+    #try:
+    solver = ModelSolver(output_dir, model_specs, observed_variables)
+    # except Exception as e:
+    #     print(f"Failed to initialize ModelSolver: {e}")
+    #     sys.exit(1)
 
     # 2. Load and prepare data (using DataProcessor or similar)
     try:
         us_data = pd.read_csv('transformed_data_us.csv', index_col='Date', parse_dates=True)
         # Ensure data has the 'observed_variables' columns
         if not all(v in us_data.columns for v in observed_variables):
-             missing_vars = [v for v in observed_variables if v not in us_data.columns]
-             raise ValueError(f"Data file missing required columns: {missing_vars}")
+            missing_vars = [v for v in observed_variables if v not in us_data.columns]
+            raise ValueError(f"Data file missing required columns: {missing_vars}")
 
         # Use only the necessary columns in the correct order
         data_for_filter = us_data[observed_variables].values
@@ -2070,11 +2222,11 @@ if __name__ == "__main__":
         dates = us_data.index # Keep dates for results processing
 
     except FileNotFoundError:
-         print("Error: Data file 'transformed_data_us.csv' not found.")
-         sys.exit(1)
+        print("Error: Data file 'transformed_data_us.csv' not found.")
+        sys.exit(1)
     except ValueError as e:
-         print(f"Error preparing data: {e}")
-         sys.exit(1)
+        print(f"Error preparing data: {e}")
+        sys.exit(1)
 
 
     # 3. Define parameter values `theta` IN THE CORRECT ORDER
@@ -2085,9 +2237,9 @@ if __name__ == "__main__":
         'b1': 0.7, 'b4': 0.7, 'a1': 0.5, 'a2': 0.1, 'g1': 0.7, 'g2': 0.3, 'g3': 0.25,
         'rho_DLA_CPI': 0.75, 'rho_L_GDP_GAP': 0.75, 'rho_rs': 0.8, 'rho_rs2': 0.1,
         # DSGE Shock STDs (Order from labels['shock_labels']) - Assuming shocks are RES_...
-        'RES_L_GDP_GAP_std': 1.0, # Parameter name should end in _std
-        'RES_RS_std': 1.0,
-        'RES_DLA_CPI_std': 1.0,
+        'RES_L_GDP_GAP_lag_std': 1.0, # Parameter name should end in _std
+        'RES_RS_lag_std': 1.0,
+        'RES_DLA_CPI_lag_std': 1.0,
         # Trend Shock STDs (Order from trend_info calculation)
         'rs_obs_level_shock_std': 0.5,
         'dla_cpi_obs_level_shock_std': 0.5,
@@ -2097,58 +2249,67 @@ if __name__ == "__main__":
         # 'dla_cpi_obs_meas_error_std': 0.1,
         # 'l_gdp_obs_meas_error_std': 0.1
     }
+    smoothed_results = solver.solve_and_filter_calibrated_model(initial_param_dict, data_array)
+    
+    
+    fig, irf_data = solver.compute_irf(
+                    param_dict=initial_param_dict,
+                    shock_name='SHK_RS',  # Name must match one in labels['shock_labels']
+                    shock_size=1.0,       # Size in standard deviations
+                    periods=40,           # Number of periods to simulate
+                    vars_to_plot=['RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP']  # Variables to plot
+    ) 
+    # # Construct theta array using the defined order
+    # try:
+    #     theta_values = [initial_param_dict[pname] for pname in solver.theta_param_names]
+    #     theta = np.array(theta_values)
+    #     print(f"Constructed theta vector with {len(theta)} values.")
+    # except KeyError as e:
+    #     print(f"Error: Parameter '{e}' not found in initial_param_dict. Check parameter names.")
+    #     # Find missing/mismatched names:
+    #     provided_keys = set(initial_param_dict.keys())
+    #     expected_keys = set(solver.theta_param_names)
+    #     print(f"Missing from dict: {expected_keys - provided_keys}")
+    #     print(f"Extra in dict: {provided_keys - expected_keys}")
+    #     sys.exit(1)
 
-    # Construct theta array using the defined order
-    try:
-        theta_values = [initial_param_dict[pname] for pname in solver.theta_param_names]
-        theta = np.array(theta_values)
-        print(f"Constructed theta vector with {len(theta)} values.")
-    except KeyError as e:
-        print(f"Error: Parameter '{e}' not found in initial_param_dict. Check parameter names.")
-        # Find missing/mismatched names:
-        provided_keys = set(initial_param_dict.keys())
-        expected_keys = set(solver.theta_param_names)
-        print(f"Missing from dict: {expected_keys - provided_keys}")
-        print(f"Extra in dict: {provided_keys - expected_keys}")
-        sys.exit(1)
 
+    # # 4. Update state space and run smoother
+    # try:
+    #     # Option 1: Call update_state_space then create filter manually
+    #     # T, Q_state, Z, H = solver.update_state_space(theta)
+    #     # kf = simdkalman.KalmanFilter(state_transition=T, process_noise=Q_state, observation_model=Z, observation_noise=H)
+    #     # simdkalman_results = kf.smooth(data_array)
 
-    # 4. Update state space and run smoother
-    try:
-        # Option 1: Call update_state_space then create filter manually
-        # T, Q_state, Z, H = solver.update_state_space(theta)
-        # kf = simdkalman.KalmanFilter(state_transition=T, process_noise=Q_state, observation_model=Z, observation_noise=H)
-        # simdkalman_results = kf.smooth(data_array)
+    #     # Option 2: Use helper method if defined
+    #     simdkalman_results = solver.run_filter_smoother(theta, data_array)
 
-        # Option 2: Use helper method if defined
-        simdkalman_results = solver.run_filter_smoother(theta, data_array)
+    #     print("Smoother run successfully.")
 
-        print("Smoother run successfully.")
+    # except Exception as e:
+    #     print(f"Error running smoother: {e}")
+    #     # Add more diagnostics here if needed
+    #     sys.exit(1)
 
-    except Exception as e:
-        print(f"Error running smoother: {e}")
-        # Add more diagnostics here if needed
-        sys.exit(1)
+    # # 5. Process results (using DataProcessor or manually)
+    # # Get state labels (including augmented trend states)
+    # augmented_state_labels = solver.labels['state_labels'] + solver.trend_info['state_labels']
 
-    # 5. Process results (using DataProcessor or manually)
-    # Get state labels (including augmented trend states)
-    augmented_state_labels = solver.labels['state_labels'] + solver.trend_info['state_labels']
+    # # Extract smoothed means
+    # smoothed_means = simdkalman_results.smoothed_means[0] # Get first batch
 
-    # Extract smoothed means
-    smoothed_means = simdkalman_results.smoothed_means[0] # Get first batch
+    # # Create DataFrame
+    # results_df = pd.DataFrame(smoothed_means, index=dates, columns=augmented_state_labels)
 
-    # Create DataFrame
-    results_df = pd.DataFrame(smoothed_means, index=dates, columns=augmented_state_labels)
+    # print("\nSmoothed States (Head):")
+    # print(results_df.head())
 
-    print("\nSmoothed States (Head):")
-    print(results_df.head())
+    # # Extract and print specific components as before
+    # print("\nSmoothed trend components:")
+    # trend_columns = [col for col in results_df.columns if any(x in col for x in ['level', 'slope', 'curvature', 'mean'])]
+    # print(results_df[trend_columns].head())
 
-    # Extract and print specific components as before
-    print("\nSmoothed trend components:")
-    trend_columns = [col for col in results_df.columns if any(x in col for x in ['level', 'slope', 'curvature', 'mean'])]
-    print(results_df[trend_columns].head())
-
-    print("\nSmoothed cyclical components (DSGE states):")
-    # Assuming cycle vars match DSGE state names (adjust if needed)
-    cycle_columns = [spec['cycle'] for spec in model_specs.values() if spec['cycle'] in results_df.columns]
-    print(results_df[cycle_columns].head())
+    # print("\nSmoothed cyclical components (DSGE states):")
+    # # Assuming cycle vars match DSGE state names (adjust if needed)
+    # cycle_columns = [spec['cycle'] for spec in model_specs.values() if spec['cycle'] in results_df.columns]
+    # print(results_df[cycle_columns].head())
