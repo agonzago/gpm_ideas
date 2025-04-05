@@ -120,6 +120,7 @@ When computing the solution of the model variables are ordered as follows
 
 \begin_deeper
 \begin_layout Verbatim
+
 variables = self.state_variables + self.control_variables
 \end_layout
 
@@ -128,6 +129,7 @@ where
 \end_layout
 
 \begin_layout Verbatim
+
 self.state_variables = endogenous_states + exo_with_shocks + exo_without_shocks
 \end_layout
 
@@ -476,39 +478,5 @@ In a future specification we may consider situations where the trends can intera
 \end_layout
 
 \end_deeper
-\begin_layout Enumerate
-The code is structure as follows:
-\end_layout
-
-\begin_deeper
-\begin_layout Enumerate
-DynareParser just reads the file and produce some ausiliary function and constants needed for the solution
-\end_layout
-
-\begin_layout Enumerate
-ModelSover.
- Loads files created by the parser and computes the klain solution 
-\end_layout
-
-\begin_layout Enumerate
-AugmentedState Space creates the augmented representation.
- 
-\end_layout
-
-\end_deeper
-\begin_layout Enumerate
-There are several changes needed.
- ModelSolver has los of function not needed and is missing Klein solution (that is available in the code,
- just copy that into the class).
- Remove all not necesary functions.
- 
-\end_layout
-
-\begin_layout Enumerate
-Check the augmented class and link it to the model solver.
- Check the the filtration is working and the irfs are correct.
- 
-\end_layout
-
 \end_body
 \end_document

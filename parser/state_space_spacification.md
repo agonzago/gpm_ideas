@@ -101,3 +101,15 @@
     5.  The code is not producing the right IRFs but I think is because, 1) is not creating the state space representation in an organized for. I'm adding this information to seek you help and produce a state space represenation for the augmented model that matches the description above and repreduces the IRFS accordingly.
 
     6.  In a future specification we may consider situations where the trends can interact.
+
+6.  The code is structure as follows:
+
+    1.  DynareParser just reads the file and produce some ausiliary function and constants needed for the solution
+
+    2.  ModelSover. Loads files created by the parser and computes the klain solution
+
+    3.  AugmentedState Space creates the augmented representation.
+
+7.  There are several changes needed. ModelSolver has los of function not needed and is missing Klein solution (that is available in the code, just copy that into the class). Remove all not necesary functions.
+
+8.  Check the augmented class and link it to the model solver. Check the the filtration is working and the irfs are correct.

@@ -166,6 +166,19 @@ above and repreduces the IRFS accordingly.
 \item In a future specification we may consider situations where the trends
 can interact.
 \end{enumerate}
+\item The code is structure as follows:
+\begin{enumerate}
+\item DynareParser just reads the file and produce some ausiliary function
+and constants needed for the solution
+\item ModelSover. Loads files created by the parser and computes the klain
+solution 
+\item AugmentedState Space creates the augmented representation. 
+\end{enumerate}
+\item There are several changes needed. ModelSolver has los of function
+not needed and is missing Klein solution (that is available in the
+code, just copy that into the class). Remove all not necesary functions. 
+\item Check the augmented class and link it to the model solver. Check the
+the filtration is working and the irfs are correct. 
 \end{enumerate}
 
 \end{document}

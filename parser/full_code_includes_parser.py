@@ -1537,344 +1537,344 @@ class ModelSolver:
         # --- 9. Return the constructed matrices ---
         return T, Q_state, Z, H
 
-    def solve_and_filter_calibrated_model(self, param_dict, data_array):
-        """
-        Solves the model using calibrated parameters and runs the Kalman filter.
+    # def solve_and_filter_calibrated_model(self, param_dict, data_array):
+    #     """
+    #     Solves the model using calibrated parameters and runs the Kalman filter.
         
-        Args:
-            param_dict: Dictionary of parameter names and values
-            data_array: Observed data (shape: 1, n_timesteps, n_observables)
+    #     Args:
+    #         param_dict: Dictionary of parameter names and values
+    #         data_array: Observed data (shape: 1, n_timesteps, n_observables)
             
-        Returns:
-            filter_results: Results from Kalman filter/smoother
-            model_matrices: Dictionary with T, Q_state, Z, H matrices
+    #     Returns:
+    #         filter_results: Results from Kalman filter/smoother
+    #         model_matrices: Dictionary with T, Q_state, Z, H matrices
             
-        Raises:
-            ValueError: If parameters are missing or unexpected
-        """
-        # Validate parameters
-        missing_params = set(self.theta_param_names) - set(param_dict.keys())
-        if missing_params:
-            raise ValueError(f"Missing required parameters: {', '.join(missing_params)}")
+    #     Raises:
+    #         ValueError: If parameters are missing or unexpected
+    #     """
+    #     # Validate parameters
+    #     missing_params = set(self.theta_param_names) - set(param_dict.keys())
+    #     if missing_params:
+    #         raise ValueError(f"Missing required parameters: {', '.join(missing_params)}")
         
-        # Check for unexpected parameters
-        unexpected_params = set(param_dict.keys()) - set(self.theta_param_names)
-        if unexpected_params:
-            raise ValueError(f"Unexpected parameters not in model: {', '.join(unexpected_params)}")
+    #     # Check for unexpected parameters
+    #     unexpected_params = set(param_dict.keys()) - set(self.theta_param_names)
+    #     if unexpected_params:
+    #         raise ValueError(f"Unexpected parameters not in model: {', '.join(unexpected_params)}")
         
-        # Create ordered theta array
-        theta = np.array([param_dict[param] for param in self.theta_param_names])
+    #     # Create ordered theta array
+    #     theta = np.array([param_dict[param] for param in self.theta_param_names])
         
-        # Solve the model once
-        T, Q_state, Z, H = self.update_state_space(theta)
+    #     # Solve the model once
+    #     T, Q_state, Z, H = self.update_state_space(theta)
         
-        # Create Kalman filter with solved model
-        kf = simdkalman.KalmanFilter(
-            state_transition=T, 
-            process_noise=Q_state,
-            observation_model=Z,
-            observation_noise=H
-        )
+    #     # Create Kalman filter with solved model
+    #     kf = simdkalman.KalmanFilter(
+    #         state_transition=T, 
+    #         process_noise=Q_state,
+    #         observation_model=Z,
+    #         observation_noise=H
+    #     )
         
-        # Run smoother
-        smoothed_results = kf.smooth(data_array)
+    #     # Run smoother
+    #     smoothed_results = kf.smooth(data_array)
         
-        return {
-            'filter_results': smoothed_results,
-            'model_matrices': {
-                'T': T,
-                'Q_state': Q_state,
-                'Z': Z,
-                'H': H
-            }
-        }
+    #     return {
+    #         'filter_results': smoothed_results,
+    #         'model_matrices': {
+    #             'T': T,
+    #             'Q_state': Q_state,
+    #             'Z': Z,
+    #             'H': H
+    #         }
+    #     }
 
-    def compute_irf(self, param_dict=None, theta=None, shock_name=None, shock_size=1.0, 
-                    periods=40, vars_to_plot=None, figsize=(15, 10)):
-        """
-        Computes and plots impulse response functions for the model.
+    # def compute_irf(self, param_dict=None, theta=None, shock_name=None, shock_size=1.0, 
+    #                 periods=40, vars_to_plot=None, figsize=(15, 10)):
+    #     """
+    #     Computes and plots impulse response functions for the model.
         
-        Args:
-            param_dict: Dictionary of parameter names and values (optional)
-            theta: Parameter vector in correct order (optional)
-            shock_name: Name of the shock to simulate (must be in self.labels['shock_labels'])
-            shock_size: Size of the shock in standard deviations
-            periods: Number of periods to simulate
-            vars_to_plot: List of variables to plot (if None, plots all observed variables and selected states)
-            figsize: Figure size for the plot
+    #     Args:
+    #         param_dict: Dictionary of parameter names and values (optional)
+    #         theta: Parameter vector in correct order (optional)
+    #         shock_name: Name of the shock to simulate (must be in self.labels['shock_labels'])
+    #         shock_size: Size of the shock in standard deviations
+    #         periods: Number of periods to simulate
+    #         vars_to_plot: List of variables to plot (if None, plots all observed variables and selected states)
+    #         figsize: Figure size for the plot
             
-        Returns:
-            fig: The matplotlib figure containing the IRF plots
-            irf_data: DataFrame containing all IRF responses
-        """
-        import numpy as np
-        import pandas as pd
-        import matplotlib.pyplot as plt
+    #     Returns:
+    #         fig: The matplotlib figure containing the IRF plots
+    #         irf_data: DataFrame containing all IRF responses
+    #     """
+    #     import numpy as np
+    #     import pandas as pd
+    #     import matplotlib.pyplot as plt
         
-        # Ensure we have parameters
-        if theta is None and param_dict is not None:
-            # Create ordered theta array
-            theta = np.array([param_dict[param] for param in self.theta_param_names])
-        elif theta is None and param_dict is None:
-            raise ValueError("Either param_dict or theta must be provided")
+    #     # Ensure we have parameters
+    #     if theta is None and param_dict is not None:
+    #         # Create ordered theta array
+    #         theta = np.array([param_dict[param] for param in self.theta_param_names])
+    #     elif theta is None and param_dict is None:
+    #         raise ValueError("Either param_dict or theta must be provided")
         
-        # Validate shock name
-        if shock_name is None:
-            raise ValueError("shock_name must be provided")
+    #     # Validate shock name
+    #     if shock_name is None:
+    #         raise ValueError("shock_name must be provided")
         
-        if shock_name not in self.labels['shock_labels']:
-            raise ValueError(f"Shock '{shock_name}' not found. Available shocks: {self.labels['shock_labels']}")
+    #     if shock_name not in self.labels['shock_labels']:
+    #         raise ValueError(f"Shock '{shock_name}' not found. Available shocks: {self.labels['shock_labels']}")
         
-        # Get shock index
-        shock_idx = self.labels['shock_labels'].index(shock_name)
+    #     # Get shock index
+    #     shock_idx = self.labels['shock_labels'].index(shock_name)
         
-        # Get DSGE core parameters
-        core_params = theta[:self.n_dsge_core_params]
+    #     # Get DSGE core parameters
+    #     core_params = theta[:self.n_dsge_core_params]
         
-        # Get Jacobians
-        a, b, c = self.evaluate_jacobians(core_params)
+    #     # Get Jacobians
+    #     a, b, c = self.evaluate_jacobians(core_params)
         
-        # Solve model with Klein's method
-        f, p, stab, eig = klein(a, b, self.indices['n_states'])
+    #     # Solve model with Klein's method
+    #     f, p, stab, eig = klein(a, b, self.indices['n_states'])
         
-        # Create simple IRF calculation method
-        def compute_simple_irf(F, P, x0, periods):
-            # Number of state variables
-            n_states = P.shape[0]
-            # Number of control variables
-            n_controls = F.shape[0]
+    #     # Create simple IRF calculation method
+    #     def compute_simple_irf(F, P, x0, periods):
+    #         # Number of state variables
+    #         n_states = P.shape[0]
+    #         # Number of control variables
+    #         n_controls = F.shape[0]
             
-            # Create IRF storage
-            irf = np.zeros((periods, n_controls + n_states))
+    #         # Create IRF storage
+    #         irf = np.zeros((periods, n_controls + n_states))
             
-            # Set initial state
-            x = x0.copy()
+    #         # Set initial state
+    #         x = x0.copy()
             
-            # Compute IRF
-            for t in range(periods):
-                # Controls = F * states
-                controls = F @ x
-                # Store results for this period
-                irf[t, :n_controls] = controls
-                irf[t, n_controls:] = x
-                # Transition to next period
-                x = P @ x
+    #         # Compute IRF
+    #         for t in range(periods):
+    #             # Controls = F * states
+    #             controls = F @ x
+    #             # Store results for this period
+    #             irf[t, :n_controls] = controls
+    #             irf[t, n_controls:] = x
+    #             # Transition to next period
+    #             x = P @ x
             
-            return irf
+    #         return irf
         
-        # Now we need to figure out which state receives the shock
-        # For now, let's directly use the shock index for mapping
-        n_states = self.indices['n_states']
-        n_endogenous = self.indices['n_endogenous']
-        n_shocks = self.indices['n_shocks']
+    #     # Now we need to figure out which state receives the shock
+    #     # For now, let's directly use the shock index for mapping
+    #     n_states = self.indices['n_states']
+    #     n_endogenous = self.indices['n_endogenous']
+    #     n_shocks = self.indices['n_shocks']
         
-        # Create initial state vector
-        x0 = np.zeros(n_states)
+    #     # Create initial state vector
+    #     x0 = np.zeros(n_states)
         
-        # For shock in the DSGE part
-        if shock_idx < n_shocks:
-            # Check if we're dealing with an exogenous shock
-            if shock_name.startswith("SHK_"):
-                # Find corresponding state variable (usually starts with RES_)
-                # This is the most critical part - correctly mapping shocks to states
-                state_name = "RES_" + shock_name[4:] + "_lag"
+    #     # For shock in the DSGE part
+    #     if shock_idx < n_shocks:
+    #         # Check if we're dealing with an exogenous shock
+    #         if shock_name.startswith("SHK_"):
+    #             # Find corresponding state variable (usually starts with RES_)
+    #             # This is the most critical part - correctly mapping shocks to states
+    #             state_name = "RES_" + shock_name[4:] + "_lag"
                 
-                # Find position in state variables
-                if state_name in self.labels['state_labels']:
-                    state_idx = self.labels['state_labels'].index(state_name)
+    #             # Find position in state variables
+    #             if state_name in self.labels['state_labels']:
+    #                 state_idx = self.labels['state_labels'].index(state_name)
                     
-                    # Get shock standard deviation
-                    shock_std_idx = self.n_dsge_core_params + shock_idx
-                    if shock_std_idx < len(theta):
-                        shock_std = theta[shock_std_idx]
-                        # Apply shock to the state
-                        x0[state_idx] = shock_size * shock_std
-                    else:
-                        x0[state_idx] = shock_size
-                else:
-                    # Try direct mapping based on R matrix
-                    if shock_idx < n_shocks:
-                        # Look at the R matrix to find which state receives this shock
-                        for i in range(self.R.shape[0]):
-                            if self.R[i, shock_idx] != 0:
-                                # Found the state that receives this shock
-                                state_idx = n_endogenous + i
-                                if state_idx < n_states:
-                                    # Get shock standard deviation
-                                    shock_std_idx = self.n_dsge_core_params + shock_idx
-                                    if shock_std_idx < len(theta):
-                                        shock_std = theta[shock_std_idx]
-                                        # Apply shock to the state
-                                        x0[state_idx] = shock_size * shock_std
-                                    else:
-                                        x0[state_idx] = shock_size
-                                    break
+    #                 # Get shock standard deviation
+    #                 shock_std_idx = self.n_dsge_core_params + shock_idx
+    #                 if shock_std_idx < len(theta):
+    #                     shock_std = theta[shock_std_idx]
+    #                     # Apply shock to the state
+    #                     x0[state_idx] = shock_size * shock_std
+    #                 else:
+    #                     x0[state_idx] = shock_size
+    #             else:
+    #                 # Try direct mapping based on R matrix
+    #                 if shock_idx < n_shocks:
+    #                     # Look at the R matrix to find which state receives this shock
+    #                     for i in range(self.R.shape[0]):
+    #                         if self.R[i, shock_idx] != 0:
+    #                             # Found the state that receives this shock
+    #                             state_idx = n_endogenous + i
+    #                             if state_idx < n_states:
+    #                                 # Get shock standard deviation
+    #                                 shock_std_idx = self.n_dsge_core_params + shock_idx
+    #                                 if shock_std_idx < len(theta):
+    #                                     shock_std = theta[shock_std_idx]
+    #                                     # Apply shock to the state
+    #                                     x0[state_idx] = shock_size * shock_std
+    #                                 else:
+    #                                     x0[state_idx] = shock_size
+    #                                 break
             
-            # Compute DSGE IRF
-            dsge_irf = compute_simple_irf(f, p, x0, periods)
+    #         # Compute DSGE IRF
+    #         dsge_irf = compute_simple_irf(f, p, x0, periods)
             
-            # Get variable names
-            control_names = self.labels.get('control_labels', self.model.get('control_variables', []))
-            state_names = self.labels['state_labels']
+    #         # Get variable names
+    #         control_names = self.labels.get('control_labels', self.model.get('control_variables', []))
+    #         state_names = self.labels['state_labels']
             
-            # If control_names is not available, derive it from all_variables and state_variables
-            if not control_names:
-                all_vars = self.model.get('all_variables', [])
-                control_names = [v for v in all_vars if v not in state_names]
+    #         # If control_names is not available, derive it from all_variables and state_variables
+    #         if not control_names:
+    #             all_vars = self.model.get('all_variables', [])
+    #             control_names = [v for v in all_vars if v not in state_names]
             
-            # Create DSGE IRF DataFrame
-            var_names = control_names + state_names
-            dsge_df = pd.DataFrame(dsge_irf, columns=var_names)
+    #         # Create DSGE IRF DataFrame
+    #         var_names = control_names + state_names
+    #         dsge_df = pd.DataFrame(dsge_irf, columns=var_names)
             
-            # Now handle trend IRF if needed
-            if hasattr(self, 'trend_info') and self.trend_info['total_states'] > 0:
-                # Get trend state space matrices
-                n_trend = self.trend_info['total_states']
+    #         # Now handle trend IRF if needed
+    #         if hasattr(self, 'trend_info') and self.trend_info['total_states'] > 0:
+    #             # Get trend state space matrices
+    #             n_trend = self.trend_info['total_states']
                 
-                # Create trend transition matrix if available
-                if hasattr(self, 'T_trend_structure'):
-                    T_trend = np.array(self.T_trend_structure)
+    #             # Create trend transition matrix if available
+    #             if hasattr(self, 'T_trend_structure'):
+    #                 T_trend = np.array(self.T_trend_structure)
                     
-                    # Initialize trend state
-                    trend_state = np.zeros(n_trend)
+    #                 # Initialize trend state
+    #                 trend_state = np.zeros(n_trend)
                     
-                    # Create trend IRF storage
-                    trend_irf = np.zeros((periods, n_trend))
+    #                 # Create trend IRF storage
+    #                 trend_irf = np.zeros((periods, n_trend))
                     
-                    # Compute trend IRF
-                    for t in range(periods):
-                        trend_irf[t, :] = trend_state
-                        trend_state = T_trend @ trend_state
+    #                 # Compute trend IRF
+    #                 for t in range(periods):
+    #                     trend_irf[t, :] = trend_state
+    #                     trend_state = T_trend @ trend_state
                     
-                    # Create trend DataFrame
-                    trend_df = pd.DataFrame(trend_irf, columns=self.trend_info['state_labels'])
+    #                 # Create trend DataFrame
+    #                 trend_df = pd.DataFrame(trend_irf, columns=self.trend_info['state_labels'])
                     
-                    # Combine DSGE and trend
-                    combined_df = pd.concat([dsge_df, trend_df], axis=1)
-                else:
-                    combined_df = dsge_df
-            else:
-                combined_df = dsge_df
+    #                 # Combine DSGE and trend
+    #                 combined_df = pd.concat([dsge_df, trend_df], axis=1)
+    #             else:
+    #                 combined_df = dsge_df
+    #         else:
+    #             combined_df = dsge_df
             
-            # Create base variable names mapping (without _lag suffix)
-            base_vars = {}
-            for var in var_names:
-                if var.endswith('_lag'):
-                    base_name = var[:-4]
-                    base_vars[base_name] = var
-                else:
-                    base_vars[var] = var
+    #         # Create base variable names mapping (without _lag suffix)
+    #         base_vars = {}
+    #         for var in var_names:
+    #             if var.endswith('_lag'):
+    #                 base_name = var[:-4]
+    #                 base_vars[base_name] = var
+    #             else:
+    #                 base_vars[var] = var
             
-            # Determine variables to plot
-            if vars_to_plot is None:
-                # Choose sensible defaults
-                vars_to_plot = []
+    #         # Determine variables to plot
+    #         if vars_to_plot is None:
+    #             # Choose sensible defaults
+    #             vars_to_plot = []
                 
-                # Add main model variables (excluding RES_ variables)
-                for var in base_vars.keys():
-                    if not var.startswith('RES_'):
-                        vars_to_plot.append(var)
+    #             # Add main model variables (excluding RES_ variables)
+    #             for var in base_vars.keys():
+    #                 if not var.startswith('RES_'):
+    #                     vars_to_plot.append(var)
                 
-                # Limit to at most 12 variables
-                vars_to_plot = vars_to_plot[:12]
+    #             # Limit to at most 12 variables
+    #             vars_to_plot = vars_to_plot[:12]
             
-            # Create figure for plotting
-            n_vars = len(vars_to_plot)
-            n_cols = min(3, n_vars)
-            n_rows = (n_vars + n_cols - 1) // n_cols
+    #         # Create figure for plotting
+    #         n_vars = len(vars_to_plot)
+    #         n_cols = min(3, n_vars)
+    #         n_rows = (n_vars + n_cols - 1) // n_cols
             
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-            if n_rows * n_cols == 1:
-                axes = np.array([axes])
-            axes = axes.flatten()
+    #         fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    #         if n_rows * n_cols == 1:
+    #             axes = np.array([axes])
+    #         axes = axes.flatten()
             
-            # Plot each variable
-            for i, var in enumerate(vars_to_plot):
-                if i < len(axes):
-                    ax = axes[i]
+    #         # Plot each variable
+    #         for i, var in enumerate(vars_to_plot):
+    #             if i < len(axes):
+    #                 ax = axes[i]
                     
-                    # Check if variable exists directly in results
-                    if var in combined_df.columns:
-                        column = var
-                    elif var in base_vars:
-                        # Use the base variable mapping
-                        column = base_vars[var]
-                        if column not in combined_df.columns:
-                            ax.text(0.5, 0.5, f"Variable '{var}' mapped to '{column}' not found", 
-                                ha='center', va='center')
-                            continue
-                    else:
-                        # Try to find a fuzzy match
-                        matches = [col for col in combined_df.columns 
-                                if col == var or col.startswith(var + '_')]
+    #                 # Check if variable exists directly in results
+    #                 if var in combined_df.columns:
+    #                     column = var
+    #                 elif var in base_vars:
+    #                     # Use the base variable mapping
+    #                     column = base_vars[var]
+    #                     if column not in combined_df.columns:
+    #                         ax.text(0.5, 0.5, f"Variable '{var}' mapped to '{column}' not found", 
+    #                             ha='center', va='center')
+    #                         continue
+    #                 else:
+    #                     # Try to find a fuzzy match
+    #                     matches = [col for col in combined_df.columns 
+    #                             if col == var or col.startswith(var + '_')]
                         
-                        if matches:
-                            column = matches[0]
-                        else:
-                            ax.text(0.5, 0.5, f"Variable '{var}' not found", 
-                                ha='center', va='center')
-                            continue
+    #                     if matches:
+    #                         column = matches[0]
+    #                     else:
+    #                         ax.text(0.5, 0.5, f"Variable '{var}' not found", 
+    #                             ha='center', va='center')
+    #                         continue
                     
-                    # Plot the variable
-                    combined_df[column].plot(ax=ax, color='blue', linewidth=2)
+    #                 # Plot the variable
+    #                 combined_df[column].plot(ax=ax, color='blue', linewidth=2)
                     
-                    # Display original name for clarity
-                    display_name = var if var == column else f"{var} (as {column})"
-                    ax.set_title(display_name)
-                    ax.axhline(y=0, color='black', linestyle='--', alpha=0.3)
-                    ax.grid(True, alpha=0.3)
-                    ax.set_xlabel('Periods')
-                    ax.set_ylabel('Deviation')
+    #                 # Display original name for clarity
+    #                 display_name = var if var == column else f"{var} (as {column})"
+    #                 ax.set_title(display_name)
+    #                 ax.axhline(y=0, color='black', linestyle='--', alpha=0.3)
+    #                 ax.grid(True, alpha=0.3)
+    #                 ax.set_xlabel('Periods')
+    #                 ax.set_ylabel('Deviation')
             
-            # Hide unused subplots
-            for i in range(n_vars, len(axes)):
-                axes[i].set_visible(False)
+    #         # Hide unused subplots
+    #         for i in range(n_vars, len(axes)):
+    #             axes[i].set_visible(False)
             
-            # Add overall title
-            fig.suptitle(f"Impulse Response Functions for {shock_size}σ {shock_name} Shock", 
-                        fontsize=16, y=1.02)
-            fig.tight_layout()
+    #         # Add overall title
+    #         fig.suptitle(f"Impulse Response Functions for {shock_size}σ {shock_name} Shock", 
+    #                     fontsize=16, y=1.02)
+    #         fig.tight_layout()
             
-            # Print available variables for debugging
-            print("Available variables in IRF results:", sorted(combined_df.columns.tolist()))
+    #         # Print available variables for debugging
+    #         print("Available variables in IRF results:", sorted(combined_df.columns.tolist()))
             
-            return fig, combined_df
-        else:
-            raise ValueError(f"Unable to properly map shock {shock_name} to a state variable")
+    #         return fig, combined_df
+    #     else:
+    #         raise ValueError(f"Unable to properly map shock {shock_name} to a state variable")
 
 
-    def run_filter_smoother(self, theta: np.ndarray, data_array: np.ndarray):
-        """
-        Updates state space, creates Kalman filter, and runs smoother.
+    # def run_filter_smoother(self, theta: np.ndarray, data_array: np.ndarray):
+    #     """
+    #     Updates state space, creates Kalman filter, and runs smoother.
 
-        Args:
-            theta: Parameter vector.
-            data_array: Observed data, shape (1, n_timesteps, n_observables).
+    #     Args:
+    #         theta: Parameter vector.
+    #         data_array: Observed data, shape (1, n_timesteps, n_observables).
 
-        Returns:
-            simdkalman results object.
-        """
-        # 1. Get updated state-space matrices
-        T, Q_state, Z, H = self.update_state_space(theta)
+    #     Returns:
+    #         simdkalman results object.
+    #     """
+    #     # 1. Get updated state-space matrices
+    #     T, Q_state, Z, H = self.update_state_space(theta)
 
-        # Re-create filter if matrices were modified
-        kf = simdkalman.KalmanFilter(state_transition=T, 
-                                    process_noise=Q_state, 
-                                    observation_model=Z, 
-                                    observation_noise=H)
+    #     # Re-create filter if matrices were modified
+    #     kf = simdkalman.KalmanFilter(state_transition=T, 
+    #                                 process_noise=Q_state, 
+    #                                 observation_model=Z, 
+    #                                 observation_noise=H)
 
 
-        try:
-            smoothed_results = kf.smooth(data_array)
-            return smoothed_results
-        except Exception as e:
-            print(f"Error during Kalman smoothing: {e}")
-            # You might want to inspect the matrices T, Q_state, Z, H here
-            # print("T:\n", T)
-            # print("Q_state:\n", Q_state)
-            # print("Z:\n", Z)
-            # print("H:\n", H)
-            raise # Re-raise the error after printing info
+    #     try:
+    #         smoothed_results = kf.smooth(data_array)
+    #         return smoothed_results
+    #     except Exception as e:
+    #         print(f"Error during Kalman smoothing: {e}")
+    #         # You might want to inspect the matrices T, Q_state, Z, H here
+    #         # print("T:\n", T)
+    #         # print("Q_state:\n", Q_state)
+    #         # print("Z:\n", Z)
+    #         # print("H:\n", H)
+    #         raise # Re-raise the error after printing info
 
 
 
