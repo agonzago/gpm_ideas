@@ -1193,11 +1193,17 @@ class DynareParser:
         return structure
     
 
+import numpy as np
+import os
+import sys
+import json
+import importlib.util
+from typing import Dict, List, Optional, Tuple, Any
 
 class ModelSolver:
     """
-    Solves the DSGE model and updates the state-space representation based
-    on parameter values using a dedicated update function.
+    Solves the DSGE model and creates the core state-space representation 
+    based on parameter values. Designed to work with AugmentedStateSpace class.
     """
     def __init__(self, output_dir, model_specs, obs_vars):
         """
@@ -1217,24 +1223,25 @@ class ModelSolver:
         self.load_model()               # Loads self.model (from model.json)
         self.load_jacobian_evaluator()  # Loads self.evaluate_jacobians
         self.load_model_structure()     # Loads self.indices, self.labels, self.R
-
-        # --- Pre-calculate trend structure ---
-        # Needs n_states and n_shocks from the core DSGE model structure
-        self.trend_info = calculate_trend_positions(
-            self.model_specs,
-            self.obs_vars,
-            self.indices['n_states'],
-            self.indices['n_shocks']
-        )
-        # --- Store the order of parameters expected by theta ---
+        
+        # Define parameters ordering
         self._define_theta_order()
 
         # Validate model specifications against loaded model/labels
         self.check_spec_vars()
 
-        # Initialize solved state (optional)
-        self.f = None # Policy function
-        self.p = None # DSGE state transition
+        # Initialize matrices that will be set when solve_model is called
+        self.f = None  # Policy function for controls: c_t = f*s_t
+        self.p = None  # State transition matrix: s_{t+1} = p*s_t
+        
+        # Derived matrices (set after solve_model is called)
+        self.state_transition = None  # Same as p, for compatibility
+        self.impulse_matrix = None  # B matrix for shock impact
+        
+        # Additional properties for compatibility with AugmentedStateSpace
+        self.var_names = self.model.get('all_variables', [])
+        self.param_names = self.model.get('parameters', [])
+        self.shock_names = self.model.get('shocks', [])
 
     def check_spec_vars(self):
         """Check that model specifications match variables in the model."""
@@ -1253,7 +1260,7 @@ class ModelSolver:
             cycle_var = spec.get('cycle')
             if cycle_var is None:
                 print(f"Warning: 'cycle' key missing in model_specs for {obs_var}.")
-                continue # Skip if spec incomplete
+                continue  # Skip if spec incomplete
             if cycle_var not in list_model_names:
                 print(f"Error: Cycle variable '{cycle_var}' for '{obs_var}' not found in model variables.")
                 all_cycle_vars_found = False
@@ -1261,7 +1268,7 @@ class ModelSolver:
             # Check trend specification existence and type
             if 'trend' not in spec:
                 print(f"Error: Trend specification missing for {obs_var}")
-                all_cycle_vars_found = False # Treat as error
+                all_cycle_vars_found = False  # Treat as error
                 continue
             trend_type = spec['trend']
             valid_trends = ['random_walk', 'second_difference', 'constant_mean']
@@ -1278,34 +1285,32 @@ class ModelSolver:
         Defines the strict order of parameters expected in the 'theta' vector.
         Stores the order in self.theta_param_names.
         """
-        # 1. DSGE core parameters (must match jacobian_evaluator expectation)
-        #    Load this order from self.labels['param_labels'] which came from parser
+        # 1. DSGE core parameters (from param_labels)
         dsge_core_params = list(self.labels['param_labels'])
 
-        # 2. DSGE shock standard deviations (shock in exo_variables with shocks)
+        # 2. DSGE shock standard deviations
         dsge_shock_std_params = [f"{state}_std" for state in self.model.get('direct_shock_states', [])]
 
-        # 3. Trend shock standard deviations (use order from trend_info calculation)
-        trend_shock_std_params = list(self.trend_info['shock_std_param_names'])
-
-        # 4. Measurement error standard deviations (use order of self.obs_vars)
-        #    We assume zero for now, but define the names for future use
-        meas_error_std_params = [f"{obs_var}_meas_error_std" for obs_var in self.obs_vars]
+        # 3. Trend shock standard deviations - using observable variables
+        trend_shock_std_params = [f"{obs_var}_level_shock_std" for obs_var in self.obs_vars]
+        
+        # Add slope shock stds for second_difference trends
+        for obs_var, spec in self.model_specs.items():
+            if spec.get('trend') == 'second_difference':
+                trend_shock_std_params.append(f"{obs_var}_slope_shock_std")
 
         # Combine all parameter names IN ORDER
-        self.theta_param_names = dsge_core_params + dsge_shock_std_params + trend_shock_std_params # + meas_error_std_params (Add when needed)
+        self.theta_param_names = dsge_core_params + dsge_shock_std_params + trend_shock_std_params
 
         # Store counts for easy splitting later
         self.n_dsge_core_params = len(dsge_core_params)
         self.n_dsge_shock_std_params = len(dsge_shock_std_params)
         self.n_trend_shock_std_params = len(trend_shock_std_params)
-        # self.n_meas_error_std_params = len(meas_error_std_params) # Add when needed
 
         # Total expected length of theta
-        self.expected_theta_length = self.n_dsge_core_params + self.n_dsge_shock_std_params + self.n_trend_shock_std_params # + self.n_meas_error_std_params
+        self.expected_theta_length = self.n_dsge_core_params + self.n_dsge_shock_std_params + self.n_trend_shock_std_params 
 
         print(f"Theta vector order defined. Expected length: {self.expected_theta_length}")
-        # print(f"Theta order: {self.theta_param_names}") # Uncomment for debugging
 
     def load_model(self):
         """Load the model from the JSON file."""
@@ -1329,7 +1334,6 @@ class ModelSolver:
             print(f"Error: Missing essential key in model.json: {e}")
             raise
 
-
     def load_jacobian_evaluator(self):
         """Load the Jacobian evaluator function."""
         jac_path = os.path.join(self.output_dir, "jacobian_evaluator.py")
@@ -1338,7 +1342,7 @@ class ModelSolver:
             if spec is None or spec.loader is None:
                 raise ImportError(f"Could not create spec for {jac_path}")
             self.jacobian_module = importlib.util.module_from_spec(spec)
-            sys.modules["jacobian_evaluator"] = self.jacobian_module # Add to sys.modules
+            sys.modules["jacobian_evaluator"] = self.jacobian_module  # Add to sys.modules
             spec.loader.exec_module(self.jacobian_module)
             self.evaluate_jacobians = getattr(self.jacobian_module, 'evaluate_jacobians')
         except FileNotFoundError:
@@ -1360,13 +1364,13 @@ class ModelSolver:
                 raise ImportError(f"Could not create spec for {struct_path}")
 
             struct_module = importlib.util.module_from_spec(spec)
-            sys.modules["model_structure"] = struct_module # Add to sys.modules
+            sys.modules["model_structure"] = struct_module  # Add to sys.modules
             spec.loader.exec_module(struct_module)
 
             # Load required attributes
             self.indices = getattr(struct_module, 'indices')
             self.labels = getattr(struct_module, 'labels')
-            self.R = getattr(struct_module, 'R') # Shock-to-state mapping
+            self.R = getattr(struct_module, 'R')  # Shock-to-state mapping
             self.B_structure = getattr(struct_module, 'B_structure')
             self.C_structure = getattr(struct_module, 'C_structure')
             self.D = getattr(struct_module, 'D')
@@ -1374,16 +1378,6 @@ class ModelSolver:
             # Load observation mapping if available
             if hasattr(struct_module, 'obs_mapping'):
                 self.obs_mapping = getattr(struct_module, 'obs_mapping')
-            
-            # Load trend structures if available
-            if hasattr(struct_module, 'T_trend_structure'):
-                self.T_trend_structure = getattr(struct_module, 'T_trend_structure')
-            if hasattr(struct_module, 'R_trend_structure'):
-                self.R_trend_structure = getattr(struct_module, 'R_trend_structure')
-            if hasattr(struct_module, 'C_trend_structure'):
-                self.C_trend_structure = getattr(struct_module, 'C_trend_structure')
-            if hasattr(struct_module, 'n_trend_states'):
-                self.n_trend_states = getattr(struct_module, 'n_trend_states')
 
             # Validate loaded structure
             required_indices = ['n_states', 'n_shocks', 'n_controls', 'n_observables', 'n_endogenous']
@@ -1393,17 +1387,11 @@ class ModelSolver:
             required_labels = ['state_labels', 'observable_labels', 'shock_labels', 'param_labels']
             if not all(k in self.labels for k in required_labels):
                 raise AttributeError(f"Missing required keys in 'labels' from {struct_path}")
-            
-            # Basic check on R dimensions
+
+            # Check dimensions
             n_exo_states = self.indices['n_states'] - self.indices['n_endogenous']
             if self.R.shape != (n_exo_states, self.indices['n_shocks']):
                 print(f"Warning: Shape of loaded R {self.R.shape} does not match expected ({n_exo_states}, {self.indices['n_shocks']})")
-
-            # Check C_structure dimensions
-            n_observables = self.indices['n_observables']
-            n_states = self.indices['n_states']
-            if self.C_structure.shape != (n_observables, n_states):
-                print(f"Warning: Shape of loaded C_structure {self.C_structure.shape} does not match expected ({n_observables}, {n_states})")
 
         except FileNotFoundError:
             print(f"Error: model_structure.py not found at {struct_path}")
@@ -1415,467 +1403,144 @@ class ModelSolver:
             print(f"Error loading model structure from {struct_path}: {e}")
             raise
 
-    def update_state_space(self, theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def solve_model(self, theta: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Updates and returns the numerical state-space matrices (T, Q_state, Z, H)
-        based on the provided parameter vector 'theta'.
-
-        Assumes zero measurement error for now (H=0).
-
+        Solves the DSGE model using Klein's method.
+        
         Args:
-            theta: NumPy array containing parameter values in the predefined order:
-                1. DSGE core parameters
-                2. DSGE shock standard deviations
-                3. Trend shock standard deviations
-                (Measurement error std devs would be next if used)
-
+            theta: NumPy array containing parameter values in the predefined order
+                  (only the core DSGE parameters are used here)
+        
         Returns:
-            T: Augmented state transition matrix (n_aug_states x n_aug_states)
-            Q_state: Augmented process noise covariance matrix (n_aug_states x n_aug_states)
-            Z: Augmented observation matrix (n_observables x n_aug_states)
-            H: Measurement noise covariance matrix (n_observables x n_observables)
+            f: Policy function matrix for controls
+            p: State transition matrix
         """
-        # --- 1. Input Validation and Parameter Splitting ---
+        # Input validation
         if not isinstance(theta, np.ndarray):
-            theta = np.array(theta) # Ensure theta is a numpy array
+            theta = np.array(theta)  # Ensure theta is a numpy array
         if theta.ndim != 1:
             raise ValueError(f"Input 'theta' must be a 1D array, but got shape {theta.shape}")
-        if len(theta) != self.expected_theta_length:
-            raise ValueError(f"Incorrect length for 'theta'. Expected {self.expected_theta_length}, got {len(theta)}.")
-
-        # Split theta based on pre-calculated counts
-        split1 = self.n_dsge_core_params
-        split2 = split1 + self.n_dsge_shock_std_params
-        split3 = split2 + self.n_trend_shock_std_params
-
-        dsge_core_params = theta[:split1]
-        dsge_shock_stds = theta[split1:split2]
-        trend_shock_stds = theta[split2:split3]
-        # meas_error_stds = theta[split3:] # Uncomment when using measurement errors
-
-        # --- 2. Get Dimensions from loaded model structure ---
-        n_states = self.indices['n_states']
-        n_shocks = self.indices['n_shocks']
-        n_controls = self.indices['n_controls']
-        n_observables = self.indices['n_observables']
-        n_endogenous = self.indices['n_endogenous']
-        n_exo_states = n_states - n_endogenous
-
-        n_trend_states = self.trend_info['total_states']
-        n_trend_shocks = self.trend_info['total_trend_shocks']
-        n_aug_states = n_states + n_trend_states
-        n_aug_shocks = n_shocks + n_trend_shocks
-
-        # --- 3. Solve DSGE Part ---
+        
+        # Extract DSGE core parameters (only these affect Klein solution)
+        dsge_core_params = theta[:self.n_dsge_core_params]
+        
+        # Get Jacobians from evaluator
         try:
             a, b, c_jac = self.evaluate_jacobians(dsge_core_params)
         except Exception as e:
             print(f"Error during Jacobian evaluation: {e}")
             raise
-
+        
+        # Solve using Klein method
         try:
-            # Pass only n_states (predetermined vars) to Klein
-            f, p, stab, eig = klein(a, b, n_states)
-            self.f = f # Store policy function
-            self.p = p # Store DSGE state transition
-            # if stab != 0:
-            #     print("Warning: Klein solver indicates potential instability.")
+            f, p, stab, eig = klein(a, b, self.indices['n_states'])
+            
+            # Store results for later use
+            self.f = f  # Policy function for controls
+            self.p = p  # State transition matrix
+            self.state_transition = p  # Alias for compatibility
+            
+            # Create impulse matrix (B) from structure
+            n_states = self.indices['n_states']
+            n_shocks = self.indices['n_shocks']
+            
+            # B matrix needs to be constructed based on shock std devs
+            B = np.zeros((n_states, n_shocks))
+            n_endogenous = self.indices['n_endogenous']
+            
+            # Only exogenous states receive shocks directly
+            # The R matrix defines which shock affects which state
+            B[n_endogenous:, :] = self.R
+            
+            self.impulse_matrix = B
+            
+            if stab != 0:
+                print("Warning: Klein solver indicates potential instability.")
+                
+            return f, p
+            
         except Exception as e:
             print(f"Error during Klein solution: {e}")
             raise
 
-        # --- 4. Build Augmented State Transition Matrix T ---
-        T = np.zeros((n_aug_states, n_aug_states))
-        # DSGE state transition
-        T[:n_states, :n_states] = self.p
-        # Trend component transition
-        T[n_states:, n_states:] = np.array(self.T_trend_structure)
-
-        # --- 5. Build Augmented Shock Selection Matrix `selection` ---
-        selection = np.zeros((n_aug_states, n_aug_shocks))
-        # DSGE shock selection
-        selection[n_endogenous:n_states, :n_shocks] = self.R
-        # Trend shock selection
-        selection[n_states:, n_shocks:] = np.array(self.R_trend_structure)
-
-        # --- 6. Build Process Noise Covariance Q_state ---
-        # Combine all shock std devs
-        all_shock_stds = np.concatenate((dsge_shock_stds, trend_shock_stds))
-        # Square them to get variances
-        all_shock_vars = all_shock_stds ** 2
-        # Check for negative variances
-        # if np.any(all_shock_vars < 0):
-        #     print("Warning: Negative variances detected from shock std devs in theta. Taking absolute value.")
-        #     all_shock_vars = np.abs(all_shock_vars)
-        # Create diagonal matrix of shock variances
-        Q_param = np.diag(all_shock_vars)
-        # Calculate the state process noise covariance
-        Q_state = selection @ Q_param @ selection.T
-
-        # --- 7. Build Augmented Observation Matrix Z ---
-        Z = np.zeros((n_observables, n_aug_states))
+    def create_shock_covariance_matrix(self, theta: np.ndarray) -> np.ndarray:
+        """
+        Creates the shock covariance matrix for DSGE shocks.
         
-        # Use observation mapping from structure
-        for obs_var, mapping in self.obs_mapping.items():
-            i = mapping['obs_index']
-            if mapping['type'] == 'control':
-                # Apply policy function for control variables
-                control_idx = mapping['index']
-                Z[i, :n_states] = self.f[control_idx, :]
-            elif mapping['type'] == 'state':
-                # Direct mapping for state variables
-                state_idx = mapping['index']
-                Z[i, state_idx] = 1.0
+        Args:
+            theta: Parameter vector containing shock standard deviations
         
-        # Add trend contributions
-        Z[:, n_states:] = np.array(self.C_trend_structure)
-
-        # --- 8. Build Measurement Noise Covariance H ---
-        # Assuming zero measurement error for now
-        H = np.zeros((n_observables, n_observables))
-
-        # --- 9. Return the constructed matrices ---
-        return T, Q_state, Z, H
-
-    # def solve_and_filter_calibrated_model(self, param_dict, data_array):
-    #     """
-    #     Solves the model using calibrated parameters and runs the Kalman filter.
+        Returns:
+            QQ: Shock covariance matrix (n_shocks × n_shocks)
+        """
+        n_shocks = self.indices['n_shocks']
         
-    #     Args:
-    #         param_dict: Dictionary of parameter names and values
-    #         data_array: Observed data (shape: 1, n_timesteps, n_observables)
-            
-    #     Returns:
-    #         filter_results: Results from Kalman filter/smoother
-    #         model_matrices: Dictionary with T, Q_state, Z, H matrices
-            
-    #     Raises:
-    #         ValueError: If parameters are missing or unexpected
-    #     """
-    #     # Validate parameters
-    #     missing_params = set(self.theta_param_names) - set(param_dict.keys())
-    #     if missing_params:
-    #         raise ValueError(f"Missing required parameters: {', '.join(missing_params)}")
+        # Extract shock standard deviations from theta
+        shock_std_start = self.n_dsge_core_params
+        shock_std_end = shock_std_start + self.n_dsge_shock_std_params
         
-    #     # Check for unexpected parameters
-    #     unexpected_params = set(param_dict.keys()) - set(self.theta_param_names)
-    #     if unexpected_params:
-    #         raise ValueError(f"Unexpected parameters not in model: {', '.join(unexpected_params)}")
+        shock_stds = theta[shock_std_start:shock_std_end]
         
-    #     # Create ordered theta array
-    #     theta = np.array([param_dict[param] for param in self.theta_param_names])
+        # Create diagonal covariance matrix using variances (std^2)
+        QQ = np.diag(shock_stds**2)
         
-    #     # Solve the model once
-    #     T, Q_state, Z, H = self.update_state_space(theta)
+        return QQ
+    
+    def create_theta_vector(self, param_dict: Dict[str, float]) -> np.ndarray:
+        """
+        Creates parameter vector from dictionary in the correct order.
         
-    #     # Create Kalman filter with solved model
-    #     kf = simdkalman.KalmanFilter(
-    #         state_transition=T, 
-    #         process_noise=Q_state,
-    #         observation_model=Z,
-    #         observation_noise=H
-    #     )
+        Args:
+            param_dict: Dictionary of parameter names and values
+            
+        Returns:
+            theta: Parameter vector in the correct order
+        """
+        # Check for missing parameters
+        missing_params = set(self.theta_param_names) - set(param_dict.keys())
+        if missing_params:
+            raise ValueError(f"Missing required parameters: {', '.join(missing_params)}")
         
-    #     # Run smoother
-    #     smoothed_results = kf.smooth(data_array)
+        # Create ordered theta array
+        theta = np.array([param_dict[param] for param in self.theta_param_names])
         
-    #     return {
-    #         'filter_results': smoothed_results,
-    #         'model_matrices': {
-    #             'T': T,
-    #             'Q_state': Q_state,
-    #             'Z': Z,
-    #             'H': H
-    #         }
-    #     }
-
-    # def compute_irf(self, param_dict=None, theta=None, shock_name=None, shock_size=1.0, 
-    #                 periods=40, vars_to_plot=None, figsize=(15, 10)):
-    #     """
-    #     Computes and plots impulse response functions for the model.
+        return theta
+    
+    def get_model_components(self, theta: np.ndarray = None) -> Dict[str, Any]:
+        """
+        Returns core model components needed by AugmentedStateSpace.
         
-    #     Args:
-    #         param_dict: Dictionary of parameter names and values (optional)
-    #         theta: Parameter vector in correct order (optional)
-    #         shock_name: Name of the shock to simulate (must be in self.labels['shock_labels'])
-    #         shock_size: Size of the shock in standard deviations
-    #         periods: Number of periods to simulate
-    #         vars_to_plot: List of variables to plot (if None, plots all observed variables and selected states)
-    #         figsize: Figure size for the plot
-            
-    #     Returns:
-    #         fig: The matplotlib figure containing the IRF plots
-    #         irf_data: DataFrame containing all IRF responses
-    #     """
-    #     import numpy as np
-    #     import pandas as pd
-    #     import matplotlib.pyplot as plt
+        Args:
+            theta: Optional parameter vector to solve model first.
+                  If None, uses previously solved model.
         
-    #     # Ensure we have parameters
-    #     if theta is None and param_dict is not None:
-    #         # Create ordered theta array
-    #         theta = np.array([param_dict[param] for param in self.theta_param_names])
-    #     elif theta is None and param_dict is None:
-    #         raise ValueError("Either param_dict or theta must be provided")
+        Returns:
+            dict: Dictionary containing model components
+        """
+        # Solve model if theta provided and model not already solved
+        if theta is not None:
+            self.solve_model(theta)
+            self.QQ = self.create_shock_covariance_matrix(theta)
         
-    #     # Validate shock name
-    #     if shock_name is None:
-    #         raise ValueError("shock_name must be provided")
+        # Check if model has been solved
+        if self.f is None or self.p is None:
+            raise ValueError("Model has not been solved. Call solve_model first.")
         
-    #     if shock_name not in self.labels['shock_labels']:
-    #         raise ValueError(f"Shock '{shock_name}' not found. Available shocks: {self.labels['shock_labels']}")
-        
-    #     # Get shock index
-    #     shock_idx = self.labels['shock_labels'].index(shock_name)
-        
-    #     # Get DSGE core parameters
-    #     core_params = theta[:self.n_dsge_core_params]
-        
-    #     # Get Jacobians
-    #     a, b, c = self.evaluate_jacobians(core_params)
-        
-    #     # Solve model with Klein's method
-    #     f, p, stab, eig = klein(a, b, self.indices['n_states'])
-        
-    #     # Create simple IRF calculation method
-    #     def compute_simple_irf(F, P, x0, periods):
-    #         # Number of state variables
-    #         n_states = P.shape[0]
-    #         # Number of control variables
-    #         n_controls = F.shape[0]
-            
-    #         # Create IRF storage
-    #         irf = np.zeros((periods, n_controls + n_states))
-            
-    #         # Set initial state
-    #         x = x0.copy()
-            
-    #         # Compute IRF
-    #         for t in range(periods):
-    #             # Controls = F * states
-    #             controls = F @ x
-    #             # Store results for this period
-    #             irf[t, :n_controls] = controls
-    #             irf[t, n_controls:] = x
-    #             # Transition to next period
-    #             x = P @ x
-            
-    #         return irf
-        
-    #     # Now we need to figure out which state receives the shock
-    #     # For now, let's directly use the shock index for mapping
-    #     n_states = self.indices['n_states']
-    #     n_endogenous = self.indices['n_endogenous']
-    #     n_shocks = self.indices['n_shocks']
-        
-    #     # Create initial state vector
-    #     x0 = np.zeros(n_states)
-        
-    #     # For shock in the DSGE part
-    #     if shock_idx < n_shocks:
-    #         # Check if we're dealing with an exogenous shock
-    #         if shock_name.startswith("SHK_"):
-    #             # Find corresponding state variable (usually starts with RES_)
-    #             # This is the most critical part - correctly mapping shocks to states
-    #             state_name = "RES_" + shock_name[4:] + "_lag"
-                
-    #             # Find position in state variables
-    #             if state_name in self.labels['state_labels']:
-    #                 state_idx = self.labels['state_labels'].index(state_name)
-                    
-    #                 # Get shock standard deviation
-    #                 shock_std_idx = self.n_dsge_core_params + shock_idx
-    #                 if shock_std_idx < len(theta):
-    #                     shock_std = theta[shock_std_idx]
-    #                     # Apply shock to the state
-    #                     x0[state_idx] = shock_size * shock_std
-    #                 else:
-    #                     x0[state_idx] = shock_size
-    #             else:
-    #                 # Try direct mapping based on R matrix
-    #                 if shock_idx < n_shocks:
-    #                     # Look at the R matrix to find which state receives this shock
-    #                     for i in range(self.R.shape[0]):
-    #                         if self.R[i, shock_idx] != 0:
-    #                             # Found the state that receives this shock
-    #                             state_idx = n_endogenous + i
-    #                             if state_idx < n_states:
-    #                                 # Get shock standard deviation
-    #                                 shock_std_idx = self.n_dsge_core_params + shock_idx
-    #                                 if shock_std_idx < len(theta):
-    #                                     shock_std = theta[shock_std_idx]
-    #                                     # Apply shock to the state
-    #                                     x0[state_idx] = shock_size * shock_std
-    #                                 else:
-    #                                     x0[state_idx] = shock_size
-    #                                 break
-            
-    #         # Compute DSGE IRF
-    #         dsge_irf = compute_simple_irf(f, p, x0, periods)
-            
-    #         # Get variable names
-    #         control_names = self.labels.get('control_labels', self.model.get('control_variables', []))
-    #         state_names = self.labels['state_labels']
-            
-    #         # If control_names is not available, derive it from all_variables and state_variables
-    #         if not control_names:
-    #             all_vars = self.model.get('all_variables', [])
-    #             control_names = [v for v in all_vars if v not in state_names]
-            
-    #         # Create DSGE IRF DataFrame
-    #         var_names = control_names + state_names
-    #         dsge_df = pd.DataFrame(dsge_irf, columns=var_names)
-            
-    #         # Now handle trend IRF if needed
-    #         if hasattr(self, 'trend_info') and self.trend_info['total_states'] > 0:
-    #             # Get trend state space matrices
-    #             n_trend = self.trend_info['total_states']
-                
-    #             # Create trend transition matrix if available
-    #             if hasattr(self, 'T_trend_structure'):
-    #                 T_trend = np.array(self.T_trend_structure)
-                    
-    #                 # Initialize trend state
-    #                 trend_state = np.zeros(n_trend)
-                    
-    #                 # Create trend IRF storage
-    #                 trend_irf = np.zeros((periods, n_trend))
-                    
-    #                 # Compute trend IRF
-    #                 for t in range(periods):
-    #                     trend_irf[t, :] = trend_state
-    #                     trend_state = T_trend @ trend_state
-                    
-    #                 # Create trend DataFrame
-    #                 trend_df = pd.DataFrame(trend_irf, columns=self.trend_info['state_labels'])
-                    
-    #                 # Combine DSGE and trend
-    #                 combined_df = pd.concat([dsge_df, trend_df], axis=1)
-    #             else:
-    #                 combined_df = dsge_df
-    #         else:
-    #             combined_df = dsge_df
-            
-    #         # Create base variable names mapping (without _lag suffix)
-    #         base_vars = {}
-    #         for var in var_names:
-    #             if var.endswith('_lag'):
-    #                 base_name = var[:-4]
-    #                 base_vars[base_name] = var
-    #             else:
-    #                 base_vars[var] = var
-            
-    #         # Determine variables to plot
-    #         if vars_to_plot is None:
-    #             # Choose sensible defaults
-    #             vars_to_plot = []
-                
-    #             # Add main model variables (excluding RES_ variables)
-    #             for var in base_vars.keys():
-    #                 if not var.startswith('RES_'):
-    #                     vars_to_plot.append(var)
-                
-    #             # Limit to at most 12 variables
-    #             vars_to_plot = vars_to_plot[:12]
-            
-    #         # Create figure for plotting
-    #         n_vars = len(vars_to_plot)
-    #         n_cols = min(3, n_vars)
-    #         n_rows = (n_vars + n_cols - 1) // n_cols
-            
-    #         fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    #         if n_rows * n_cols == 1:
-    #             axes = np.array([axes])
-    #         axes = axes.flatten()
-            
-    #         # Plot each variable
-    #         for i, var in enumerate(vars_to_plot):
-    #             if i < len(axes):
-    #                 ax = axes[i]
-                    
-    #                 # Check if variable exists directly in results
-    #                 if var in combined_df.columns:
-    #                     column = var
-    #                 elif var in base_vars:
-    #                     # Use the base variable mapping
-    #                     column = base_vars[var]
-    #                     if column not in combined_df.columns:
-    #                         ax.text(0.5, 0.5, f"Variable '{var}' mapped to '{column}' not found", 
-    #                             ha='center', va='center')
-    #                         continue
-    #                 else:
-    #                     # Try to find a fuzzy match
-    #                     matches = [col for col in combined_df.columns 
-    #                             if col == var or col.startswith(var + '_')]
-                        
-    #                     if matches:
-    #                         column = matches[0]
-    #                     else:
-    #                         ax.text(0.5, 0.5, f"Variable '{var}' not found", 
-    #                             ha='center', va='center')
-    #                         continue
-                    
-    #                 # Plot the variable
-    #                 combined_df[column].plot(ax=ax, color='blue', linewidth=2)
-                    
-    #                 # Display original name for clarity
-    #                 display_name = var if var == column else f"{var} (as {column})"
-    #                 ax.set_title(display_name)
-    #                 ax.axhline(y=0, color='black', linestyle='--', alpha=0.3)
-    #                 ax.grid(True, alpha=0.3)
-    #                 ax.set_xlabel('Periods')
-    #                 ax.set_ylabel('Deviation')
-            
-    #         # Hide unused subplots
-    #         for i in range(n_vars, len(axes)):
-    #             axes[i].set_visible(False)
-            
-    #         # Add overall title
-    #         fig.suptitle(f"Impulse Response Functions for {shock_size}σ {shock_name} Shock", 
-    #                     fontsize=16, y=1.02)
-    #         fig.tight_layout()
-            
-    #         # Print available variables for debugging
-    #         print("Available variables in IRF results:", sorted(combined_df.columns.tolist()))
-            
-    #         return fig, combined_df
-    #     else:
-    #         raise ValueError(f"Unable to properly map shock {shock_name} to a state variable")
-
-
-    # def run_filter_smoother(self, theta: np.ndarray, data_array: np.ndarray):
-    #     """
-    #     Updates state space, creates Kalman filter, and runs smoother.
-
-    #     Args:
-    #         theta: Parameter vector.
-    #         data_array: Observed data, shape (1, n_timesteps, n_observables).
-
-    #     Returns:
-    #         simdkalman results object.
-    #     """
-    #     # 1. Get updated state-space matrices
-    #     T, Q_state, Z, H = self.update_state_space(theta)
-
-    #     # Re-create filter if matrices were modified
-    #     kf = simdkalman.KalmanFilter(state_transition=T, 
-    #                                 process_noise=Q_state, 
-    #                                 observation_model=Z, 
-    #                                 observation_noise=H)
-
-
-    #     try:
-    #         smoothed_results = kf.smooth(data_array)
-    #         return smoothed_results
-    #     except Exception as e:
-    #         print(f"Error during Kalman smoothing: {e}")
-    #         # You might want to inspect the matrices T, Q_state, Z, H here
-    #         # print("T:\n", T)
-    #         # print("Q_state:\n", Q_state)
-    #         # print("Z:\n", Z)
-    #         # print("H:\n", H)
-    #         raise # Re-raise the error after printing info
-
+        # Return components needed by AugmentedStateSpace
+        return {
+            "f": self.f,                            # Policy function
+            "p": self.p,                            # State transition
+            "state_transition": self.state_transition,  # Same as p (alias)
+            "impulse_matrix": self.impulse_matrix,  # B matrix
+            "QQ": getattr(self, 'QQ', np.eye(self.indices['n_shocks'])),  # Shock covariance
+            "var_names": self.var_names,            # Variable names
+            "shock_names": self.shock_names,        # Shock names
+            "param_names": self.param_names,        # Parameter names
+            "n_states": self.indices['n_states'],   # Number of states
+            "n_controls": self.indices['n_controls'],  # Number of controls
+            "n_shocks": self.indices['n_shocks'],   # Number of shocks
+            "n_endogenous": self.indices['n_endogenous']  # Number of endogenous states
+        }
 
 
 
@@ -2027,32 +1692,35 @@ class DataProcessor:
 
 import numpy as np
 from scipy import linalg
+from typing import Dict, List, Optional, Tuple, Any
 
 class AugmentedStateSpace:
-    def __init__(self, model, model_specs, param_dict):
+    def __init__(self, model_solver, model_specs, param_dict):
         """
         Initializes the AugmentedStateSpace class.
 
         Args:
-            model:  The Dynare model object from ModelSolver.  Must contain attributes shock_names, var_names, state_transition, impulse_matrix
-            model_specs: A dictionary containing the model specifications (including trend information). Must contain keys equal to the names of the observed variables.
-            param_dict: A dictionary containing the parameter values, where keys are parameter names.
+            model_solver: The ModelSolver instance with solved DSGE model
+            model_specs: Dictionary with specifications for observed variables
+            param_dict: Dictionary of parameter names and values
         """
-        self.model = model  # Dynare model object
+        self.model_solver = model_solver
         self.model_specs = model_specs
         self.param_dict = param_dict
-        self.n_states = len(model.var_names)
-        self.n_shocks = len(model.shock_names)  # Number of exogenous shocks, use the shock_names
-        self.n_observable = len(model_specs)
-
-        # Get parameter order from the model
-        self.theta_param_names = self._define_theta_order()
-
-        # Create theta vector in the correct order
+        
+        # Get model dimensions
+        self.n_states = model_solver.indices['n_states']
+        self.n_shocks = model_solver.indices['n_shocks']
+        self.n_observables = len(model_specs)
+        
+        # Get parameter order from model_solver
+        self.theta_param_names = model_solver.theta_param_names
+        
+        # Create theta vector in correct order
         self.theta = self._create_theta_vector()
-
+        
         # Initialize trend-related attributes
-        self.trend_variables = []
+        self.trend_variables = list(model_specs.keys())
         self.trend_types = {}
         self.n_trend_states = 0
         self.trend_shock_names = {}
@@ -2063,37 +1731,22 @@ class AugmentedStateSpace:
         self.TREND_SECOND_DIFF = 2
         self.TREND_CONSTANT = 3
 
+        # Process trend specifications and create constant matrices
         self._process_trend_specifications()
         self._create_constant_trend_matrices()
+        
+        # Solve core DSGE model
+        model_solver.solve_model(self.theta)
+        
+        # Get core model components
+        self.model_components = model_solver.get_model_components()
+        
+        # Build the augmented state space
         self._build_augmented_state_space()
-
-    def _define_theta_order(self):
-        """
-        Defines the strict order of parameters expected in the 'theta' vector.
-        Assumes self.model has attributes param_names and shock_names.
-        This function should be ALREADY DEFINED in the original class
-        and is included here just for completeness
-        """
-        # 1. DSGE core parameters (must match jacobian_evaluator expectation)
-        #    Load this order from self.model.param_names
-        dsge_core_params = list(self.model.param_names)
-
-        # 2. DSGE shock standard deviations (shock in exo_variables with shocks)
-        dsge_shock_std_params = [f"{state}_std" for state in self.model.shock_names] # Use shock_names
-
-        # 3. Trend shock standard deviations (use order from model_specs keys)
-        trend_shock_std_params = [f"{spec['cycle']}_level_shock_std" for spec in self.model_specs.values()]  # Use spec['cycle']
-
-        # Combine all parameter names IN ORDER
-        theta_param_names = dsge_core_params + dsge_shock_std_params + trend_shock_std_params
-
-        print(f"Theta vector order defined. Expected length: {len(theta_param_names)}")
-
-        return theta_param_names
 
     def _create_theta_vector(self):
         """
-        Creates the theta vector in the order defined by _define_theta_order.
+        Creates the theta vector in the order defined by model_solver.
         """
         theta = np.zeros(len(self.theta_param_names))
         for i, param_name in enumerate(self.theta_param_names):
@@ -2114,8 +1767,6 @@ class AugmentedStateSpace:
             if cycle_variable is None:
                 raise ValueError(f"Cycle variable not defined for observable {obs_var}")
 
-            self.trend_variables.append(obs_var)
-
             if trend_type_str == "random_walk":
                 trend_type = self.TREND_RW
                 self.n_trend_states += 1
@@ -2124,7 +1775,7 @@ class AugmentedStateSpace:
                 self.n_trend_states += 2  # level and growth
             elif trend_type_str == "constant_mean":
                 trend_type = self.TREND_CONSTANT
-                self.n_trend_states += 0  # The trend is constant, there is no added state
+                self.n_trend_states += 1  # The trend has a state but no dynamics
             elif trend_type_str == "none":
                 trend_type = self.TREND_NONE
                 self.n_trend_states += 0
@@ -2132,16 +1783,18 @@ class AugmentedStateSpace:
                 raise ValueError(f"Invalid trend type: {trend_type_str} for variable {obs_var}")
 
             self.trend_types[obs_var] = trend_type
-            #The shock name is the model variable name + level_shock
-            self.trend_shock_names[obs_var] = f"{cycle_variable}_level_shock" # Model's name for the level shock
+            # The shock name is the observable name + level_shock
+            self.trend_shock_names[obs_var] = f"{obs_var}_level_shock" 
 
     def _create_constant_trend_matrices(self):
         """
         Creates constant parts of A_trend and B_trend matrices based on trend specifications.
         """
         n_trend_states = self.n_trend_states
+        n_trend_variables = len(self.trend_variables)
+        
         self.constant_A_trend = np.zeros((n_trend_states, n_trend_states))
-        self.constant_B_trend = np.zeros((n_trend_states, len(self.trend_variables)))
+        self.constant_B_trend = np.zeros((n_trend_states, n_trend_variables))
 
         trend_state_index = 0
         shock_index = 0
@@ -2150,63 +1803,85 @@ class AugmentedStateSpace:
             trend_type = self.trend_types[variable]
 
             if trend_type == self.TREND_RW:
+                # Random walk: level_t = level_{t-1} + shock
                 self.constant_A_trend[trend_state_index, trend_state_index] = 1.0
                 self.constant_B_trend[trend_state_index, shock_index] = 1.0
                 trend_state_index += 1
                 shock_index += 1
+                
             elif trend_type == self.TREND_SECOND_DIFF:
-                # level
-                self.constant_A_trend[trend_state_index, trend_state_index] = 1.0
-                self.constant_A_trend[trend_state_index, trend_state_index + 1] = 1.0
-                self.constant_B_trend[trend_state_index, shock_index] = 1.0
-
-                # growth
-                self.constant_A_trend[trend_state_index + 1, trend_state_index + 1] = 1.0
-                self.constant_B_trend[trend_state_index + 1, shock_index + 1] = 1.0
-
+                # Second difference: 
+                # level_t = level_{t-1} + growth_{t-1} + shock_level
+                # growth_t = growth_{t-1} + shock_growth
+                
+                # Level transition
+                self.constant_A_trend[trend_state_index, trend_state_index] = 1.0  # level to level
+                self.constant_A_trend[trend_state_index, trend_state_index + 1] = 1.0  # growth to level
+                self.constant_B_trend[trend_state_index, shock_index] = 1.0  # shock to level
+                
+                # Growth transition
+                self.constant_A_trend[trend_state_index + 1, trend_state_index + 1] = 1.0  # growth to growth
+                self.constant_B_trend[trend_state_index + 1, shock_index + 1] = 1.0  # shock to growth
+                
                 trend_state_index += 2
                 shock_index += 2
+                
             elif trend_type == self.TREND_CONSTANT:
-                shock_index += 1  # Add one shock even when trend is constant
-                continue
-            else:
-                continue
+                # Constant mean: mean_t = mean_{t-1} + small_shock
+                self.constant_A_trend[trend_state_index, trend_state_index] = 1.0
+                self.constant_B_trend[trend_state_index, shock_index] = 0.01  # Very small effect
+                trend_state_index += 1
+                shock_index += 1
+                
+            elif trend_type == self.TREND_NONE:
+                # No trend state, but still have a shock index
+                shock_index += 1
 
     def _build_augmented_state_space(self):
         """
-        Builds the augmented state-space matrices (A_aug, B_aug, C_aug, H, Q_aug).
+        Builds the augmented state-space matrices (A_aug, B_aug, C_aug, Q_aug).
         """
-        # 1. Get A and B from the Klein solution
-        self.A = self.model.state_transition
-        self.B = self.model.impulse_matrix
+        # 1. Get A and B from the DSGE solution
+        self.A = self.model_components['state_transition']  # P matrix from Klein
+        self.B = self.model_components['impulse_matrix']    # DSGE impulse matrix
 
         # 2. Create augmented A and B matrices
         self.A_aug, self.B_aug = self._create_augmented_AB()
 
-        # 3. Create the C_aug matrix
+        # 3. Create the C_aug matrix (observation matrix)
         self.C_aug = self._create_C_aug()
 
-        # 4. Create the selection matrix H
-        self.H = list(range(self.n_observable))  # Indices of observable variables
+        # 4. Create the selection matrix H (identity if all variables observed)
+        self.H = np.eye(self.n_observables)  # Simple case: all specified variables observed
 
-        # 5. Create the augmented Q matrix
+        # 5. Create the augmented Q matrix (shock covariances)
         self.Q_aug = self._create_augmented_Q()
 
     def _create_augmented_AB(self):
         """
         Creates the augmented A and B matrices.
+        
+        Returns:
+            A_aug: Augmented state transition matrix
+            B_aug: Augmented shock selection matrix
         """
         n_states = self.n_states
         n_trend_states = self.n_trend_states
         n_shocks = self.n_shocks
+        n_trend_variables = len(self.trend_variables)
 
+        # Create augmented state transition matrix
         A_aug = np.zeros((n_states + n_trend_states, n_states + n_trend_states))
-        B_aug = np.zeros((n_states + n_trend_states, n_shocks + len(self.trend_variables)))
-
+        # DSGE state transition
         A_aug[:n_states, :n_states] = self.A
+        # Trend state transition
         A_aug[n_states:, n_states:] = self.constant_A_trend
 
+        # Create augmented shock selection matrix
+        B_aug = np.zeros((n_states + n_trend_states, n_shocks + n_trend_variables))
+        # DSGE shock selection
         B_aug[:n_states, :n_shocks] = self.B
+        # Trend shock selection
         B_aug[n_states:, n_shocks:] = self.constant_B_trend
 
         return A_aug, B_aug
@@ -2214,119 +1889,291 @@ class AugmentedStateSpace:
     def _create_C_aug(self):
         """
         Creates the augmented observation matrix C_aug.
+        
+        Returns:
+            C_aug: Augmented observation matrix
         """
-        n_observable = self.n_observable
+        n_observable = self.n_observables
         n_states = self.n_states
         n_trend_states = self.n_trend_states
+        f = self.model_components['f']  # Policy function from Klein
 
         C_aug = np.zeros((n_observable, n_states + n_trend_states))
 
-        for i, obs_var in enumerate(self.trend_variables): # Iterate through trend variables, these are the observed variables
-            # Get the corresponding model variable from model_specs
+        trend_state_index = n_states
+        
+        for i, obs_var in enumerate(self.trend_variables):
+            # Get the corresponding model variable (cycle component)
             cycle_variable = self.model_specs[obs_var]['cycle']
 
-            # Index of the cycle variable in the original 'variables' list
-            var_index = self.model.var_names.index(cycle_variable)
-            C_aug[i, var_index] = 1.0  # Direct effect from original state
-
-            # Add trend, for variables with trends
-            if obs_var in self.trend_variables:
-                trend_type = self.trend_types[obs_var]
-                trend_index = self.trend_variables.index(obs_var)
-
-                trend_state_index = 0
-                for k, variable in enumerate(self.trend_variables):
-                    if k < trend_index:
-                        if self.trend_types[variable] == self.TREND_RW:
-                            trend_state_index += 1
-                        elif self.trend_types[variable] == self.TREND_SECOND_DIFF:
-                            trend_state_index += 2
-
-                if trend_type == self.TREND_RW:
-                    C_aug[i, self.n_states + trend_state_index] = 1.0  # Add random walk trend
-
-                elif trend_type == self.TREND_SECOND_DIFF:
-                    C_aug[i, self.n_states + trend_state_index] = 1.0  # Add second difference level
+            # Find index of cycle variable in model's variables
+            try:
+                var_index = self.model_components['var_names'].index(cycle_variable)
+                
+                # Check if it's a control or state variable
+                if var_index < n_states:  # State variable
+                    C_aug[i, var_index] = 1.0  # Direct mapping
+                else:  # Control variable
+                    # Apply policy function for control variables
+                    control_idx = var_index - n_states
+                    C_aug[i, :n_states] = f[control_idx, :]
+            except ValueError:
+                print(f"Warning: Variable {cycle_variable} not found in model variables")
+            
+            # Add trend component based on trend type
+            trend_type = self.trend_types[obs_var]
+            
+            if trend_type == self.TREND_RW or trend_type == self.TREND_CONSTANT:
+                # Direct effect from trend level
+                C_aug[i, trend_state_index] = 1.0
+                trend_state_index += 1
+            elif trend_type == self.TREND_SECOND_DIFF:
+                # Only level affects observation
+                C_aug[i, trend_state_index] = 1.0
+                trend_state_index += 2  # Skip growth state in obs matrix
 
         return C_aug
 
     def _create_augmented_Q(self):
         """
-        Creates the augmented process noise covariance matrix Q_aug, using theta vector.
+        Creates the augmented process noise covariance matrix Q_aug.
+        
+        Returns:
+            Q_aug: Augmented shock covariance matrix
         """
         n_shocks = self.n_shocks
         n_trend_variables = len(self.trend_variables)
-        n_shocks_augmented = n_shocks + n_trend_variables
+        n_aug_shocks = n_shocks + n_trend_variables
 
-        Q_aug = np.zeros((n_shocks_augmented, n_shocks_augmented))
+        Q_aug = np.zeros((n_aug_shocks, n_aug_shocks))
 
-        if hasattr(self.model, 'QQ'):
-            Q_aug[:n_shocks, :n_shocks] = self.model.QQ
+        # DSGE shock covariances
+        if 'QQ' in self.model_components:
+            Q_aug[:n_shocks, :n_shocks] = self.model_components['QQ']
         else:
-            Q_aug[:n_shocks, :n_shocks] = np.eye(n_shocks)
+            # Extract shock variances from theta
+            dsge_shock_stds_start = self.model_solver.n_dsge_core_params
+            dsge_shock_stds_end = dsge_shock_stds_start + self.model_solver.n_dsge_shock_std_params
+            dsge_shock_stds = self.theta[dsge_shock_stds_start:dsge_shock_stds_end]
+            Q_aug[:n_shocks, :n_shocks] = np.diag(dsge_shock_stds**2)
 
+        # Trend shock covariances
         for i, obs_var in enumerate(self.trend_variables):
-            #The shock name is the model variable name + level_shock + _std
-            param_name = f"{self.model_specs[obs_var]['cycle']}_level_shock_std"  # Use cycle variable name
+            # Get parameter name for trend shock std dev
+            param_name = f"{obs_var}_level_shock_std"
+            
             if param_name in self.theta_param_names:
                 param_index = self.theta_param_names.index(param_name)
+                # Variance = std_dev^2
                 Q_aug[n_shocks + i, n_shocks + i] = self.theta[param_index]**2
             else:
-                raise ValueError(f"Trend shock parameter '{param_name}' not found in theta_param_names.")
+                # Use small default value if parameter not found
+                Q_aug[n_shocks + i, n_shocks + i] = 0.01
+                print(f"Warning: Trend shock parameter '{param_name}' not found. Using default.")
 
         return Q_aug
 
-    def compute_irfs(self, shock_name, periods=20):
+    def get_state_space(self):
+        """
+        Returns the complete state-space representation.
+        
+        Returns:
+            dict: State-space matrices and information
+        """
+        return {
+            'A': self.A_aug,           # Augmented state transition
+            'B': self.B_aug,           # Augmented shock selection
+            'C': self.C_aug,           # Augmented observation matrix
+            'H': self.H,               # Selection matrix for observables
+            'Q': self.Q_aug,           # Augmented shock covariance
+            'n_states': self.n_states,
+            'n_trend_states': self.n_trend_states,
+            'n_total_states': self.n_states + self.n_trend_states,
+            'n_shocks': self.n_shocks,
+            'n_trend_shocks': len(self.trend_variables),
+            'n_observables': self.n_observables
+        }
+
+    def compute_irfs(self, shock_name, periods=40):
         """
         Computes the impulse response functions (IRFs) for a given shock.
 
         Args:
-            shock_name: The name of the shock to compute the IRF for (e.g., "SCK_L_GDP_GAP" or "L_GDP_GAP_level_shock").
-            periods: The number of periods for the IRF.
+            shock_name: The name of the shock to compute the IRF for
+            periods: The number of periods for the IRF
 
         Returns:
-            A dictionary containing the IRFs for each observable variable.
+            dict: IRFs for each observable variable
         """
-        # 1. Find the index of the shock
-        # Check if it's a model shock
-        if shock_name in self.model.shock_names:  # Use self.model.shock_names
-            shock_index = self.model.shock_names.index(shock_name)
-        # Check if it's a trend shock
-        elif shock_name in self.trend_shock_names.values():  # Use trend_shock_names
-            # Find the trend variable
-            obs_var = next(obs_var for obs_var, trend_shock in self.trend_shock_names.items() if trend_shock == shock_name)
-
-            # Get the index of the trend variable
-            trend_index = self.trend_variables.index(obs_var)
-            shock_index = self.n_shocks + trend_index # Offset by number of original shocks
-
+        # Get shock index
+        if shock_name in self.model_components['shock_names']:
+            # DSGE shock
+            shock_index = self.model_components['shock_names'].index(shock_name)
+        elif shock_name in self.trend_shock_names.values():
+            # Trend shock
+            for i, (obs_var, trend_shock) in enumerate(self.trend_shock_names.items()):
+                if trend_shock == shock_name:
+                    shock_index = self.n_shocks + i
+                    break
         else:
-            raise ValueError(f"Shock '{shock_name}' not found.")
+            raise ValueError(f"Shock '{shock_name}' not found in model")
 
-        # 2. Initialize the state vector
+        # Initialize the state vector
         x = np.zeros(self.A_aug.shape[0])
 
-        # 3. Create a shock vector
+        # Create a shock vector
         epsilon = np.zeros(self.B_aug.shape[1])
         epsilon[shock_index] = 1.0  # 1 standard deviation shock
 
-        # 4. Simulate the model forward
-        irfs = {var: [] for var in self.model_specs.keys()}
+        # Simulate the model forward
+        irfs = {var: np.zeros(periods) for var in self.trend_variables}
+        
+        # Store all state variables too (for debugging)
+        state_irfs = np.zeros((periods, len(x)))
+        
         for t in range(periods):
-            # a. Update the state vector
-            x = self.A_aug @ x + self.B_aug @ epsilon
-
-            # b. Compute the observable variables
+            # Store the observable variables
             y = self.C_aug @ x
-
-            # c. Store the IRF values
             for i, var in enumerate(self.trend_variables):
-                irfs[var].append(y[i])
+                irfs[var][t] = y[i]
+            
+            # Store all states
+            state_irfs[t, :] = x
+            
+            # Update the state vector
+            x = self.A_aug @ x + self.B_aug @ epsilon
+            
+            # Reset the shock after the first period
+            if t == 0:
+                epsilon[:] = 0
 
-            # d. Reset the shock to zero after the first period
-            epsilon[:] = 0
+        # Convert to dictionary of time series
+        return irfs, state_irfs
 
-        return irfs
+    def kalman_filter(self, data):
+        """
+        Applies Kalman filter/smoother to the data using the augmented state space.
+        
+        Args:
+            data: Numpy array with shape (n_timesteps, n_observables)
+                or (1, n_timesteps, n_observables)
+                
+        Returns:
+            dict: Filtered/smoothed states and related statistics
+        """
+        import simdkalman
+        
+        # Reshape data for simdkalman if needed
+        if data.ndim == 2:
+            # Add batch dimension (simdkalman expects [batch, time, obs])
+            data = data.reshape(1, data.shape[0], data.shape[1])
+        
+        # Create Kalman filter with our state space
+        kf = simdkalman.KalmanFilter(
+            state_transition=self.A_aug,
+            process_noise=self.B_aug @ self.Q_aug @ self.B_aug.T,
+            observation_model=self.C_aug,
+            observation_noise=np.zeros((self.n_observables, self.n_observables))  # Assuming no measurement error
+        )
+        
+        # Run smoother
+        results = kf.smooth(data)
+        
+        # Process results
+        smoothed_states = results.smoothed_means[0]  # Remove batch dimension
+        smoothed_covs = results.smoothed_covariances[0]
+        
+        # Separate DSGE and trend components
+        dsge_states = smoothed_states[:, :self.n_states]
+        trend_states = smoothed_states[:, self.n_states:]
+        
+        return {
+            'smoothed_states': smoothed_states,
+            'dsge_states': dsge_states,
+            'trend_states': trend_states,
+            'smoothed_covs': smoothed_covs,
+            'raw_results': results
+        }
+
+
+def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
+    """
+    Solves linear dynamic models using Klein's method.
+    
+    The model has the form:
+        a*E_t[x(t+1)] = b*x(t)
+    
+    where x(t) = [s(t); u(t)] combines predetermined states s(t)
+    and non-predetermined controls u(t).
+    
+    The solution takes the form:
+        u(t)   = f*s(t)       (policy function)
+        s(t+1) = p*s(t)       (state transition)
+    
+    Args:
+        a: Coefficient matrix on future-dated variables
+        b: Coefficient matrix on current-dated variables
+        n_states: Number of predetermined state variables
+        eigenvalue_warnings: Whether to print warnings about eigenvalues
+        
+    Returns:
+        f: Policy function matrix
+        p: State transition matrix
+        stab: Stability indicator
+        eig: Generalized eigenvalues
+    """
+    # Use scipy's linalg for QZ decomposition
+    from scipy import linalg
+    
+    s, t, alpha, beta, q, z = linalg.ordqz(A=a, B=b, sort='ouc', output='complex')
+
+    # Components of the z matrix
+    z11 = z[0:n_states, 0:n_states]
+    z21 = z[n_states:, 0:n_states]
+    
+    # number of nonpredetermined variables
+    n_costates = np.shape(a)[0] - n_states
+    
+    if n_states > 0:
+        if np.linalg.matrix_rank(z11) < n_states:
+            sys.exit("Invertibility condition violated. Check model equations or parameter values.")
+
+    s11 = s[0:n_states, 0:n_states]
+    if n_states > 0:
+        z11i = linalg.inv(z11)
+    else:
+        z11i = z11
+
+    # Components of the s, t, and q matrices   
+    t11 = t[0:n_states, 0:n_states]
+    
+    # Verify that there are exactly n_states stable eigenvalues:
+    stab = 0
+
+    # Compute the generalized eigenvalues
+    tii = np.diag(t)
+    sii = np.diag(s)
+    eig = np.zeros(np.shape(tii), dtype=np.complex128)
+
+    for k in range(len(tii)):
+        if np.abs(sii[k]) > 0:
+            eig[k] = tii[k]/sii[k]    
+        else:
+            eig[k] = np.inf
+
+    # Solution matrix coefficients on the endogenous state
+    if n_states > 0:
+        dyn = np.linalg.solve(s11, t11)
+    else:
+        dyn = np.array([])
+
+    f = z21.dot(z11i)
+    p = z11.dot(dyn).dot(z11i)
+
+    f = np.real(f)
+    p = np.real(p)
+
+    return f, p, stab, eig
 
 def parse_and_generate_files(dynare_file, output_dir, obs_vars=None, model_specs=None):
     """Run the parser and generate all required files, including trend
@@ -2388,89 +2235,20 @@ def parse_and_generate_files(dynare_file, output_dir, obs_vars=None, model_specs
     
     print(f"All model files generated in {output_dir}")
 
-def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
-    """
-    Solves linear dynamic models with the form of:
-    
-    a*Et[x(t+1)] = b*x(t)       
-            
-    [s(t); u(t)] where s(t) is a vector of predetermined (state) variables and u(t) is
-    a vector of nonpredetermined costate variables.
-    
-    The solution to the model is a set of matrices f, p such that:
-    
-    u(t)   = f*s(t)
-    s(t+1) = p*s(t)
-    
-    The solution algorithm is based on Klein (2000) and his solab.m Matlab program.
-    
-    Args:
-        a: Coefficient matrix on future-dated variables
-        b: Coefficient matrix on current-dated variables
-        n_states: Number of state variables
-        eigenvalue_warnings: Whether to print warnings about eigenvalues
-        
-    Returns:
-        f: Solution matrix coefficients on s(t) for u(t)
-        p: Solution matrix coefficients on s(t) for s(t+1)
-        stab: Stability indicator
-        eig: Generalized eigenvalues
-    """
-    s, t, alpha, beta, q, z = la.ordqz(A=a, B=b, sort='ouc', output='complex')
+# import os
+# import sys
+# import numpy as np
+# import pandas as pd
+import matplotlib.pyplot as plt
+# from scipy import linalg
 
-    # Components of the z matrix
-    z11 = z[0:n_states, 0:n_states]
-    z21 = z[n_states:, 0:n_states]
-    
-    # number of nonpredetermined variables
-    n_costates = np.shape(a)[0] - n_states
-    
-    if n_states > 0:
-        if np.linalg.matrix_rank(z11) < n_states:
-            sys.exit("Invertibility condition violated. Check model equations or parameter values.")
-
-    s11 = s[0:n_states, 0:n_states]
-    if n_states > 0:
-        z11i = la.inv(z11)
-    else:
-        z11i = z11
-
-    # Components of the s, t, and q matrices   
-    t11 = t[0:n_states, 0:n_states]
-    
-    # Verify that there are exactly n_states stable eigenvalues:
-    stab = 0
-
-    # Compute the generalized eigenvalues
-    tii = np.diag(t)
-    sii = np.diag(s)
-    eig = np.zeros(np.shape(tii), dtype=np.complex128)
-
-    for k in range(len(tii)):
-        if np.abs(sii[k]) > 0:
-            eig[k] = tii[k]/sii[k]    
-        else:
-            eig[k] = np.inf
-
-    # Solution matrix coefficients on the endogenous state
-    if n_states > 0:
-        dyn = np.linalg.solve(s11, t11)
-    else:
-        dyn = np.array([])
-
-    f = z21.dot(z11i)
-    p = z11.dot(dyn).dot(z11i)
-
-    f = np.real(f)
-    p = np.real(p)
-
-    return f, p, stab, eig
-
-
+# Import our classes
+# from model_solver import ModelSolver
+# from augmented_state_space import AugmentedStateSpace
+# from dynare_parser import DynareParser, parse_and_generate_files
 
 # Example usage - Main script
 if __name__ == "__main__":
-
     # --- Assume these steps were run previously ---
     # 1. DynareParser generated model.json, jacobian_evaluator.py, model_structure.py
     # ----------------------------------------------
@@ -2479,9 +2257,8 @@ if __name__ == "__main__":
     os.chdir(script_dir)
     print(f"Current working directory: {os.getcwd()}")
 
-    output_dir = "model_files" # Directory containing generated files
-    dynare_file = "qpm_simpl1.dyn" # Just needed for reference if re-parsing
-   
+    output_dir = "model_files"  # Directory containing generated files
+    dynare_file = "qpm_simpl1.dyn"  # Just needed for reference if re-parsing
 
     # Define model specifications (as used by parser and solver)
     model_specs = {
@@ -2491,12 +2268,11 @@ if __name__ == "__main__":
     }
     observed_variables = list(model_specs.keys())
 
-
-    # 1. Generate the necessary files (JSON model, Jacobian, structure)
+    # Optionally regenerate the necessary files (JSON model, Jacobian, structure)
+    # Comment this out if not needed
     parse_and_generate_files(dynare_file, output_dir, 
                             obs_vars=observed_variables, 
                             model_specs=model_specs)
-
 
     # Ensure output directory exists (it should if parser ran)
     if not os.path.exists(output_dir):
@@ -2505,11 +2281,11 @@ if __name__ == "__main__":
 
     # --- Main workflow ---
     # 1. Create ModelSolver instance (loads structure, defines theta order)
-    #try:
-    solver = ModelSolver(output_dir, model_specs, observed_variables)
-    # except Exception as e:
-    #     print(f"Failed to initialize ModelSolver: {e}")
-    #     sys.exit(1)
+    try:
+        solver = ModelSolver(output_dir, model_specs, observed_variables)
+    except Exception as e:
+        print(f"Failed to initialize ModelSolver: {e}")
+        sys.exit(1)
 
     # 2. Load and prepare data (using DataProcessor or similar)
     try:
@@ -2521,11 +2297,8 @@ if __name__ == "__main__":
 
         # Use only the necessary columns in the correct order
         data_for_filter = us_data[observed_variables].values
-        # Reshape for simdkalman: (1, n_timesteps, n_observables)
-        data_array = data_for_filter.reshape(1, data_for_filter.shape[0], data_for_filter.shape[1])
-        data_array = data_array.astype(float) # Ensure float type
-        dates = us_data.index # Keep dates for results processing
-
+        # Keep dates for results processing
+        dates = us_data.index 
     except FileNotFoundError:
         print("Error: Data file 'transformed_data_us.csv' not found.")
         sys.exit(1)
@@ -2533,88 +2306,311 @@ if __name__ == "__main__":
         print(f"Error preparing data: {e}")
         sys.exit(1)
 
-
-    # 3. Define parameter values `theta` IN THE CORRECT ORDER
-    #    Get the order from solver.theta_param_names
-    #    Example values (replace with your actual draw/initial values)
+    # 3. Define parameter values in dictionary form
     initial_param_dict = {
-        # DSGE Core Params (Order from labels['param_labels'])
+        # DSGE Core Params
         'b1': 0.7, 'b4': 0.7, 'a1': 0.5, 'a2': 0.1, 'g1': 0.7, 'g2': 0.3, 'g3': 0.25,
         'rho_DLA_CPI': 0.75, 'rho_L_GDP_GAP': 0.75, 'rho_rs': 0.8, 'rho_rs2': 0.1,
-        # DSGE Shock STDs (Order from labels['shock_labels']) - Assuming shocks are RES_...
-        'RES_L_GDP_GAP_lag_std': 1.0, # Parameter name should end in _std
+        # DSGE Shock STDs 
+        'RES_L_GDP_GAP_lag_std': 1.0,
         'RES_RS_lag_std': 1.0,
         'RES_DLA_CPI_lag_std': 1.0,
-        # Trend Shock STDs (Order from trend_info calculation)
+        # Trend Shock STDs
         'rs_obs_level_shock_std': 0.5,
         'dla_cpi_obs_level_shock_std': 0.5,
-        'l_gdp_obs_level_shock_std': 0.1 # Adjust name based on trend_info output
-        # Measurement Error STDs (Order from obs_vars) - OMITTED FOR NOW
-        # 'rs_obs_meas_error_std': 0.1,
-        # 'dla_cpi_obs_meas_error_std': 0.1,
-        # 'l_gdp_obs_meas_error_std': 0.1
+        'l_gdp_obs_level_shock_std': 0.1
     }
-    smoothed_results = solver.solve_and_filter_calibrated_model(initial_param_dict, data_array)
+
+    # 4. Create augmented state space
+    augmented_model = AugmentedStateSpace(solver, model_specs, initial_param_dict)
+    
+    # 5. Compute IRFs
+    shock_name = 'SHK_RS'  # This should match one in solver.shock_names
+    irf_results, state_irfs = augmented_model.compute_irfs(
+        shock_name=shock_name,
+        periods=40
+    )
+    
+    # Plot IRFs
+    plt.figure(figsize=(15, 10))
+    for i, (var, values) in enumerate(irf_results.items()):
+        plt.subplot(2, 2, i+1)
+        plt.plot(values)
+        plt.title(f"Response of {var} to {shock_name} shock")
+        plt.grid(True)
+        plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"IRF_{shock_name}.png")
+    plt.close()
+    
+    # 6. Run Kalman filter on the data
+    filter_results = augmented_model.kalman_filter(data_for_filter)
+    
+    # Create a DataFrame with filtered/smoothed states
+    smoothed_states_df = pd.DataFrame(
+        filter_results['smoothed_states'], 
+        index=dates,
+        columns=[f"State_{i}" for i in range(filter_results['smoothed_states'].shape[1])]
+    )
+    
+    # Extract trend states for reporting
+    trend_states_df = pd.DataFrame(
+        filter_results['trend_states'],
+        index=dates,
+        columns=[f"{var}_trend" for var in observed_variables]
+    )
+    
+    # Plot trend components
+    plt.figure(figsize=(15, 10))
+    for i, var in enumerate(observed_variables):
+        plt.subplot(len(observed_variables), 1, i+1)
+        
+        # Plot observed data
+        plt.plot(dates, us_data[var], 'b-', label=f"Observed {var}")
+        
+        # Plot trend component
+        plt.plot(dates, trend_states_df[f"{var}_trend"], 'r-', label=f"Trend {var}")
+        
+        plt.title(f"Decomposition of {var}")
+        plt.legend()
+        plt.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig("trend_decomposition.png")
+    plt.close()
+    
+    print("Analysis complete. Check the output plots.")
+
+
+
+
+# def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
+#     """
+#     Solves linear dynamic models with the form of:
+    
+#     a*Et[x(t+1)] = b*x(t)       
+            
+#     [s(t); u(t)] where s(t) is a vector of predetermined (state) variables and u(t) is
+#     a vector of nonpredetermined costate variables.
+    
+#     The solution to the model is a set of matrices f, p such that:
+    
+#     u(t)   = f*s(t)
+#     s(t+1) = p*s(t)
+    
+#     The solution algorithm is based on Klein (2000) and his solab.m Matlab program.
+    
+#     Args:
+#         a: Coefficient matrix on future-dated variables
+#         b: Coefficient matrix on current-dated variables
+#         n_states: Number of state variables
+#         eigenvalue_warnings: Whether to print warnings about eigenvalues
+        
+#     Returns:
+#         f: Solution matrix coefficients on s(t) for u(t)
+#         p: Solution matrix coefficients on s(t) for s(t+1)
+#         stab: Stability indicator
+#         eig: Generalized eigenvalues
+#     """
+#     s, t, alpha, beta, q, z = la.ordqz(A=a, B=b, sort='ouc', output='complex')
+
+#     # Components of the z matrix
+#     z11 = z[0:n_states, 0:n_states]
+#     z21 = z[n_states:, 0:n_states]
+    
+#     # number of nonpredetermined variables
+#     n_costates = np.shape(a)[0] - n_states
+    
+#     if n_states > 0:
+#         if np.linalg.matrix_rank(z11) < n_states:
+#             sys.exit("Invertibility condition violated. Check model equations or parameter values.")
+
+#     s11 = s[0:n_states, 0:n_states]
+#     if n_states > 0:
+#         z11i = la.inv(z11)
+#     else:
+#         z11i = z11
+
+#     # Components of the s, t, and q matrices   
+#     t11 = t[0:n_states, 0:n_states]
+    
+#     # Verify that there are exactly n_states stable eigenvalues:
+#     stab = 0
+
+#     # Compute the generalized eigenvalues
+#     tii = np.diag(t)
+#     sii = np.diag(s)
+#     eig = np.zeros(np.shape(tii), dtype=np.complex128)
+
+#     for k in range(len(tii)):
+#         if np.abs(sii[k]) > 0:
+#             eig[k] = tii[k]/sii[k]    
+#         else:
+#             eig[k] = np.inf
+
+#     # Solution matrix coefficients on the endogenous state
+#     if n_states > 0:
+#         dyn = np.linalg.solve(s11, t11)
+#     else:
+#         dyn = np.array([])
+
+#     f = z21.dot(z11i)
+#     p = z11.dot(dyn).dot(z11i)
+
+#     f = np.real(f)
+#     p = np.real(p)
+
+#     return f, p, stab, eig
+
+
+
+# # Example usage - Main script
+# if __name__ == "__main__":
+
+#     # --- Assume these steps were run previously ---
+#     # 1. DynareParser generated model.json, jacobian_evaluator.py, model_structure.py
+#     # ----------------------------------------------
+#     script_path = os.path.abspath(__file__)
+#     script_dir = os.path.dirname(script_path)
+#     os.chdir(script_dir)
+#     print(f"Current working directory: {os.getcwd()}")
+
+#     output_dir = "model_files" # Directory containing generated files
+#     dynare_file = "qpm_simpl1.dyn" # Just needed for reference if re-parsing
+   
+
+#     # Define model specifications (as used by parser and solver)
+#     model_specs = {
+#         "rs_obs": {"trend": "random_walk", "cycle": "RS"},
+#         "dla_cpi_obs": {"trend": "random_walk", "cycle": "DLA_CPI"},
+#         "l_gdp_obs": {"trend": "random_walk", "cycle": "L_GDP_GAP"}
+#     }
+#     observed_variables = list(model_specs.keys())
+
+
+#     # 1. Generate the necessary files (JSON model, Jacobian, structure)
+#     parse_and_generate_files(dynare_file, output_dir, 
+#                             obs_vars=observed_variables, 
+#                             model_specs=model_specs)
+
+
+#     # Ensure output directory exists (it should if parser ran)
+#     if not os.path.exists(output_dir):
+#         print(f"Error: Output directory '{output_dir}' not found. Ensure DynareParser ran successfully.")
+#         sys.exit(1)
+
+#     # --- Main workflow ---
+#     # 1. Create ModelSolver instance (loads structure, defines theta order)
+#     #try:
+#     solver = ModelSolver(output_dir, model_specs, observed_variables)
+#     # except Exception as e:
+#     #     print(f"Failed to initialize ModelSolver: {e}")
+#     #     sys.exit(1)
+
+#     # 2. Load and prepare data (using DataProcessor or similar)
+#     try:
+#         us_data = pd.read_csv('transformed_data_us.csv', index_col='Date', parse_dates=True)
+#         # Ensure data has the 'observed_variables' columns
+#         if not all(v in us_data.columns for v in observed_variables):
+#             missing_vars = [v for v in observed_variables if v not in us_data.columns]
+#             raise ValueError(f"Data file missing required columns: {missing_vars}")
+
+#         # Use only the necessary columns in the correct order
+#         data_for_filter = us_data[observed_variables].values
+#         # Reshape for simdkalman: (1, n_timesteps, n_observables)
+#         data_array = data_for_filter.reshape(1, data_for_filter.shape[0], data_for_filter.shape[1])
+#         data_array = data_array.astype(float) # Ensure float type
+#         dates = us_data.index # Keep dates for results processing
+
+#     except FileNotFoundError:
+#         print("Error: Data file 'transformed_data_us.csv' not found.")
+#         sys.exit(1)
+#     except ValueError as e:
+#         print(f"Error preparing data: {e}")
+#         sys.exit(1)
+
+
+#     # 3. Define parameter values `theta` IN THE CORRECT ORDER
+#     #    Get the order from solver.theta_param_names
+#     #    Example values (replace with your actual draw/initial values)
+#     initial_param_dict = {
+#         # DSGE Core Params (Order from labels['param_labels'])
+#         'b1': 0.7, 'b4': 0.7, 'a1': 0.5, 'a2': 0.1, 'g1': 0.7, 'g2': 0.3, 'g3': 0.25,
+#         'rho_DLA_CPI': 0.75, 'rho_L_GDP_GAP': 0.75, 'rho_rs': 0.8, 'rho_rs2': 0.1,
+#         # DSGE Shock STDs (Order from labels['shock_labels']) - Assuming shocks are RES_...
+#         'RES_L_GDP_GAP_lag_std': 1.0, # Parameter name should end in _std
+#         'RES_RS_lag_std': 1.0,
+#         'RES_DLA_CPI_lag_std': 1.0,
+#         # Trend Shock STDs (Order from trend_info calculation)
+#         'rs_obs_level_shock_std': 0.5,
+#         'dla_cpi_obs_level_shock_std': 0.5,
+#         'l_gdp_obs_level_shock_std': 0.1 # Adjust name based on trend_info output
+#         # Measurement Error STDs (Order from obs_vars) - OMITTED FOR NOW
+#         # 'rs_obs_meas_error_std': 0.1,
+#         # 'dla_cpi_obs_meas_error_std': 0.1,
+#         # 'l_gdp_obs_meas_error_std': 0.1
+#     }
+#     smoothed_results = solver.solve_and_filter_calibrated_model(initial_param_dict, data_array)
     
     
-    fig, irf_data = solver.compute_irf(
-                    param_dict=initial_param_dict,
-                    shock_name='SHK_RS',  # Name must match one in labels['shock_labels']
-                    shock_size=1.0,       # Size in standard deviations
-                    periods=40,           # Number of periods to simulate
-                    vars_to_plot=['RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP']  # Variables to plot
-    ) 
-    # # Construct theta array using the defined order
-    # try:
-    #     theta_values = [initial_param_dict[pname] for pname in solver.theta_param_names]
-    #     theta = np.array(theta_values)
-    #     print(f"Constructed theta vector with {len(theta)} values.")
-    # except KeyError as e:
-    #     print(f"Error: Parameter '{e}' not found in initial_param_dict. Check parameter names.")
-    #     # Find missing/mismatched names:
-    #     provided_keys = set(initial_param_dict.keys())
-    #     expected_keys = set(solver.theta_param_names)
-    #     print(f"Missing from dict: {expected_keys - provided_keys}")
-    #     print(f"Extra in dict: {provided_keys - expected_keys}")
-    #     sys.exit(1)
+#     fig, irf_data = solver.compute_irf(
+#                     param_dict=initial_param_dict,
+#                     shock_name='SHK_RS',  # Name must match one in labels['shock_labels']
+#                     shock_size=1.0,       # Size in standard deviations
+#                     periods=40,           # Number of periods to simulate
+#                     vars_to_plot=['RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP']  # Variables to plot
+#     ) 
+#     # # Construct theta array using the defined order
+#     # try:
+#     #     theta_values = [initial_param_dict[pname] for pname in solver.theta_param_names]
+#     #     theta = np.array(theta_values)
+#     #     print(f"Constructed theta vector with {len(theta)} values.")
+#     # except KeyError as e:
+#     #     print(f"Error: Parameter '{e}' not found in initial_param_dict. Check parameter names.")
+#     #     # Find missing/mismatched names:
+#     #     provided_keys = set(initial_param_dict.keys())
+#     #     expected_keys = set(solver.theta_param_names)
+#     #     print(f"Missing from dict: {expected_keys - provided_keys}")
+#     #     print(f"Extra in dict: {provided_keys - expected_keys}")
+#     #     sys.exit(1)
 
 
-    # # 4. Update state space and run smoother
-    # try:
-    #     # Option 1: Call update_state_space then create filter manually
-    #     # T, Q_state, Z, H = solver.update_state_space(theta)
-    #     # kf = simdkalman.KalmanFilter(state_transition=T, process_noise=Q_state, observation_model=Z, observation_noise=H)
-    #     # simdkalman_results = kf.smooth(data_array)
+#     # # 4. Update state space and run smoother
+#     # try:
+#     #     # Option 1: Call update_state_space then create filter manually
+#     #     # T, Q_state, Z, H = solver.update_state_space(theta)
+#     #     # kf = simdkalman.KalmanFilter(state_transition=T, process_noise=Q_state, observation_model=Z, observation_noise=H)
+#     #     # simdkalman_results = kf.smooth(data_array)
 
-    #     # Option 2: Use helper method if defined
-    #     simdkalman_results = solver.run_filter_smoother(theta, data_array)
+#     #     # Option 2: Use helper method if defined
+#     #     simdkalman_results = solver.run_filter_smoother(theta, data_array)
 
-    #     print("Smoother run successfully.")
+#     #     print("Smoother run successfully.")
 
-    # except Exception as e:
-    #     print(f"Error running smoother: {e}")
-    #     # Add more diagnostics here if needed
-    #     sys.exit(1)
+#     # except Exception as e:
+#     #     print(f"Error running smoother: {e}")
+#     #     # Add more diagnostics here if needed
+#     #     sys.exit(1)
 
-    # # 5. Process results (using DataProcessor or manually)
-    # # Get state labels (including augmented trend states)
-    # augmented_state_labels = solver.labels['state_labels'] + solver.trend_info['state_labels']
+#     # # 5. Process results (using DataProcessor or manually)
+#     # # Get state labels (including augmented trend states)
+#     # augmented_state_labels = solver.labels['state_labels'] + solver.trend_info['state_labels']
 
-    # # Extract smoothed means
-    # smoothed_means = simdkalman_results.smoothed_means[0] # Get first batch
+#     # # Extract smoothed means
+#     # smoothed_means = simdkalman_results.smoothed_means[0] # Get first batch
 
-    # # Create DataFrame
-    # results_df = pd.DataFrame(smoothed_means, index=dates, columns=augmented_state_labels)
+#     # # Create DataFrame
+#     # results_df = pd.DataFrame(smoothed_means, index=dates, columns=augmented_state_labels)
 
-    # print("\nSmoothed States (Head):")
-    # print(results_df.head())
+#     # print("\nSmoothed States (Head):")
+#     # print(results_df.head())
 
-    # # Extract and print specific components as before
-    # print("\nSmoothed trend components:")
-    # trend_columns = [col for col in results_df.columns if any(x in col for x in ['level', 'slope', 'curvature', 'mean'])]
-    # print(results_df[trend_columns].head())
+#     # # Extract and print specific components as before
+#     # print("\nSmoothed trend components:")
+#     # trend_columns = [col for col in results_df.columns if any(x in col for x in ['level', 'slope', 'curvature', 'mean'])]
+#     # print(results_df[trend_columns].head())
 
-    # print("\nSmoothed cyclical components (DSGE states):")
-    # # Assuming cycle vars match DSGE state names (adjust if needed)
-    # cycle_columns = [spec['cycle'] for spec in model_specs.values() if spec['cycle'] in results_df.columns]
-    # print(results_df[cycle_columns].head())
+#     # print("\nSmoothed cyclical components (DSGE states):")
+#     # # Assuming cycle vars match DSGE state names (adjust if needed)
+#     # cycle_columns = [spec['cycle'] for spec in model_specs.values() if spec['cycle'] in results_df.columns]
+#     # print(results_df[cycle_columns].head())
