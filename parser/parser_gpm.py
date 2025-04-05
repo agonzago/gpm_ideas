@@ -1149,88 +1149,88 @@ class DynareParser:
         print(f"All model files generated in {output_dir}")
 
 
-# end of class parser 
+# # end of class parser 
 
-import json
-import importlib.util
-import sys
-import numpy as np
-import os
-from scipy.linalg import lu_factor, lu_solve
-import pandas as pd
-import matplotlib.pyplot as plt
+# import json
+# import importlib.util
+# import sys
+# import numpy as np
+# import os
+# from scipy.linalg import lu_factor, lu_solve
+# import pandas as pd
+# import matplotlib.pyplot as plt
 
-# Klein's method (copied from your parse_claude.py, but now in this module)
-def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
-    # ... (rest of the klein function) ...
-    s,t,alpha,beta,q,z = la.ordqz(A=a,B=b,sort='ouc',output='complex')
+# # Klein's method (copied from your parse_claude.py, but now in this module)
+# def klein(a=None,b=None,n_states=None,eigenvalue_warnings=True):
+#     # ... (rest of the klein function) ...
+#     s,t,alpha,beta,q,z = la.ordqz(A=a,B=b,sort='ouc',output='complex')
 
-    # Components of the z matrix
-    z11 = z[0:n_states,0:n_states]
+#     # Components of the z matrix
+#     z11 = z[0:n_states,0:n_states]
     
-    z21 = z[n_states:,0:n_states]
+#     z21 = z[n_states:,0:n_states]
     
-    # number of nonpredetermined variables
-    n_costates = np.shape(a)[0] - n_states
+#     # number of nonpredetermined variables
+#     n_costates = np.shape(a)[0] - n_states
     
-    if n_states>0:
-        if np.linalg.matrix_rank(z11)<n_states:
-            sys.exit("Invertibility condition violated. Check model equations or parameter values.")
+#     if n_states>0:
+#         if np.linalg.matrix_rank(z11)<n_states:
+#             sys.exit("Invertibility condition violated. Check model equations or parameter values.")
 
-    s11 = s[0:n_states,0:n_states];
-    if n_states>0:
-        z11i = la.inv(z11)
+#     s11 = s[0:n_states,0:n_states];
+#     if n_states>0:
+#         z11i = la.inv(z11)
 
-    else:
-        z11i = z11
-
-
-    # Components of the s,t,and q matrices   
-    t11 = t[0:n_states,0:n_states]
-    # Verify that there are exactly n_states stable (inside the unit circle) eigenvalues:
-    stab = 0
-
-    # if n_states>0:
-    #     if np.abs(t[n_states-1,n_states-1])>np.abs(s[n_states-1,n_states-1]):
-    #         if eigenvalue_warnings:
-    #             print('Warning: Too few stable eigenvalues. Check model equations or parameter values.')
-    #         stab = -1
-
-    # if n_states<n_states+n_costates:
-    #     if np.abs(t[n_states,n_states])<np.abs(s[n_states,n_states]):
-    #         if eigenvalue_warnings:
-    #             print('Warning: Too many stable eigenvalues. Check model equations or parameter values.')
-    #         stab = 1
-
-    # Compute the generalized eigenvalues
-    tii = np.diag(t)
-    sii = np.diag(s)
-    eig = np.zeros(np.shape(tii),dtype=np.complex128)
-    # eig = np.zeros(np.shape(tii))
-
-    for k in range(len(tii)):
-        if np.abs(sii[k])>0:
-            # eig[k] = np.abs(tii[k])/np.abs(sii[k])
-            eig[k] = tii[k]/sii[k]    
-        else:
-            eig[k] = np.inf
+#     else:
+#         z11i = z11
 
 
+#     # Components of the s,t,and q matrices   
+#     t11 = t[0:n_states,0:n_states]
+#     # Verify that there are exactly n_states stable (inside the unit circle) eigenvalues:
+#     stab = 0
 
-    # Solution matrix coefficients on the endogenous state
-    if n_states>0:
-            dyn = np.linalg.solve(s11,t11)
-    else:
-        dyn = np.array([])
+#     # if n_states>0:
+#     #     if np.abs(t[n_states-1,n_states-1])>np.abs(s[n_states-1,n_states-1]):
+#     #         if eigenvalue_warnings:
+#     #             print('Warning: Too few stable eigenvalues. Check model equations or parameter values.')
+#     #         stab = -1
+
+#     # if n_states<n_states+n_costates:
+#     #     if np.abs(t[n_states,n_states])<np.abs(s[n_states,n_states]):
+#     #         if eigenvalue_warnings:
+#     #             print('Warning: Too many stable eigenvalues. Check model equations or parameter values.')
+#     #         stab = 1
+
+#     # Compute the generalized eigenvalues
+#     tii = np.diag(t)
+#     sii = np.diag(s)
+#     eig = np.zeros(np.shape(tii),dtype=np.complex128)
+#     # eig = np.zeros(np.shape(tii))
+
+#     for k in range(len(tii)):
+#         if np.abs(sii[k])>0:
+#             # eig[k] = np.abs(tii[k])/np.abs(sii[k])
+#             eig[k] = tii[k]/sii[k]    
+#         else:
+#             eig[k] = np.inf
 
 
-    f = z21.dot(z11i)
-    p = z11.dot(dyn).dot(z11i)
 
-    f = np.real(f)
-    p = np.real(p)
+#     # Solution matrix coefficients on the endogenous state
+#     if n_states>0:
+#             dyn = np.linalg.solve(s11,t11)
+#     else:
+#         dyn = np.array([])
 
-    return f, p,stab,eig
+
+#     f = z21.dot(z11i)
+#     p = z11.dot(dyn).dot(z11i)
+
+#     f = np.real(f)
+#     p = np.real(p)
+
+#     return f, p,stab,eig
 
 
 class ModelSolver:

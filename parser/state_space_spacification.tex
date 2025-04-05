@@ -1,0 +1,171 @@
+%% LyX 2.4.0~RC3 created this file.  For more info, see https://www.lyx.org/.
+%% Do not edit unless you really know what you are doing.
+\documentclass[american]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{babel}
+\begin{document}
+\begin{enumerate}
+\item I have a code that construct the state space representation starting
+from the solution of the DSGE model by Klein. 
+
+$s_{t+1}=Ps_{t}$
+
+$c_{t}=Fs_{t}$
+
+For simplicity it is easier to split the matrices of the system taking
+into account the kind of variable we have (endogenous states, exogenous
+state, and controls). 
+\item When computing the solution of the model variables are ordered as
+follows 
+\begin{verbatim}
+variables = self.state_variables + self.control_variables
+\end{verbatim}
+where 
+\begin{verbatim}
+self.state_variables = endogenous_states + exo_with_shocks + exo_without_shocks
+\end{verbatim}
+So we can use this order to group variables in the F and P matrices
+cumming from Klein solution
+
+Lets call $c_{t}$ controls, $k_{t}$ endogenous states and $z_{t}$
+exogenous states. That $c_{t}$ is the vector containing self.control\_variables,
+$k_{t}$ a vector containing endogenous\_states and $z_{t}$ ordered
+as exo\_with\_shocks + exo\_without\_shocks. With this notation is
+possible to expressed Klein's solution as 
+
+\[
+\left(\begin{array}{c}
+k_{t+1}\\
+z_{t+1}
+\end{array}\right)=\left(\begin{array}{cc}
+P_{kk} & P_{kz}\\
+0 & P_{zz}
+\end{array}\right)\left(\begin{array}{c}
+k_{t}\\
+z_{t}
+\end{array}\right)
+\]
+
+\[
+c_{t}=\left(\begin{array}{cc}
+F_{ck} & F_{cz}\end{array}\right)\left(\begin{array}{c}
+k_{t}\\
+z_{t}
+\end{array}\right)
+\]
+so that the state space representation would be 
+\begin{align*}
+k_{t+1} & =P_{kk}k_{t}+P_{kz}z_{t}\\
+z_{t+1} & =P_{zz}z_{t}+R\epsilon_{t+1}\\
+c_{t} & =F_{ck}k_{t}+F_{cz}z_{t}
+\end{align*}
+
+where $\epsilon_{t+1}$ is the vector of shocks consistent with self.varexo\_list.
+R is a selection matrix that tells how each shock affects the $z_{t}$.
+Given the information on the parser $z_{t}$ follows a particular
+order and each variable has it own shock. Here the issue is that some
+exogenous states may have more than one lag and hence in the representation
+they imply more states (current and lag). Only current states will
+have shock. This is typical of a companion form representation of
+AR process.
+\item With this notation we can write the state space model for the Kalman
+filter, under the assumption that all controls and states are observable 
+
+\begin{align*}
+y_{t} & =Cx_{t}\\
+x_{t} & =Ax_{t-1}+B\epsilon_{t}
+\end{align*}
+where 
+\begin{align*}
+C & =\left[\begin{array}{c}
+F\\
+I
+\end{array}\right]
+\end{align*}
+
+\[
+A=P
+\]
+
+\[
+B=\left[\begin{array}{c}
+0_{(\text{n\_endogenos x n\_shock)}}\\
+R_{(\text{n\_exogenous x n\_shock)}}
+\end{array}\right]
+\]
+
+matrix dimensions are $B$: (n\_states x n\_shock), A (n\_states x
+n\_states) C (n\_obs x n\_states). Since we assume in this representation
+that all variables are potentially observable the n\_obs = n\_states.
+Also note that n\_states = len(variables) in the solution of the DSGE.
+n\_endogenous = n\_controls + n\_endogenous\_states, n\_exogenous
+= exo\_with\_shocks + exo\_without\_shocks. 
+\item The code parse\_gpm.py contains all this transformation. 
+\item In the code full\_code\_includes\_parser.py I'm working on an implementation
+that augments the state space by including stochastic trends and also
+has other caracteristics. 
+\begin{enumerate}
+\item Only a subset of the variables is observable, as defined by the user
+\item The code is written in a way the maximizes efficiency and limits the
+regeneration of matrices that are constant across parameter changes.
+That is, matrices, or submatrices that remain constant when parameters
+are changed. This is to generae a code that is efficient when computing
+the likelihood function or carry out mcmc. 
+\item The model state space representation remains similar but includes
+trends so the number of states is larger by definition. The augmented
+state space model should look like
+\begin{align*}
+y_{t}^{obs} & =HC_{aug}x_{t}^{aug}\\
+x_{t}^{aug} & =A_{aug}x_{t-1}^{aug}+B_{aug}\epsilon_{t}^{aug}
+\end{align*}
+where H: is a selection matrix with zeros and ones (or may be replace
+by an index) that selects the rows of $C_{aug}x_{t}^{aug}$ that are
+observable, 
+\[
+A_{aug}=\left[\begin{array}{cc}
+A & 0\\
+0 & A_{trend}
+\end{array}\right]
+\]
+
+\[
+B_{aug}=\left[\begin{array}{cc}
+B & 0\\
+0 & B_{trend}
+\end{array}\right]
+\]
+and $\epsilon_{t}^{aug}=\left(\epsilon_{t},\epsilon_{t}^{trends}\right)$. 
+\item Not all observable variables have the same trend specification. The
+trend specification of a variables can be 
+\begin{enumerate}
+\item Random walk: 
+
+\[
+trend_{t}=trend_{t-1}+\epsilon_{t}^{level}
+\]
+
+\item Second difference
+\begin{align*}
+trend_{t} & =trend_{t-1}+g_{t-1}+\epsilon_{t}^{level}\\
+g_{t} & =g_{t-1}+\epsilon_{t}^{growth}
+\end{align*}
+\item Constant mean
+
+\[
+trend_{t}=trend_{t-1}
+\]
+
+\end{enumerate}
+\item The code is not producing the right IRFs but I think is because, 1)
+is not creating the state space representation in an organized for.
+I'm adding this information to seek you help and produce a state space
+represenation for the augmented model that matches the description
+above and repreduces the IRFS accordingly. 
+\item In a future specification we may consider situations where the trends
+can interact.
+\end{enumerate}
+\end{enumerate}
+
+\end{document}

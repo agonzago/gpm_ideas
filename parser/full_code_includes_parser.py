@@ -14,198 +14,198 @@ from scipy.linalg import lu_factor, lu_solve, norm
 from typing import Dict, List, Optional, Tuple, Any
 import sympy as sy  # Import sympy
 # Utility functions for trend components
-def calculate_trend_positions(model_specs, obs_vars, n_states, n_shocks):
-    """
-    Calculate positions and parameter names for trend components.
+# def calculate_trend_positions(model_specs, obs_vars, n_states, n_shocks):
+#     """
+#     Calculate positions and parameter names for trend components.
 
-    Returns:
-        dict: Information about trend component positions and parameters
-    """
-    trend_info = {
-        'state_labels': [],
-        'components': {},
-        'total_states': 0,
-        'param_positions': {},
-        'shock_std_param_names': [],
-        'total_trend_shocks': 0  # New: Total number of trend shocks
-    }
+#     Returns:
+#         dict: Information about trend component positions and parameters
+#     """
+#     trend_info = {
+#         'state_labels': [],
+#         'components': {},
+#         'total_states': 0,
+#         'param_positions': {},
+#         'shock_std_param_names': [],
+#         'total_trend_shocks': 0  # New: Total number of trend shocks
+#     }
 
-    pos = n_states
-    shock_pos = n_shocks
-    total_trend_shocks = 0 # Initialize counter
+#     pos = n_states
+#     shock_pos = n_shocks
+#     total_trend_shocks = 0 # Initialize counter
 
-    for obs_var in obs_vars:
-        trend_type = model_specs[obs_var]['trend']
-        var_info = {'type': trend_type, 'components': {}}
+#     for obs_var in obs_vars:
+#         trend_type = model_specs[obs_var]['trend']
+#         var_info = {'type': trend_type, 'components': {}}
 
-        if trend_type == 'random_walk':
-            var_info['components']['level'] = {
-                'state_pos': pos,
-                'shock_pos': shock_pos
-            }
-            param_name = f"{obs_var}_level_shock_std"  # Add _std suffix
-            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            trend_info['shock_std_param_names'].append(param_name)
-            total_trend_shocks += 1  # Increment counter
+#         if trend_type == 'random_walk':
+#             var_info['components']['level'] = {
+#                 'state_pos': pos,
+#                 'shock_pos': shock_pos
+#             }
+#             param_name = f"{obs_var}_level_shock_std"  # Add _std suffix
+#             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+#             trend_info['shock_std_param_names'].append(param_name)
+#             total_trend_shocks += 1  # Increment counter
 
-            trend_info['state_labels'].append(f"{obs_var}_level")
-            pos += 1
-            shock_pos += 1
+#             trend_info['state_labels'].append(f"{obs_var}_level")
+#             pos += 1
+#             shock_pos += 1
 
-        elif trend_type == 'second_difference':
-            # ... (Similar modifications for other trend types)
-            var_info['components']['level'] = {
-                'state_pos': pos,
-                'shock_pos': shock_pos
-            }
-            param_name = f"{obs_var}_level_shock_std"  # Add _std suffix
-            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            trend_info['shock_std_param_names'].append(param_name)
-            total_trend_shocks += 1 # Increment counter
+#         elif trend_type == 'second_difference':
+#             # ... (Similar modifications for other trend types)
+#             var_info['components']['level'] = {
+#                 'state_pos': pos,
+#                 'shock_pos': shock_pos
+#             }
+#             param_name = f"{obs_var}_level_shock_std"  # Add _std suffix
+#             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+#             trend_info['shock_std_param_names'].append(param_name)
+#             total_trend_shocks += 1 # Increment counter
 
-            trend_info['state_labels'].append(f"{obs_var}_level")
-            pos += 1
-            shock_pos += 1
+#             trend_info['state_labels'].append(f"{obs_var}_level")
+#             pos += 1
+#             shock_pos += 1
 
-            var_info['components']['slope'] = {
-                'state_pos': pos,
-                'shock_pos': shock_pos
-            }
-            param_name = f"{obs_var}_slope_shock_std"  # Add _std suffix
-            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            trend_info['shock_std_param_names'].append(param_name)
-            total_trend_shocks += 1 # Increment counter
-            trend_info['state_labels'].append(f"{obs_var}_slope")
-            pos += 1
-            shock_pos += 1
+#             var_info['components']['slope'] = {
+#                 'state_pos': pos,
+#                 'shock_pos': shock_pos
+#             }
+#             param_name = f"{obs_var}_slope_shock_std"  # Add _std suffix
+#             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+#             trend_info['shock_std_param_names'].append(param_name)
+#             total_trend_shocks += 1 # Increment counter
+#             trend_info['state_labels'].append(f"{obs_var}_slope")
+#             pos += 1
+#             shock_pos += 1
 
-            var_info['components']['curvature'] = {
-                'state_pos': pos,
-                'shock_pos': shock_pos
-            }
-            param_name = f"{obs_var}_curvature_shock_std"  # Add _std suffix
-            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            trend_info['shock_std_param_names'].append(param_name)
-            total_trend_shocks += 1 # Increment counter
-            trend_info['state_labels'].append(f"{obs_var}_curvature")
-            pos += 1
-            shock_pos += 1
+#             var_info['components']['curvature'] = {
+#                 'state_pos': pos,
+#                 'shock_pos': shock_pos
+#             }
+#             param_name = f"{obs_var}_curvature_shock_std"  # Add _std suffix
+#             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+#             trend_info['shock_std_param_names'].append(param_name)
+#             total_trend_shocks += 1 # Increment counter
+#             trend_info['state_labels'].append(f"{obs_var}_curvature")
+#             pos += 1
+#             shock_pos += 1
 
-        elif trend_type == 'constant_mean':
-            # ... (Similar modifications for other trend types)
-            var_info['components']['level'] = {
-                'state_pos': pos,
-                'shock_pos': shock_pos
-            }
-            param_name = f"{obs_var}_mean_shock_std"  # Add _std suffix
-            trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
-            trend_info['shock_std_param_names'].append(param_name)
-            total_trend_shocks += 1  # Increment counter
+#         elif trend_type == 'constant_mean':
+#             # ... (Similar modifications for other trend types)
+#             var_info['components']['level'] = {
+#                 'state_pos': pos,
+#                 'shock_pos': shock_pos
+#             }
+#             param_name = f"{obs_var}_mean_shock_std"  # Add _std suffix
+#             trend_info['param_positions'][param_name] = ('Q', shock_pos, shock_pos)
+#             trend_info['shock_std_param_names'].append(param_name)
+#             total_trend_shocks += 1  # Increment counter
 
-            trend_info['state_labels'].append(f"{obs_var}_mean")
-            pos += 1
-            shock_pos += 1
+#             trend_info['state_labels'].append(f"{obs_var}_mean")
+#             pos += 1
+#             shock_pos += 1
 
-        # Store information for this variable
-        trend_info['components'][obs_var] = var_info
+#         # Store information for this variable
+#         trend_info['components'][obs_var] = var_info
 
-    trend_info['total_states'] = pos - n_states
-    trend_info['total_trend_shocks'] = total_trend_shocks # Store the total count
+#     trend_info['total_states'] = pos - n_states
+#     trend_info['total_trend_shocks'] = total_trend_shocks # Store the total count
 
-    return trend_info
+#     return trend_info
 
-def build_trend_transition(T_matrix, trend_info, n_states):
-    """
-    Build the transition matrix blocks for trend components.
+# def build_trend_transition(T_matrix, trend_info, n_states):
+#     """
+#     Build the transition matrix blocks for trend components.
     
-    Args:
-        T_matrix: Transition matrix to fill
-        trend_info: Trend component position information
-        n_states: Number of original state variables
-    """
-    # Process each observed variable
-    for obs_var, var_info in trend_info['components'].items():
-        trend_type = var_info['type']
+#     Args:
+#         T_matrix: Transition matrix to fill
+#         trend_info: Trend component position information
+#         n_states: Number of original state variables
+#     """
+#     # Process each observed variable
+#     for obs_var, var_info in trend_info['components'].items():
+#         trend_type = var_info['type']
         
-        # Set transition dynamics based on trend type
-        if trend_type == 'random_walk':
-            # Level follows random walk: level_t = level_{t-1} + shock
-            level_pos = var_info['components']['level']['state_pos']
-            T_matrix[level_pos, level_pos] = 1.0
+#         # Set transition dynamics based on trend type
+#         if trend_type == 'random_walk':
+#             # Level follows random walk: level_t = level_{t-1} + shock
+#             level_pos = var_info['components']['level']['state_pos']
+#             T_matrix[level_pos, level_pos] = 1.0
             
-        elif trend_type == 'second_difference':
-            # Level follows: level_t = level_{t-1} + slope_{t-1} + shock
-            # Slope follows: slope_t = slope_{t-1} + curvature_{t-1} + shock
-            # Curvature follows: curvature_t = curvature_{t-1} + shock
-            level_pos = var_info['components']['level']['state_pos']
-            slope_pos = var_info['components']['slope']['state_pos']
-            curv_pos = var_info['components']['curvature']['state_pos']
+#         elif trend_type == 'second_difference':
+#             # Level follows: level_t = level_{t-1} + slope_{t-1} + shock
+#             # Slope follows: slope_t = slope_{t-1} + curvature_{t-1} + shock
+#             # Curvature follows: curvature_t = curvature_{t-1} + shock
+#             level_pos = var_info['components']['level']['state_pos']
+#             slope_pos = var_info['components']['slope']['state_pos']
+#             curv_pos = var_info['components']['curvature']['state_pos']
             
-            # Level depends on itself and slope
-            T_matrix[level_pos, level_pos] = 1.0
-            T_matrix[level_pos, slope_pos] = 1.0
+#             # Level depends on itself and slope
+#             T_matrix[level_pos, level_pos] = 1.0
+#             T_matrix[level_pos, slope_pos] = 1.0
             
-            # Slope depends on itself and curvature
-            T_matrix[slope_pos, slope_pos] = 1.0
-            T_matrix[slope_pos, curv_pos] = 1.0
+#             # Slope depends on itself and curvature
+#             T_matrix[slope_pos, slope_pos] = 1.0
+#             T_matrix[slope_pos, curv_pos] = 1.0
             
-            # Curvature depends only on itself
-            T_matrix[curv_pos, curv_pos] = 1.0
+#             # Curvature depends only on itself
+#             T_matrix[curv_pos, curv_pos] = 1.0
             
-        elif trend_type == 'constant_mean':
-            # Constant mean doesn't change: mean_t = mean_{t-1} + small_shock
-            mean_pos = var_info['components']['level']['state_pos']
-            T_matrix[mean_pos, mean_pos] = 1.0
+#         elif trend_type == 'constant_mean':
+#             # Constant mean doesn't change: mean_t = mean_{t-1} + small_shock
+#             mean_pos = var_info['components']['level']['state_pos']
+#             T_matrix[mean_pos, mean_pos] = 1.0
 
-def build_trend_selection(R_matrix, trend_info, n_states, n_shocks):
-    """
-    Build the selection matrix blocks for trend components.
+# def build_trend_selection(R_matrix, trend_info, n_states, n_shocks):
+#     """
+#     Build the selection matrix blocks for trend components.
     
-    Args:
-        R_matrix: Selection matrix to fill
-        trend_info: Trend component position information
-        n_states: Number of original state variables
-        n_shocks: Number of original shock variables
-    """
-    # For each variable and its trend components
-    for obs_var, var_info in trend_info['components'].items():
-        for comp_name, comp_info in var_info['components'].items():
-            state_pos = comp_info['state_pos']
-            shock_pos = comp_info['shock_pos']
+#     Args:
+#         R_matrix: Selection matrix to fill
+#         trend_info: Trend component position information
+#         n_states: Number of original state variables
+#         n_shocks: Number of original shock variables
+#     """
+#     # For each variable and its trend components
+#     for obs_var, var_info in trend_info['components'].items():
+#         for comp_name, comp_info in var_info['components'].items():
+#             state_pos = comp_info['state_pos']
+#             shock_pos = comp_info['shock_pos']
             
-            # Direct mapping from shock to state
-            R_matrix[state_pos, shock_pos] = 1.0
+#             # Direct mapping from shock to state
+#             R_matrix[state_pos, shock_pos] = 1.0
 
-def build_trend_observation(Z_matrix, trend_info, obs_vars, observable_labels):
-    """
-    Build the observation matrix blocks for trend components.
+# def build_trend_observation(Z_matrix, trend_info, obs_vars, observable_labels):
+#     """
+#     Build the observation matrix blocks for trend components.
     
-    Args:
-        Z_matrix: Observation matrix to fill
-        trend_info: Trend component position information
-        obs_vars: List of observed variable names
-        observable_labels: List of all observable labels
-    """
-    # For each observed variable
-    for obs_var in obs_vars:
-        # Find base variable (without _obs)
-        base_var = obs_var.replace("_obs", "")
+#     Args:
+#         Z_matrix: Observation matrix to fill
+#         trend_info: Trend component position information
+#         obs_vars: List of observed variable names
+#         observable_labels: List of all observable labels
+#     """
+#     # For each observed variable
+#     for obs_var in obs_vars:
+#         # Find base variable (without _obs)
+#         base_var = obs_var.replace("_obs", "")
         
-        # Find the index in the observable list
-        try:
-            var_idx = observable_labels.index(base_var)
-        except ValueError:
-            continue  # Skip if not found
+#         # Find the index in the observable list
+#         try:
+#             var_idx = observable_labels.index(base_var)
+#         except ValueError:
+#             continue  # Skip if not found
         
-        # Get trend components for this variable
-        var_info = trend_info['components'].get(obs_var, {})
-        if not var_info:
-            continue
+#         # Get trend components for this variable
+#         var_info = trend_info['components'].get(obs_var, {})
+#         if not var_info:
+#             continue
             
-        # Map the appropriate trend component to the observation
-        if 'level' in var_info['components']:
-            level_pos = var_info['components']['level']['state_pos']
-            Z_matrix[var_idx, level_pos] = 1.0
+#         # Map the appropriate trend component to the observation
+#         if 'level' in var_info['components']:
+#             level_pos = var_info['components']['level']['state_pos']
+#             Z_matrix[var_idx, level_pos] = 1.0
 
 
 
@@ -1192,65 +1192,7 @@ class DynareParser:
 
         return structure
     
-def parse_and_generate_files(dynare_file, output_dir, obs_vars=None, model_specs=None):
-    """Run the parser and generate all required files, including trend
-    structures.
 
-    Args:
-        dynare_file (str): Path to the Dynare model file.
-        output_dir (str): Path to the output directory.
-        obs_vars (list, optional): List of observed variables. Defaults to None.
-        model_specs (dict, optional): Model specifications dictionary. Defaults to None.
-    """
-    # Ensure output directory exists
-    if not os.path.isfile(dynare_file):
-        raise FileNotFoundError(f"The Dynare file '{dynare_file}' does not exist.")
-    
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # Parse the Dynare file
-    print(f"Parsing Dynare file: {dynare_file}")            
-    parser = DynareParser(dynare_file)
-    
-    # Set observed variables and model specifications if provided
-    if obs_vars is not None:
-        parser.obs_vars = obs_vars
-    if model_specs is not None:
-        parser.model_specs = model_specs
-    
-    # Parse and save the model JSON
-    model_json = parser.save_json(os.path.join(output_dir, "model.json"))
-    
-    # Generate the Jacobian evaluator
-    parser.generate_jacobian_evaluator(os.path.join(output_dir, "jacobian_evaluator.py"))
-    
-    # Generate model structure with trend components
-    structure = parser.generate_model_structure()
-    
-    # Write model_structure.py with all components
-    with open(os.path.join(output_dir, "model_structure.py"), 'w') as f:
-        f.write("import numpy as np\n\n")
-        f.write(f"indices = {repr(structure['indices'])}\n\n")
-        f.write(f"R = np.array({repr(structure['R'].tolist())})\n\n")
-        f.write(f"B_structure = np.array({repr(structure['B_structure'].tolist())})\n\n")
-        f.write(f"C_structure = np.array({repr(structure['C_structure'].tolist())})\n\n")
-        f.write(f"D = np.array({repr(structure['D'].tolist())})\n\n")
-        f.write(f"labels = {repr(structure['labels'])}\n\n")
-        
-        # Write trend structures if they exist
-        if 'T_trend_structure' in structure:
-            f.write(f"T_trend_structure = np.array({repr(structure['T_trend_structure'])})\n\n")
-        if 'R_trend_structure' in structure:
-            f.write(f"R_trend_structure = np.array({repr(structure['R_trend_structure'])})\n\n")
-        if 'C_trend_structure' in structure:
-            f.write(f"C_trend_structure = np.array({repr(structure['C_trend_structure'])})\n\n")
-        if 'n_trend_states' in structure:
-            f.write(f"n_trend_states = {structure['n_trend_states']}\n\n")
-        if 'obs_mapping' in structure:
-            f.write(f"obs_mapping = {repr(structure['obs_mapping'])}\n\n")
-    
-    print(f"All model files generated in {output_dir}")
 
 class ModelSolver:
     """
@@ -2082,6 +2024,369 @@ class DataProcessor:
         
         return processed_results
 
+
+import numpy as np
+from scipy import linalg
+
+class AugmentedStateSpace:
+    def __init__(self, model, model_specs, param_dict):
+        """
+        Initializes the AugmentedStateSpace class.
+
+        Args:
+            model:  The Dynare model object from ModelSolver.  Must contain attributes shock_names, var_names, state_transition, impulse_matrix
+            model_specs: A dictionary containing the model specifications (including trend information). Must contain keys equal to the names of the observed variables.
+            param_dict: A dictionary containing the parameter values, where keys are parameter names.
+        """
+        self.model = model  # Dynare model object
+        self.model_specs = model_specs
+        self.param_dict = param_dict
+        self.n_states = len(model.var_names)
+        self.n_shocks = len(model.shock_names)  # Number of exogenous shocks, use the shock_names
+        self.n_observable = len(model_specs)
+
+        # Get parameter order from the model
+        self.theta_param_names = self._define_theta_order()
+
+        # Create theta vector in the correct order
+        self.theta = self._create_theta_vector()
+
+        # Initialize trend-related attributes
+        self.trend_variables = []
+        self.trend_types = {}
+        self.n_trend_states = 0
+        self.trend_shock_names = {}
+
+        # Constants for trend types
+        self.TREND_NONE = 0
+        self.TREND_RW = 1
+        self.TREND_SECOND_DIFF = 2
+        self.TREND_CONSTANT = 3
+
+        self._process_trend_specifications()
+        self._create_constant_trend_matrices()
+        self._build_augmented_state_space()
+
+    def _define_theta_order(self):
+        """
+        Defines the strict order of parameters expected in the 'theta' vector.
+        Assumes self.model has attributes param_names and shock_names.
+        This function should be ALREADY DEFINED in the original class
+        and is included here just for completeness
+        """
+        # 1. DSGE core parameters (must match jacobian_evaluator expectation)
+        #    Load this order from self.model.param_names
+        dsge_core_params = list(self.model.param_names)
+
+        # 2. DSGE shock standard deviations (shock in exo_variables with shocks)
+        dsge_shock_std_params = [f"{state}_std" for state in self.model.shock_names] # Use shock_names
+
+        # 3. Trend shock standard deviations (use order from model_specs keys)
+        trend_shock_std_params = [f"{spec['cycle']}_level_shock_std" for spec in self.model_specs.values()]  # Use spec['cycle']
+
+        # Combine all parameter names IN ORDER
+        theta_param_names = dsge_core_params + dsge_shock_std_params + trend_shock_std_params
+
+        print(f"Theta vector order defined. Expected length: {len(theta_param_names)}")
+
+        return theta_param_names
+
+    def _create_theta_vector(self):
+        """
+        Creates the theta vector in the order defined by _define_theta_order.
+        """
+        theta = np.zeros(len(self.theta_param_names))
+        for i, param_name in enumerate(self.theta_param_names):
+            if param_name in self.param_dict:
+                theta[i] = self.param_dict[param_name]
+            else:
+                raise ValueError(f"Parameter '{param_name}' not found in param_dict.")
+        return theta
+
+    def _process_trend_specifications(self):
+        """
+        Processes the trend specifications from the model_specs dictionary.
+        """
+        for obs_var, spec in self.model_specs.items():
+            trend_type_str = spec.get('trend', 'none')
+            cycle_variable = spec.get('cycle')
+
+            if cycle_variable is None:
+                raise ValueError(f"Cycle variable not defined for observable {obs_var}")
+
+            self.trend_variables.append(obs_var)
+
+            if trend_type_str == "random_walk":
+                trend_type = self.TREND_RW
+                self.n_trend_states += 1
+            elif trend_type_str == "second_difference":
+                trend_type = self.TREND_SECOND_DIFF
+                self.n_trend_states += 2  # level and growth
+            elif trend_type_str == "constant_mean":
+                trend_type = self.TREND_CONSTANT
+                self.n_trend_states += 0  # The trend is constant, there is no added state
+            elif trend_type_str == "none":
+                trend_type = self.TREND_NONE
+                self.n_trend_states += 0
+            else:
+                raise ValueError(f"Invalid trend type: {trend_type_str} for variable {obs_var}")
+
+            self.trend_types[obs_var] = trend_type
+            #The shock name is the model variable name + level_shock
+            self.trend_shock_names[obs_var] = f"{cycle_variable}_level_shock" # Model's name for the level shock
+
+    def _create_constant_trend_matrices(self):
+        """
+        Creates constant parts of A_trend and B_trend matrices based on trend specifications.
+        """
+        n_trend_states = self.n_trend_states
+        self.constant_A_trend = np.zeros((n_trend_states, n_trend_states))
+        self.constant_B_trend = np.zeros((n_trend_states, len(self.trend_variables)))
+
+        trend_state_index = 0
+        shock_index = 0
+
+        for variable in self.trend_variables:
+            trend_type = self.trend_types[variable]
+
+            if trend_type == self.TREND_RW:
+                self.constant_A_trend[trend_state_index, trend_state_index] = 1.0
+                self.constant_B_trend[trend_state_index, shock_index] = 1.0
+                trend_state_index += 1
+                shock_index += 1
+            elif trend_type == self.TREND_SECOND_DIFF:
+                # level
+                self.constant_A_trend[trend_state_index, trend_state_index] = 1.0
+                self.constant_A_trend[trend_state_index, trend_state_index + 1] = 1.0
+                self.constant_B_trend[trend_state_index, shock_index] = 1.0
+
+                # growth
+                self.constant_A_trend[trend_state_index + 1, trend_state_index + 1] = 1.0
+                self.constant_B_trend[trend_state_index + 1, shock_index + 1] = 1.0
+
+                trend_state_index += 2
+                shock_index += 2
+            elif trend_type == self.TREND_CONSTANT:
+                shock_index += 1  # Add one shock even when trend is constant
+                continue
+            else:
+                continue
+
+    def _build_augmented_state_space(self):
+        """
+        Builds the augmented state-space matrices (A_aug, B_aug, C_aug, H, Q_aug).
+        """
+        # 1. Get A and B from the Klein solution
+        self.A = self.model.state_transition
+        self.B = self.model.impulse_matrix
+
+        # 2. Create augmented A and B matrices
+        self.A_aug, self.B_aug = self._create_augmented_AB()
+
+        # 3. Create the C_aug matrix
+        self.C_aug = self._create_C_aug()
+
+        # 4. Create the selection matrix H
+        self.H = list(range(self.n_observable))  # Indices of observable variables
+
+        # 5. Create the augmented Q matrix
+        self.Q_aug = self._create_augmented_Q()
+
+    def _create_augmented_AB(self):
+        """
+        Creates the augmented A and B matrices.
+        """
+        n_states = self.n_states
+        n_trend_states = self.n_trend_states
+        n_shocks = self.n_shocks
+
+        A_aug = np.zeros((n_states + n_trend_states, n_states + n_trend_states))
+        B_aug = np.zeros((n_states + n_trend_states, n_shocks + len(self.trend_variables)))
+
+        A_aug[:n_states, :n_states] = self.A
+        A_aug[n_states:, n_states:] = self.constant_A_trend
+
+        B_aug[:n_states, :n_shocks] = self.B
+        B_aug[n_states:, n_shocks:] = self.constant_B_trend
+
+        return A_aug, B_aug
+
+    def _create_C_aug(self):
+        """
+        Creates the augmented observation matrix C_aug.
+        """
+        n_observable = self.n_observable
+        n_states = self.n_states
+        n_trend_states = self.n_trend_states
+
+        C_aug = np.zeros((n_observable, n_states + n_trend_states))
+
+        for i, obs_var in enumerate(self.trend_variables): # Iterate through trend variables, these are the observed variables
+            # Get the corresponding model variable from model_specs
+            cycle_variable = self.model_specs[obs_var]['cycle']
+
+            # Index of the cycle variable in the original 'variables' list
+            var_index = self.model.var_names.index(cycle_variable)
+            C_aug[i, var_index] = 1.0  # Direct effect from original state
+
+            # Add trend, for variables with trends
+            if obs_var in self.trend_variables:
+                trend_type = self.trend_types[obs_var]
+                trend_index = self.trend_variables.index(obs_var)
+
+                trend_state_index = 0
+                for k, variable in enumerate(self.trend_variables):
+                    if k < trend_index:
+                        if self.trend_types[variable] == self.TREND_RW:
+                            trend_state_index += 1
+                        elif self.trend_types[variable] == self.TREND_SECOND_DIFF:
+                            trend_state_index += 2
+
+                if trend_type == self.TREND_RW:
+                    C_aug[i, self.n_states + trend_state_index] = 1.0  # Add random walk trend
+
+                elif trend_type == self.TREND_SECOND_DIFF:
+                    C_aug[i, self.n_states + trend_state_index] = 1.0  # Add second difference level
+
+        return C_aug
+
+    def _create_augmented_Q(self):
+        """
+        Creates the augmented process noise covariance matrix Q_aug, using theta vector.
+        """
+        n_shocks = self.n_shocks
+        n_trend_variables = len(self.trend_variables)
+        n_shocks_augmented = n_shocks + n_trend_variables
+
+        Q_aug = np.zeros((n_shocks_augmented, n_shocks_augmented))
+
+        if hasattr(self.model, 'QQ'):
+            Q_aug[:n_shocks, :n_shocks] = self.model.QQ
+        else:
+            Q_aug[:n_shocks, :n_shocks] = np.eye(n_shocks)
+
+        for i, obs_var in enumerate(self.trend_variables):
+            #The shock name is the model variable name + level_shock + _std
+            param_name = f"{self.model_specs[obs_var]['cycle']}_level_shock_std"  # Use cycle variable name
+            if param_name in self.theta_param_names:
+                param_index = self.theta_param_names.index(param_name)
+                Q_aug[n_shocks + i, n_shocks + i] = self.theta[param_index]**2
+            else:
+                raise ValueError(f"Trend shock parameter '{param_name}' not found in theta_param_names.")
+
+        return Q_aug
+
+    def compute_irfs(self, shock_name, periods=20):
+        """
+        Computes the impulse response functions (IRFs) for a given shock.
+
+        Args:
+            shock_name: The name of the shock to compute the IRF for (e.g., "SCK_L_GDP_GAP" or "L_GDP_GAP_level_shock").
+            periods: The number of periods for the IRF.
+
+        Returns:
+            A dictionary containing the IRFs for each observable variable.
+        """
+        # 1. Find the index of the shock
+        # Check if it's a model shock
+        if shock_name in self.model.shock_names:  # Use self.model.shock_names
+            shock_index = self.model.shock_names.index(shock_name)
+        # Check if it's a trend shock
+        elif shock_name in self.trend_shock_names.values():  # Use trend_shock_names
+            # Find the trend variable
+            obs_var = next(obs_var for obs_var, trend_shock in self.trend_shock_names.items() if trend_shock == shock_name)
+
+            # Get the index of the trend variable
+            trend_index = self.trend_variables.index(obs_var)
+            shock_index = self.n_shocks + trend_index # Offset by number of original shocks
+
+        else:
+            raise ValueError(f"Shock '{shock_name}' not found.")
+
+        # 2. Initialize the state vector
+        x = np.zeros(self.A_aug.shape[0])
+
+        # 3. Create a shock vector
+        epsilon = np.zeros(self.B_aug.shape[1])
+        epsilon[shock_index] = 1.0  # 1 standard deviation shock
+
+        # 4. Simulate the model forward
+        irfs = {var: [] for var in self.model_specs.keys()}
+        for t in range(periods):
+            # a. Update the state vector
+            x = self.A_aug @ x + self.B_aug @ epsilon
+
+            # b. Compute the observable variables
+            y = self.C_aug @ x
+
+            # c. Store the IRF values
+            for i, var in enumerate(self.trend_variables):
+                irfs[var].append(y[i])
+
+            # d. Reset the shock to zero after the first period
+            epsilon[:] = 0
+
+        return irfs
+
+def parse_and_generate_files(dynare_file, output_dir, obs_vars=None, model_specs=None):
+    """Run the parser and generate all required files, including trend
+    structures.
+
+    Args:
+        dynare_file (str): Path to the Dynare model file.
+        output_dir (str): Path to the output directory.
+        obs_vars (list, optional): List of observed variables. Defaults to None.
+        model_specs (dict, optional): Model specifications dictionary. Defaults to None.
+    """
+    # Ensure output directory exists
+    if not os.path.isfile(dynare_file):
+        raise FileNotFoundError(f"The Dynare file '{dynare_file}' does not exist.")
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Parse the Dynare file
+    print(f"Parsing Dynare file: {dynare_file}")            
+    parser = DynareParser(dynare_file)
+    
+    # Set observed variables and model specifications if provided
+    if obs_vars is not None:
+        parser.obs_vars = obs_vars
+    if model_specs is not None:
+        parser.model_specs = model_specs
+    
+    # Parse and save the model JSON
+    model_json = parser.save_json(os.path.join(output_dir, "model.json"))
+    
+    # Generate the Jacobian evaluator
+    parser.generate_jacobian_evaluator(os.path.join(output_dir, "jacobian_evaluator.py"))
+    
+    # Generate model structure with trend components
+    structure = parser.generate_model_structure()
+    
+    # Write model_structure.py with all components
+    with open(os.path.join(output_dir, "model_structure.py"), 'w') as f:
+        f.write("import numpy as np\n\n")
+        f.write(f"indices = {repr(structure['indices'])}\n\n")
+        f.write(f"R = np.array({repr(structure['R'].tolist())})\n\n")
+        f.write(f"B_structure = np.array({repr(structure['B_structure'].tolist())})\n\n")
+        f.write(f"C_structure = np.array({repr(structure['C_structure'].tolist())})\n\n")
+        f.write(f"D = np.array({repr(structure['D'].tolist())})\n\n")
+        f.write(f"labels = {repr(structure['labels'])}\n\n")
+        
+        # Write trend structures if they exist
+        if 'T_trend_structure' in structure:
+            f.write(f"T_trend_structure = np.array({repr(structure['T_trend_structure'])})\n\n")
+        if 'R_trend_structure' in structure:
+            f.write(f"R_trend_structure = np.array({repr(structure['R_trend_structure'])})\n\n")
+        if 'C_trend_structure' in structure:
+            f.write(f"C_trend_structure = np.array({repr(structure['C_trend_structure'])})\n\n")
+        if 'n_trend_states' in structure:
+            f.write(f"n_trend_states = {structure['n_trend_states']}\n\n")
+        if 'obs_mapping' in structure:
+            f.write(f"obs_mapping = {repr(structure['obs_mapping'])}\n\n")
+    
+    print(f"All model files generated in {output_dir}")
 
 def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
     """
