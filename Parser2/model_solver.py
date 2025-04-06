@@ -198,12 +198,330 @@ class ModelSolver:
         }
         return solution
 
+    # def get_contemporaneous_state_space(self, klein_solution):
+    #     """
+    #     Constructs the contemporaneous state-space system:
+    #     x_{t+1} = A x_t + B ε_t,  
+    #     y_t = C x_t + D ε_t
+        
+    #     where x_t = [k_t; z_t] and y_t = [c_t; k_t; z_t].
+        
+    #     This aligns with section 3 of the state_space_specification document:
+    #     k_{t+1} = P_{kk}k_t + P_{kz}z_t
+    #     z_{t+1} = P_{zz}z_t + R ε_{t+1}
+    #     c_t = F_{ck}k_t + F_{cz}z_t
+        
+    #     Returns:
+    #         Dict containing the state space matrices and metadata
+    #     """
+    #     print("\n--- Constructing Contemporaneous State Space ---")
+    #     if klein_solution is None:
+    #         print("Error: Klein solution not available.")
+    #         return None
+
+    #     try:
+    #         # --- Extract matrices from Klein solution (TARGET order) ---
+    #         P = klein_solution['p']
+    #         F = klein_solution['f']
+    #         R = klein_solution['R']
+    #         indices = klein_solution['indices']
+    #         labels = klein_solution['labels']
+
+    #         n_k = indices['n_endogenous']    # Number of endogenous states k
+    #         n_z = indices['n_exo_states']    # Number of exogenous states z
+    #         n_states = indices['n_states']   # Total states = n_k + n_z
+    #         n_c = indices['n_controls']      # Number of controls c
+    #         n_shocks = indices['n_shocks']
+
+    #         # Verify dimensions
+    #         if n_states != n_k + n_z:
+    #             print(f"Warning: n_states ({n_states}) != n_k ({n_k}) + n_z ({n_z})")
+            
+    #         if R.shape != (n_z, n_shocks):
+    #             print(f"Warning: R matrix shape {R.shape} doesn't match expected ({n_z}, {n_shocks})")
+
+    #         # --- Partition P and F based on k and z ---
+    #         # P = [Pkk Pkz]
+    #         #     [0   Pzz]  <- Klein usually has zeros in bottom left
+    #         Pkk = P[:n_k, :n_k]
+    #         Pkz = P[:n_k, n_k:]
+    #         Pzz = P[n_k:, n_k:]
+    #         # F = [Fck Fcz]
+    #         Fck = F[:, :n_k]
+    #         Fcz = F[:, n_k:]
+
+    #         # --- Compute A matrix for x_{t+1} = A x_t + B ε_t ---
+    #         # A = [Pkk Pkz]
+    #         #     [0   Pzz]
+    #         A = np.block([
+    #             [Pkk, Pkz],
+    #             [np.zeros((n_z, n_k)), Pzz]
+    #         ])
+
+    #         # --- Compute B matrix for x_{t+1} = A x_t + B ε_t ---
+    #         # B = [Pkz*R]
+    #         #     [R    ]
+    #         # Note: We need Pkz*R to reflect how z_t shocks propagate to k_{t+1}
+    #         B = np.block([
+    #             [Pkz @ R],
+    #             [R]
+    #         ])
+
+    #         # --- Compute C matrix for y_t = C x_t + D ε_t ---
+    #         # C = [Fck Fcz]
+    #         #     [I   0  ]
+    #         #     [0   I  ]
+    #         C = np.block([
+    #             [Fck, Fcz],                       # Map to c_t
+    #             [np.eye(n_k), np.zeros((n_k, n_z))],  # Map to k_t
+    #             [np.zeros((n_z, n_k)), np.eye(n_z)]   # Map to z_t
+    #         ])
+
+    #         # --- Compute D matrix for y_t = C x_t + D ε_t ---
+    #         # D = [Fcz*R] <- Important for when shocks directly affect exo processes
+    #         #     [0    ]
+    #         #     [R    ]
+    #         D = np.block([
+    #             [Fcz @ R],                      # Direct impact on controls
+    #             [np.zeros((n_k, n_shocks))],    # No direct impact on endogenous states
+    #             [R]                             # Direct impact on exogenous states
+    #         ])
+            
+    #         # Print shock impact matrices for debugging
+    #         print(f"\nDirect shock impact on exogenous states (R):")
+    #         print(R)
+    #         print(f"\nDirect shock impact on controls (Fcz*R):")
+    #         print(Fcz @ R)
+
+    #         # --- Define Labels for this system ---
+    #         state_labels = labels['state_labels'][:n_k] + labels['state_labels'][n_k:]
+    #         obs_labels = list(labels['observable_labels'][:n_c]) + list(labels['state_labels'][:n_k]) + list(labels['state_labels'][n_k:])
+    #         shock_labels = labels['shock_labels']
+
+    #         # --- Store Results ---
+    #         contemp_ss = {
+    #             'A': A, 
+    #             'B': B, 
+    #             'C': C, 
+    #             'D': D,
+    #             'state_labels': state_labels,
+    #             'observable_labels': obs_labels,
+    #             'shock_labels': shock_labels,
+    #             'n_states': n_states,
+    #             'n_observables': n_c + n_k + n_z,
+    #             'n_shocks': n_shocks,
+    #             # Include component matrices for reference
+    #             'Pkk': Pkk, 'Pkz': Pkz, 'Pzz': Pzz,
+    #             'Fck': Fck, 'Fcz': Fcz, 'R': R
+    #         }
+            
+    #         print("Contemporaneous State Space Constructed Successfully")
+    #         print(f"  A shape: {A.shape}, B shape: {B.shape}")
+    #         print(f"  C shape: {C.shape}, D shape: {D.shape}")
+            
+    #         return contemp_ss
+
+    #     except Exception as e:
+    #         print(f"Error constructing contemporaneous state space: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+    #         return None
+
+    # def get_contemporaneous_state_space(self, klein_solution):
+    #     """
+    #     Constructs the contemporaneous state-space system:
+        
+    #     x_{t+1} = A x_t + B ε_t
+    #     y_t = C x_t + D ε_t
+        
+    #     where x_t = [k_t; z_t] and y_t = [c_t; k_t; z_t].
+        
+    #     This follows section 3 of the state_space_specification document with
+    #     special handling for zero-persistence cases.
+        
+    #     Args:
+    #         klein_solution: Dictionary with solution matrices from Klein method
+            
+    #     Returns:
+    #         Dictionary containing the state space matrices and metadata
+    #     """
+    #     print("\n--- Constructing Contemporaneous State Space ---")
+    #     if klein_solution is None:
+    #         print("Error: Klein solution not available.")
+    #         return None
+
+    #     try:
+    #         # --- Extract matrices from Klein solution ---
+    #         P = klein_solution['p']            # State transition matrix
+    #         F = klein_solution['f']            # Control policy function
+    #         R = klein_solution['R']            # Shock selection matrix
+    #         indices = klein_solution['indices']
+    #         labels = klein_solution['labels']
+
+    #         # Get dimensions
+    #         n_k = indices['n_endogenous']      # Number of endogenous states k
+    #         n_z = indices['n_exo_states']      # Number of exogenous states z
+    #         n_states = indices['n_states']     # Total states = n_k + n_z
+    #         n_c = indices['n_controls']        # Number of controls c
+    #         n_shocks = indices['n_shocks']     # Number of shocks
+
+    #         # Get variable and shock labels
+    #         state_labels = labels['state_labels']
+    #         observable_labels = labels['observable_labels']
+    #         shock_labels = labels['shock_labels']
+            
+    #         # Get mappings between shocks and states (crucial for zero persistence)
+    #         shock_to_state_map = labels.get('shock_to_state_map', {})
+    #         state_to_shock_map = labels.get('state_to_shock_map', {})
+
+    #         # Verify dimensions
+    #         if n_states != n_k + n_z:
+    #             print(f"Warning: n_states ({n_states}) != n_k ({n_k}) + n_z ({n_z})")
+            
+    #         if R.shape != (n_z, n_shocks):
+    #             print(f"Warning: R matrix shape {R.shape} doesn't match expected ({n_z}, {n_shocks})")
+
+    #         # --- Partition P and F based on k and z ---
+    #         # P = [Pkk Pkz]
+    #         #     [0   Pzz]  <- Klein usually has zeros in bottom left
+    #         Pkk = P[:n_k, :n_k]                # Endogenous → endogenous transition
+    #         Pkz = P[:n_k, n_k:]                # Exogenous → endogenous impact
+    #         Pzz = P[n_k:, n_k:]                # Exogenous process persistence
+            
+    #         # F = [Fck Fcz]
+    #         Fck = F[:, :n_k]                   # Endogenous → control impact
+    #         Fcz = F[:, n_k:]                   # Exogenous → control impact
+            
+    #         # --- Check for zero-persistence exogenous processes ---
+    #         print("\nChecking for zero-persistence processes:")
+            
+    #         # Examine diagonal of Pzz - values near zero indicate no persistence
+    #         has_zero_persistence = False
+    #         for i in range(min(n_z, Pzz.shape[0], Pzz.shape[1])):
+    #             ar_coef = Pzz[i, i]
+    #             if abs(ar_coef) < 1e-6:  # Near zero
+    #                 exo_var_name = state_labels[n_k + i] if n_k + i < len(state_labels) else f"ExoState_{i}"
+    #                 print(f"  Zero persistence detected: {exo_var_name} (AR coef = {ar_coef})")
+    #                 has_zero_persistence = True
+            
+    #         if has_zero_persistence:
+    #             print("  Zero-persistence processes found - ensuring direct shock paths exist")
+    #         else:
+    #             print("  No zero-persistence processes detected")
+
+    #         # --- Compute A matrix for x_{t+1} = A x_t + B ε_t ---
+    #         # A = [Pkk Pkz]
+    #         #     [0   Pzz]
+    #         A = np.block([
+    #             [Pkk, Pkz],
+    #             [np.zeros((n_z, n_k)), Pzz]
+    #         ])
+
+    #         # --- Compute B matrix for x_{t+1} = A x_t + B ε_t ---
+    #         # B = [Pkz*R]  <- This captures how shocks affect endogenous states
+    #         #     [R    ]  <- This captures how shocks affect exogenous states
+    #         B = np.block([
+    #             [Pkz @ R],  # How shocks propagate to endogenous states
+    #             [R]         # How shocks propagate to exogenous states
+    #         ])
+            
+    #         # Verify B matrix has appropriate non-zero elements
+    #         if not np.any(B):
+    #             print("WARNING: B matrix has all zeros - shock transmission won't work!")
+    #         else:
+    #             print(f"B matrix has {np.count_nonzero(B)} non-zero elements")
+
+    #         # --- Compute C matrix for y_t = C x_t + D ε_t ---
+    #         # C = [Fck Fcz]  <- Maps states to controls
+    #         #     [I   0  ]  <- Identity mapping for endogenous states
+    #         #     [0   I  ]  <- Identity mapping for exogenous states
+    #         C = np.block([
+    #             [Fck, Fcz],                          # Map to controls
+    #             [np.eye(n_k), np.zeros((n_k, n_z))],  # Map to endogenous states
+    #             [np.zeros((n_z, n_k)), np.eye(n_z)]   # Map to exogenous states
+    #         ])
+
+    #         # --- Compute D matrix for y_t = C x_t + D ε_t ---
+    #         # D = [Fcz*R]  <- Direct impact of shocks on controls (crucial for zero persistence)
+    #         #     [0    ]  <- No direct impact on endogenous states
+    #         #     [R    ]  <- Direct impact of shocks on exogenous states
+    #         D = np.block([
+    #             [Fcz @ R],                          # Direct impact on controls
+    #             [np.zeros((n_k, n_shocks))],        # No direct impact on endogenous states
+    #             [R]                                 # Direct impact on exogenous states
+    #         ])
+            
+    #         # --- Additional verification for D matrix ---
+    #         # Verify D matrix has appropriate non-zero elements for shock transmission
+    #         if not np.any(D):
+    #             print("WARNING: D matrix has all zeros - direct shock effects won't work!")
+    #         else:
+    #             print(f"D matrix has {np.count_nonzero(D)} non-zero elements")
+                
+    #             # Print the direct shock impacts on controls
+    #             direct_control_impacts = D[:n_c, :]
+    #             if np.any(direct_control_impacts):
+    #                 print("\nDirect shock impacts on controls:")
+    #                 for i in range(n_c):
+    #                     for j in range(n_shocks):
+    #                         if abs(direct_control_impacts[i, j]) > 1e-6:
+    #                             control_var = observable_labels[i] if i < len(observable_labels) else f"Control_{i}"
+    #                             shock_var = shock_labels[j] if j < len(shock_labels) else f"Shock_{j}"
+    #                             print(f"  {shock_var} → {control_var}: {direct_control_impacts[i, j]}")
+
+    #         # --- Define Labels for this system ---
+    #         contemp_state_labels = state_labels[:n_k] + state_labels[n_k:]
+    #         contemp_obs_labels = list(observable_labels[:n_c]) + list(state_labels[:n_k]) + list(state_labels[n_k:])
+            
+    #         # --- Store Results ---
+    #         contemp_ss = {
+    #             'A': A, 
+    #             'B': B, 
+    #             'C': C, 
+    #             'D': D,
+    #             'state_labels': contemp_state_labels,
+    #             'observable_labels': contemp_obs_labels,
+    #             'shock_labels': shock_labels,
+    #             'n_states': n_states,
+    #             'n_observables': n_c + n_k + n_z,
+    #             'n_shocks': n_shocks,
+    #             # Include component matrices for reference
+    #             'Pkk': Pkk, 'Pkz': Pkz, 'Pzz': Pzz,
+    #             'Fck': Fck, 'Fcz': Fcz, 'R': R,
+    #             # Include mappings for reference
+    #             'shock_to_state_map': shock_to_state_map,
+    #             'state_to_shock_map': state_to_shock_map
+    #         }
+            
+    #         print("\nContemporaneous State Space Successfully Constructed")
+    #         print(f"  A: {A.shape}, B: {B.shape}, C: {C.shape}, D: {D.shape}")
+            
+    #         return contemp_ss
+
+    #     except Exception as e:
+    #         print(f"Error constructing contemporaneous state space: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+    #         return None
+
 
     def get_contemporaneous_state_space(self, klein_solution):
         """
-        Constructs the state-space system x_t = A'x_{t-1} + B'eps_t, y_t = C'x_t + D'eps_t
-        where x_t = [k_t; z_{t-1}], y_t = [c_t; k_t; z_t].
-        Requires output from solve() method.
+        Constructs the contemporaneous state-space system based on the mathematical formulation:
+        
+        s_{t+1} = A_s s_t + B_s ε_t
+        y_t = C_s s_t + D_s ε_t
+        
+        where:
+        - s_t = [k_t; z_t] combines endogenous and exogenous states
+        - y_t = [c_t; k_t; z_t] are the observables
+        - ε_t are the structural shocks
+        
+        Args:
+            klein_solution: Dictionary with solution matrices from Klein method
+            
+        Returns:
+            Dictionary containing the state space matrices and metadata
         """
         print("\n--- Constructing Contemporaneous State Space ---")
         if klein_solution is None:
@@ -211,119 +529,144 @@ class ModelSolver:
             return None
 
         try:
-            # --- Extract matrices from Klein solution (TARGET order) ---
-            P = klein_solution['p']
-            F = klein_solution['f']
-            R = klein_solution['R'] # Should be (n_exo x n_shocks)
+            # --- Extract matrices from Klein solution ---
+            P = klein_solution['p']            # State transition matrix
+            F = klein_solution['f']            # Control policy function
+            R = klein_solution['R']            # Shock selection matrix
             indices = klein_solution['indices']
             labels = klein_solution['labels']
 
-            n_k = indices['n_endogenous'] # Number of endogenous states k
-            n_z = indices['n_exo_states'] # Number of exogenous states z
-            n_states_s = indices['n_states'] # Total states in s = n_k + n_z
-            n_c = indices['n_controls']   # Number of controls c
-            n_shocks = indices['n_shocks']
+            # Get dimensions
+            n_k = indices['n_endogenous']      # Number of endogenous states k
+            n_z = indices['n_exo_states']      # Number of exogenous states z
+            n_states = indices['n_states']     # Total states = n_k + n_z
+            n_c = indices['n_controls']        # Number of controls c
+            n_shocks = indices['n_shocks']     # Number of shocks
 
-            if n_states_s != n_k + n_z:
-                print(f"Warning: n_states ({n_states_s}) != n_k ({n_k}) + n_z ({n_z})")
-                # Adjust n_z maybe? Let's assume indices are correct.
-                # n_z = n_states_s - n_k
+            # Check for zero-persistence processes
+            zero_persistence_processes = labels.get('zero_persistence_processes', [])
+            has_zero_persistence = len(zero_persistence_processes) > 0
+            if has_zero_persistence:
+                print(f"Zero persistence detected in: {zero_persistence_processes}")
 
-            if R.shape != (n_z, n_shocks):
-                print(f"Warning: R matrix shape {R.shape} doesn't match n_z={n_z}, n_shocks={n_shocks}")
-                # Attempt to proceed, but results might be wrong. Pad/truncate R? Best to fix R generation.
-                # return None # Safer to stop
+            # --- Partition P and F matrices ---
+            Pkk = P[:n_k, :n_k]                # Endogenous state transition
+            Pkz = P[:n_k, n_k:]                # Exogenous → endogenous impact
+            Pzz = P[n_k:, n_k:]                # Exogenous state transition
+            
+            Fck = F[:, :n_k]                   # Endogenous → control impact
+            Fcz = F[:, n_k:]                   # Exogenous → control impact
 
-            # --- Partition P and F based on k and z ---
-            # P = [Pkk Pkz]
-            #     [Pzk Pzz]  <- Note: Klein usually gives [0 Pzz] block here
-            Pkk = P[:n_k, :n_k]
-            Pkz = P[:n_k, n_k:]
-            # Pzk = P[n_k:, :n_k] # Should be zero if exo states are truly exo
-            Pzz = P[n_k:, n_k:]
-            # F = [Fck Fcz]
-            Fck = F[:, :n_k]
-            Fcz = F[:, n_k:]
+            # --- Construct A_s: State Transition Matrix ---
+            # A_s = [Pkk Pkz; 0 Pzz]
+            A_s = np.block([
+                [Pkk, Pkz],
+                [np.zeros((n_z, n_k)), Pzz]
+            ])
 
-            # Optional: Check if Pzk is close to zero
-            # if n_k > 0 and n_z > 0 and not np.allclose(P[n_k:, :n_k], 0):
-            #      print("Warning: Bottom-left block of P matrix (Pzk) is not zero.")
+            # --- Construct B_s: Shock Impact Matrix ---
+            # B_s = [Pkz*R; R]
+            # This captures both:
+            # 1. How shocks directly affect exogenous states (R)
+            # 2. How these shocks propagate to endogenous states (Pkz*R)
+            B_s = np.block([
+                [Pkz @ R],
+                [R]
+            ])
 
-            # --- Compute matrix products ---
-            PkzPzz = Pkz @ Pzz
-            PkzR = Pkz @ R
-            FczPzz = Fcz @ Pzz
-            FczR = Fcz @ R
+            # --- Construct C_s: Observation Matrix ---
+            # C_s = [Fck Fcz; I 0; 0 I]
+            C_s = np.block([
+                [Fck, Fcz],                     # Controls
+                [np.eye(n_k), np.zeros((n_k, n_z))],  # Endogenous states
+                [np.zeros((n_z, n_k)), np.eye(n_z)]   # Exogenous states
+            ])
 
-            # --- Construct A', B', C', D' ---
-            # State vector x_t = [k_t ; z_{t-1}] (size n_k + n_z)
-            n_states_x = n_k + n_z
+            # --- Construct D_s: Direct Shock Impact Matrix ---
+            # D_s = [Fcz*R; 0; R]
+            # This captures how shocks directly affect:
+            # 1. Controls through exogenous processes (Fcz*R)
+            # 2. Exogenous states (R)
+            D_s = np.block([
+                [Fcz @ R],                      # Direct impact on controls
+                [np.zeros((n_k, n_shocks))],    # No direct impact on endogenous states
+                [R]                             # Direct impact on exogenous states
+            ])
 
-            # A' = [Pkk   Pkz@Pzz]
-            #      [ 0     Pzz   ]
-            A_prime = np.zeros((n_states_x, n_states_x))
-            A_prime[:n_k, :n_k] = Pkk
-            A_prime[:n_k, n_k:] = PkzPzz
-            # Row block for z_{t-1} update: z_t = Pzz * z_{t-1} (+ R*eps)
-            # In x_{t+1}, the z_t component corresponds to the state z_{t} at t+1.
-            # Wait, the state is [k_t; z_{t-1}].
-            # x_{t+1} = [k_{t+1}; z_t]
-            # k_{t+1} = Pkk k_t + PkzPzz z_{t-1} + PkzR eps_t
-            # z_t     = 0   k_t + Pzz    z_{t-1} + R    eps_t
-            # This matches the derivation.
-            A_prime[n_k:, n_k:] = Pzz # Correct
+            # --- Verify shock impact matrices ---
+            print("\nVerifying shock impact matrices:")
+            
+            # Check B_s (state transition shock impacts)
+            if np.allclose(B_s, 0):
+                print("WARNING: B_s is all zeros - shocks won't affect state transitions!")
+            else:
+                nonzero_B = np.count_nonzero(B_s)
+                print(f"B_s has {nonzero_B} non-zero elements")
+                
+                # Print sample of shock impacts
+                # For endogenous states
+                endo_impacts = B_s[:n_k, :]
+                if np.any(endo_impacts):
+                    print("Sample endogenous state impacts (Pkz*R):")
+                    for i in range(min(3, n_k)):
+                        for j in range(min(3, n_shocks)):
+                            if abs(endo_impacts[i, j]) > 1e-10:
+                                print(f"  Shock {j} → Endo State {i}: {endo_impacts[i, j]:.6f}")
+                
+                # For exogenous states
+                exo_impacts = B_s[n_k:, :]
+                if np.any(exo_impacts):
+                    print("Sample exogenous state impacts (R):")
+                    for i in range(min(3, n_z)):
+                        for j in range(min(3, n_shocks)):
+                            if abs(exo_impacts[i, j]) > 1e-10:
+                                print(f"  Shock {j} → Exo State {i}: {exo_impacts[i, j]:.6f}")
+            
+            # Check D_s (direct observation shock impacts)
+            if np.allclose(D_s, 0):
+                print("WARNING: D_s is all zeros - no direct shock effects!")
+            else:
+                nonzero_D = np.count_nonzero(D_s)
+                print(f"D_s has {nonzero_D} non-zero elements")
+                
+                # Print sample of direct shock impacts on controls
+                control_impacts = D_s[:n_c, :]
+                if np.any(control_impacts):
+                    print("Sample direct control impacts (Fcz*R):")
+                    for i in range(min(3, n_c)):
+                        for j in range(min(3, n_shocks)):
+                            if abs(control_impacts[i, j]) > 1e-10:
+                                print(f"  Shock {j} → Control {i}: {control_impacts[i, j]:.6f}")
 
-            # B' = [Pkz@R]
-            #      [  R  ]
-            B_prime = np.zeros((n_states_x, n_shocks))
-            B_prime[:n_k, :] = PkzR
-            B_prime[n_k:, :] = R
+            # --- Define labels for this system ---
+            state_labels = labels['state_labels']
+            obs_labels = labels['observable_labels']
+            shock_labels = labels['shock_labels']
 
-            # Observation y_t = [c_t; k_t; z_t] (size n_c + n_k + n_z)
-            n_obs_y = n_c + n_k + n_z
-
-            # C' = [Fck   Fcz@Pzz]
-            #      [ I     0     ]
-            #      [ 0     Pzz   ]
-            C_prime = np.zeros((n_obs_y, n_states_x))
-            C_prime[:n_c, :n_k] = Fck      # c_t from k_t
-            C_prime[:n_c, n_k:] = FczPzz   # c_t from z_{t-1}
-            C_prime[n_c:n_c+n_k, :n_k] = np.eye(n_k) # k_t from k_t
-            # Row block for z_t: z_t = Pzz * z_{t-1} (+ R*eps)
-            C_prime[n_c+n_k:, n_k:] = Pzz # z_t from z_{t-1}
-
-
-            # D' = [Fcz@R]
-            #      [  0  ]
-            #      [  R  ]
-            D_prime = np.zeros((n_obs_y, n_shocks))
-            D_prime[:n_c, :] = FczR # c_t from eps_t
-            # k_t has no direct shock impact
-            D_prime[n_c+n_k:, :] = R  # z_t from eps_t
-
-            # --- Define Labels for this system ---
-            state_labels_x = labels['state_labels'][:n_k] + [f"{z}_lag1" for z in labels['state_labels'][n_k:]]
-            obs_labels_y = list(labels['observable_labels'][:n_c]) + list(labels['state_labels'][:n_k]) + list(labels['state_labels'][n_k:])
-            shock_labels_eps = labels['shock_labels']
-
-            # --- Store Results ---
+            # --- Store results ---
             contemp_ss = {
-                'A': A_prime, 'B': B_prime, 'C': C_prime, 'D': D_prime,
-                'state_labels': state_labels_x,
-                'observable_labels': obs_labels_y,
-                'shock_labels': shock_labels_eps,
-                'n_states': n_states_x,
-                'n_observables': n_obs_y,
+                'A': A_s, 
+                'B': B_s, 
+                'C': C_s, 
+                'D': D_s,
+                'state_labels': state_labels,
+                'observable_labels': obs_labels,
+                'shock_labels': shock_labels,
+                'n_states': n_states,
+                'n_observables': n_c + n_states,
                 'n_shocks': n_shocks,
-                # Include original components for reference if needed
-                'P': P, 'F': F, 'R': R,
+                # Store component matrices for reference
                 'Pkk': Pkk, 'Pkz': Pkz, 'Pzz': Pzz,
-                'Fck': Fck, 'Fcz': Fcz
+                'Fck': Fck, 'Fcz': Fcz, 'R': R,
+                # Store mappings
+                'shock_to_state_map': labels.get('shock_to_state_map', {}),
+                'state_to_shock_map': labels.get('state_to_shock_map', {}),
+                'zero_persistence_processes': zero_persistence_processes
             }
-            print("Contemporaneous State Space Constructed.")
-            print(f"  A' shape: {A_prime.shape}, B' shape: {B_prime.shape}")
-            print(f"  C' shape: {C_prime.shape}, D' shape: {D_prime.shape}")
-
+            
+            print("\nContemporaneous State Space Successfully Constructed")
+            print(f"A: {A_s.shape}, B: {B_s.shape}, C: {C_s.shape}, D: {D_s.shape}")
+            
             return contemp_ss
 
         except Exception as e:
@@ -332,83 +675,239 @@ class ModelSolver:
             traceback.print_exc()
             return None
 
-
-    def impulse_response(self, state_space_system, shock_name, shock_size=1.0, periods=40):
+    def impulse_response(self, state_space, shock_name, shock_size=1.0, periods=40):
         """
-        Calculate IRFs for a state-space system x_t = Ax_{t-1} + B*eps_t, y_t = Cx_t + D*eps_t.
-        Matches Dynare timing convention: response at period t=1 is the initial impact.
+        Calculate impulse response functions (IRFs) for a given state space system.
+        
+        For a system s_{t+1} = A_s s_t + B_s ε_t, y_t = C_s s_t + D_s ε_t:
+        1. Period 0: y_0 = D_s ε_0 (direct impact)
+        2. Period 1: s_1 = B_s ε_0, y_1 = C_s s_1
+        3. Period t>1: s_t = A_s s_{t-1}, y_t = C_s s_t
+        
+        This algorithm properly handles zero-persistence cases by including direct shock
+        impacts through the D_s matrix.
+        
+        Args:
+            state_space: The state space system dictionary
+            shock_name: Name of the shock to apply
+            shock_size: Size of the shock (default=1.0)
+            periods: Number of periods to simulate (default=40)
+            
+        Returns:
+            pandas.DataFrame: DataFrame with IRF results for all observables
         """
-        print(f"\n--- Calculating Standard IRF for {shock_name} (Corrected) ---")
-        if state_space_system is None:
-             print("Error: State space system is None.")
-             return None
-
-        try:
-            A = state_space_system['A']
-            B = state_space_system['B']
-            C = state_space_system['C']
-            D = state_space_system['D']
-            n_states = state_space_system['n_states']
-            n_observables = state_space_system['n_observables']
-            n_shocks = state_space_system['n_shocks']
-            shock_labels = state_space_system['shock_labels']
-            observable_labels = state_space_system['observable_labels']
-
-            shock_idx = shock_labels.index(shock_name)
-        except (KeyError, ValueError, IndexError) as e:
-            print(f"Error accessing data from state_space_system or finding shock: {e}")
+        print(f"\n--- Calculating IRF for {shock_name} ---")
+        
+        if state_space is None:
+            print("Error: State space system is None")
             return None
+        
+        try:
+            # Extract state space matrices
+            A = state_space['A']  # State transition
+            B = state_space['B']  # Shock impact on states
+            C = state_space['C']  # Observation
+            D = state_space['D']  # Direct shock impact on observables
+            
+            # Get dimensions and labels
+            n_states = state_space['n_states']
+            n_obs = state_space['n_observables']
+            n_shocks = state_space['n_shocks']
+            n_controls = state_space.get('n_controls', 0)
+            
+            shock_labels = state_space['shock_labels']
+            obs_labels = state_space['observable_labels']
+            state_labels = state_space['state_labels']
+            
+            # Check for zero-persistence processes
+            zero_persistence = state_space.get('zero_persistence_processes', [])
+            if zero_persistence:
+                print(f"Model contains zero-persistence processes: {zero_persistence}")
+            
+            # Find shock index
+            try:
+                shock_idx = shock_labels.index(shock_name)
+                print(f"Shock index for '{shock_name}': {shock_idx}")
+            except ValueError:
+                print(f"Error: Shock '{shock_name}' not found in shock labels: {shock_labels}")
+                return None
+            
+            # Initialize arrays for IRFs
+            s_irf = np.zeros((periods, n_states))  # State responses
+            y_irf = np.zeros((periods, n_obs))     # Observable responses
+            
+            # Create shock vector (one-time impulse at t=0)
+            e0 = np.zeros(n_shocks)
+            e0[shock_idx] = shock_size
+            
+            # --- Period 0: Direct impact through D matrix ---
+            # y_0 = D ε_0
+            y_irf[0] = D @ e0
+            
+            # Print period 0 impact
+            print("\nPeriod 0 (Direct Impact):")
+            direct_impact = D @ e0
+            
+            # Separate control impacts from state impacts
+            if n_controls > 0:
+                control_impact = direct_impact[:n_controls]
+                print(f"  Direct impact on controls: {control_impact}")
+                
+                # Print specific control impacts
+                for i in range(min(3, n_controls)):
+                    if abs(control_impact[i]) > 1e-10:
+                        control_var = obs_labels[i] if i < len(obs_labels) else f"Control_{i}"
+                        print(f"  {control_var}: {control_impact[i]:.6f}")
+            
+            # --- Period 1: First period state response ---
+            # s_1 = B ε_0
+            s_irf[1] = B @ e0
+            
+            # y_1 = C s_1
+            y_irf[1] = C @ s_irf[1]
+            
+            # Print period 1 state response
+            print("\nPeriod 1 (First State Response):")
+            state_response = B @ e0
+            print(f"  First period state response magnitude: {np.linalg.norm(state_response):.6f}")
+            
+            # --- Periods 2+ : State evolution ---
+            for t in range(2, periods):
+                # s_t = A s_{t-1}
+                s_irf[t] = A @ s_irf[t-1]
+                
+                # y_t = C s_t
+                y_irf[t] = C @ s_irf[t]
+            
+            # --- Create DataFrame with results ---
+            irf_df = pd.DataFrame(y_irf, columns=obs_labels)
+            irf_df.index.name = "Period"
+            irf_df.attrs['shock_name'] = shock_name
+            irf_df.attrs['shock_size'] = shock_size
+            
+            # --- Print summary statistics ---
+            print("\nIRF Summary:")
+            
+            # Print max impact for a few key variables
+            print("Maximum absolute impacts:")
+            for var_idx, var_name in enumerate(obs_labels[:min(5, len(obs_labels))]):
+                max_abs = np.max(np.abs(y_irf[:, var_idx]))
+                max_idx = np.argmax(np.abs(y_irf[:, var_idx]))
+                print(f"  {var_name}: {max_abs:.6f} at period {max_idx}")
+            
+            # Show first few periods for a key control variable (if applicable)
+            if n_controls > 0 and len(obs_labels) > 0:
+                key_var = obs_labels[0]  # First observable (usually an important control)
+                key_idx = 0
+                print(f"\nFirst 5 periods for {key_var}:")
+                for t in range(min(5, periods)):
+                    print(f"  Period {t}: {y_irf[t, key_idx]:.6f}")
+            
+            return irf_df
+        
+        except Exception as e:
+            print(f"Error calculating IRF: {e}")
+            import traceback
+            traceback.print_exc()
+            return None        
+    # def impulse_response(self, state_space, shock_name, shock_size=1.0, periods=40):
+    #     """
+    #     Calculate impulse response functions (IRFs) for a given state space system.
+        
+    #     For a system x_{t+1} = A x_t + B ε_t, y_t = C x_t + D ε_t:
+    #     1. At t=0: x_0 = 0, ε_0 = [0,...,shock_size,...,0], y_0 = D ε_0
+    #     2. At t=1: x_1 = B ε_0, y_1 = C x_1 + D ε_1 (where ε_1=0)
+    #     3. At t=2: x_2 = A x_1, y_2 = C x_2 + D ε_2 (where ε_2=0)
+    #     ...and so on.
+        
+    #     Returns:
+    #         pandas.DataFrame: DataFrame with IRFs for all observables
+    #     """
+    #     print(f"\n--- Calculating IRF for {shock_name} ---")
+        
+    #     if state_space is None:
+    #         print("Error: State space system is None")
+    #         return None
+        
+    #     try:
+    #         # Extract state space matrices
+    #         A = state_space['A']
+    #         B = state_space['B']
+    #         C = state_space['C']
+    #         D = state_space['D']
+            
+    #         # Get dimensions and labels
+    #         n_states = state_space['n_states']
+    #         n_obs = state_space['n_observables']
+    #         n_shocks = state_space['n_shocks']
+    #         shock_labels = state_space['shock_labels']
+    #         obs_labels = state_space['observable_labels']
+            
+    #         # Find shock index
+    #         try:
+    #             shock_idx = shock_labels.index(shock_name)
+    #             print(f"Shock index for {shock_name}: {shock_idx}")
+    #         except ValueError:
+    #             print(f"Error: Shock '{shock_name}' not found in shock labels: {shock_labels}")
+    #             return None
+            
+    #         # Initialize arrays for IRFs
+    #         x_irf = np.zeros((periods, n_states))  # State responses
+    #         y_irf = np.zeros((periods, n_obs))     # Observable responses
+            
+    #         # Create shock vector at t=0
+    #         e0 = np.zeros(n_shocks)
+    #         e0[shock_idx] = shock_size
+            
+    #         # Extract components for debugging
+    #         n_controls = len(state_space['observable_labels']) - n_states
+    #         D_controls = D[:n_controls, :]
+    #         D_states = D[n_controls:, :]
+            
+    #         # Print shock impact vectors for debugging
+    #         print(f"Shock vector e0: {e0}")
+    #         print(f"Direct impact on controls (D_controls @ e0): {D_controls @ e0}")
+    #         print(f"Direct impact on states (D_states @ e0): {D_states @ e0}")
+    #         print(f"Impact on next period states (B @ e0): {B @ e0}")
+            
+    #         # Period 0 (impact) response 
+    #         # y_0 = D ε_0
+    #         y_irf[0] = D @ e0
+            
+    #         # Period 1 state is affected by shock at t=0
+    #         # x_1 = B ε_0
+    #         x_irf[1] = B @ e0
+            
+    #         # Output at period 1 combines state effect and any lingering shock effect
+    #         # y_1 = C x_1 (no shock at t=1)
+    #         y_irf[1] = C @ x_irf[1]
+            
+    #         # Propagate the shock for remaining periods
+    #         for t in range(2, periods):
+    #             x_irf[t] = A @ x_irf[t-1]
+    #             y_irf[t] = C @ x_irf[t]
+            
+    #         # Create DataFrame with IRF results
+    #         irf_df = pd.DataFrame(y_irf, columns=obs_labels)
+    #         irf_df.index.name = "Period"
+    #         irf_df.attrs['shock_name'] = shock_name
+            
+    #         # Print first few periods of IRF for key variables
+    #         print("\nIRF first 5 periods:")
+    #         control_vars = obs_labels[:n_controls]
+    #         for var in control_vars[:min(4, len(control_vars))]:  # Print max 4 control variables
+    #             var_idx = obs_labels.index(var)
+    #             values = y_irf[:5, var_idx]
+    #             print(f"{var}: {values}")
+            
+    #         return irf_df
+        
+    #     except Exception as e:
+    #         print(f"Error calculating IRF: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+    #         return None
 
-        # Check dimensions before starting
-        if not (A.shape == (n_states, n_states) and
-                B.shape == (n_states, n_shocks) and
-                C.shape == (n_observables, n_states) and
-                D.shape == (n_observables, n_shocks)):
-             print("Error: Matrix dimension mismatch in state_space_system.")
-             print(f"  A:{A.shape} vs ({n_states},{n_states}), B:{B.shape} vs ({n_states},{n_shocks})")
-             print(f"  C:{C.shape} vs ({n_observables},{n_states}), D:{D.shape} vs ({n_observables},{n_shocks})")
-             return None
-
-
-        # --- Simulate IRF ---
-        # irf index k corresponds to response at period k+1 (index 0 = period 1)
-        x_irf = np.zeros((periods, n_states))
-        y_irf = np.zeros((periods, n_observables))
-
-        # Create shock vector for period 1 (impact period)
-        eps_1 = np.zeros(n_shocks)
-        eps_1[shock_idx] = shock_size
-
-        # --- Calculate Period 1 Response (Index 0) ---
-        # State x_1 = B * eps_1
-        x_t = B @ eps_1
-        x_irf[0, :] = x_t
-
-        # Observation y_1 = C * x_1 + D * eps_1
-        y_t = C @ x_t + D @ eps_1
-        y_irf[0, :] = y_t
-
-        # --- Simulate Periods 2 to T (Indices 1 to periods-1) ---
-        for t in range(1, periods):
-            # x_{t+1} = A * x_t
-            x_t = A @ x_irf[t-1, :]
-            x_irf[t, :] = x_t
-
-            # y_{t+1} = C * x_{t+1} (assuming shock only at t=1)
-            y_t = C @ x_t
-            y_irf[t, :] = y_t
-
-        # --- Create DataFrame ---
-        # Index k corresponds to response at period k+1
-        irf_df = pd.DataFrame(y_irf, columns=observable_labels)
-        # Create a 'Period' column starting from 1 to match Dynare plots
-        irf_df.insert(0, 'Period', range(1, periods + 1))
-        # Or set index starting from 1
-        # irf_df.index = range(1, periods + 1)
-        # irf_df.index.name = "Period (t)"
-
-        irf_df.attrs['shock_name'] = shock_name
-        return irf_df
 
     def plot_irf(self, irf_df, variables_to_plot, title_suffix="", figsize=(12, 8)):
         """Plots selected variables from an IRF DataFrame."""
@@ -420,15 +919,15 @@ class ModelSolver:
         shock_name = irf_df.attrs.get('shock_name', 'Unknown Shock')
         plot_title = f'Impulse Responses to {shock_name}'
         if title_suffix:
-             plot_title += f" ({title_suffix})"
+            plot_title += f" ({title_suffix})"
 
         # Use 'Period' column for x-axis if it exists, otherwise use index
         if 'Period' in irf_df.columns:
-             x_axis = irf_df['Period']
-             x_label = 'Period'
+            x_axis = irf_df['Period']
+            x_label = 'Period'
         else:
-             x_axis = irf_df.index
-             x_label = 'Periods (Index)'
+            x_axis = irf_df.index
+            x_label = 'Periods (Index)'
 
 
         for var in variables_to_plot:

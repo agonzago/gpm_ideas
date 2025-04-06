@@ -32,7 +32,7 @@ parameters b1, b4, a1, a2, g1, g2, g3, rho_DLA_CPI, rho_L_GDP_GAP, rho_rs, rho_r
     rho_L_GDP_GAP  =0.75;
     rho_DLA_CPI   =0.75;
     rho_rs      =0.0;
-    rho_rs2      =0;
+    rho_rs2      =0.0;
 model;
     // Aggregate demand
     L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
@@ -49,7 +49,7 @@ model;
     RR_GAP = RS - DLA_CPI(+1);
     RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
     RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
-    RES_RS = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
+    RES_RS = rho_rs*RES_RS(-1) +  SHK_RS;
 
 end;
 
