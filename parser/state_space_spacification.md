@@ -1,4 +1,6 @@
-1.  I have a code that construct the state space representation starting from the solution of the DSGE model by Klein.
+1.  I'm working on a code that reads a dynare file (of a linear model). It can be any text file (so dynare is not fundamental). The idea is that, I read this fle create a json file with the equations written for t and t+1 as will be expected by Klein's method. The model has lead and lags of long horizon so I need to create auxiliary equations to accommodate this feature. After creating the json file I take the derivatives of the equation with respect to the variables using analytical methods and save the jacobbian's in the file that letter is loaded in memory. The procedure loads these files and evaluate them a parameter value and call klein's solution method. The solution is working fine.
+
+2.  Tyhe next task is to build a state space representation for the kalman filter. The way I'm doing this is
 
     $s_{t+1}=Ps_{t}$
 
@@ -6,7 +8,7 @@
 
     For simplicity it is easier to split the matrices of the system taking into account the kind of variable we have (endogenous states, exogenous state, and controls).
 
-2.  When computing the solution of the model variables are ordered as follows
+3.  When computing the jacobbian of the model equations variables are ordered as follows
 
         variables = self.state_variables + self.control_variables
 
@@ -41,30 +43,60 @@
 
     where $\epsilon_{t+1}$ is the vector of shocks consistent with self.varexo_list. R is a selection matrix that tells how each shock affects the $z_{t}$. Given the information on the parser $z_{t}$ follows a particular order and each variable has it own shock. Here the issue is that some exogenous states may have more than one lag and hence in the representation they imply more states (current and lag). Only current states will have shock. This is typical of a companion form representation of AR process.
 
-3.  With this notation we can write the state space model for the Kalman filter, under the assumption that all controls and states are observable
+4.  To build the state space I'm lagging the equation for $z$ and recomputing the system
 
     $$\begin{aligned}
-    y_{t} & =Cx_{t}\\
-    x_{t} & =Ax_{t-1}+B\epsilon_{t}
-    \end{aligned}$$ where $$\begin{aligned}
-    C & =\left[\begin{array}{c}
-    F\\
-    I
-    \end{array}\right]
-    \end{aligned}$$
+    k_{t+1} & =P_{kk}k_{t}+P_{kz}P_{zz}z_{t-1}+P_{kz}R\epsilon_{t}\\
+    c_{t} & =F_{ck}k_{t}+F_{cz}P_{zz}z_{t-1}+F_{cz}R\epsilon_{t}\\
+    z_{t} & =P_{zz}z_{t-1}+R\epsilon_{t}
+    \end{aligned}$$ so the state space can be written as
 
-    $$A=P$$
+    $$\left[\begin{array}{c}
+    k_{t+1}\\
+    c_{t}\\
+    z
+    \end{array}\right]=\left[\begin{array}{ccc}
+    P_{kk} & 0 & P_{kz}P_{zz}\\
+    F_{ck} & 0 & F_{cz}P_{zz}\\
+    0 & 0 & P_{zz}
+    \end{array}\right]\left[\begin{array}{c}
+    k_{t}\\
+    c_{t-1}\\
+    z_{t-1}
+    \end{array}\right]+\left[\begin{array}{c}
+    P_{kz}R\\
+    F_{cz}R\\
+    R
+    \end{array}\right]\epsilon_{t}$$ and the state-space can be written as
 
-    $$B=\left[\begin{array}{c}
-    0_{(\text{n\_endogenos x n\_shock)}}\\
-    R_{(\text{n\_exogenous x n\_shock)}}
-    \end{array}\right]$$
+    $$\begin{aligned}
+    y_{t} & =Hw_{t}\\
+    w_{t} & =Aw_{t-1}+B\epsilon_{t}
+    \end{aligned}$$\
+    One feature is that some of the exogenous variables may have more that one lag. Say you have to exogenos variables $$z_{1t}=\rho_{10}z_{1t-1}+\rho_{11}z_{1t-2}+\epsilon_{t}^{z1}$$
 
-    matrix dimensions are $B$: (n_states x n_shock), A (n_states x n_states) C (n_obs x n_states). Since we assume in this representation that all variables are potentially observable the n_obs = n_states. Also note that n_states = len(variables) in the solution of the DSGE. n_endogenous = n_controls + n_endogenous_states, n_exogenous = exo_with_shocks + exo_without_shocks.
+    $$z_{2t}=\rho_{20}z_{2t-1}+\epsilon_{t}^{z2}$$ in this case $$z_{t}=\left(\begin{array}{c}
+    z_{1t}\\
+    z_{1t-1}\\
+    z_{2t}
+    \end{array}\right)=\left[\begin{array}{ccc}
+    \rho_{10} & \rho_{11} & 0\\
+    1 & 0 & 0\\
+    0 & \rho_{20} & 0
+    \end{array}\right]\left(\begin{array}{c}
+    z_{1t-1}\\
+    z_{1t-2}\\
+    z_{2t-1}
+    \end{array}\right)+\left[\begin{array}{cc}
+    1 & 0\\
+    0 & 0\\
+    0 & 1
+    \end{array}\right]\left(\begin{array}{c}
+    \epsilon_{t}^{z1}\\
+    \epsilon_{t}^{z2}
+    \end{array}\right)$$ where it is clear what R is in the notation above.
 
-4.  The code parse_gpm.py contains all this transformation.
-
-5.  In the code full_code_includes_parser.py I'm working on an implementation that augments the state space by including stochastic trends and also has other caracteristics.
+5.  In the code full_code_includes_parser.py I'm working on an implementation that augments the state space by including stochastic trends and also has other characteristics.
 
     1.  Only a subset of the variables is observable, as defined by the user
 
@@ -104,12 +136,12 @@
 
 6.  The code is structure as follows:
 
-    1.  DynareParser just reads the file and produce some ausiliary function and constants needed for the solution
+    1.  DynareParser just reads the file and produce some auxiliary function and constants needed for the solution
 
     2.  ModelSover. Loads files created by the parser and computes the klain solution
 
     3.  AugmentedState Space creates the augmented representation.
 
-7.  There are several changes needed. ModelSolver has los of function not needed and is missing Klein solution (that is available in the code, just copy that into the class). Remove all not necesary functions.
+7.  There are several changes needed. ModelSolver has of function not needed and is missing Klein solution (that is available in the code, just copy that into the class). Remove all not necesary functions.
 
 8.  Check the augmented class and link it to the model solver. Check the the filtration is working and the irfs are correct.

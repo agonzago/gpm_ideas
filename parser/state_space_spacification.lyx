@@ -87,8 +87,20 @@
 \begin_body
 
 \begin_layout Enumerate
-I have a code that construct the state space representation starting from the solution of the DSGE model by Klein.
+I'm working on a code that reads a dynare file (of a linear model).
+ It can be any text file (so dynare is not fundamental).
+ The idea is that,
+ I read this fle create a json file with the equations written for t and t+1 as will be expected by Klein's method.
+ The model has lead and lags of long horizon so I need to create auxiliary equations to accommodate this feature.
+ After creating the json file I take the derivatives of the equation with respect to the variables using analytical methods and save the jacobbian's in the file that letter is loaded in memory.
+ The procedure loads these files and evaluate them a parameter value and call klein's solution method.
+ The solution is working fine.
  
+\end_layout
+
+\begin_layout Enumerate
+Tyhe next task is to build a state space representation for the kalman filter.
+ The way I'm doing this is 
 \end_layout
 
 \begin_deeper
@@ -115,11 +127,12 @@ For simplicity it is easier to split the matrices of the system taking into acco
 
 \end_deeper
 \begin_layout Enumerate
-When computing the solution of the model variables are ordered as follows 
+When computing the jacobbian of the model equations variables are ordered as follows 
 \end_layout
 
 \begin_deeper
 \begin_layout Verbatim
+
 variables = self.state_variables + self.control_variables
 \end_layout
 
@@ -128,6 +141,7 @@ where
 \end_layout
 
 \begin_layout Verbatim
+
 self.state_variables = endogenous_states + exo_with_shocks + exo_without_shocks
 \end_layout
 
@@ -249,38 +263,76 @@ where
 
 \end_deeper
 \begin_layout Enumerate
-With this notation we can write the state space model for the Kalman filter,
- under the assumption that all controls and states are observable 
+To build the state space I'm lagging the equation for 
+\begin_inset Formula $z$
+\end_inset
+
+ and recomputing the system 
 \end_layout
 
 \begin_deeper
 \begin_layout Standard
 \begin_inset Formula 
 \begin{align*}
-y_{t} & =Cx_{t}\\
-x_{t} & =Ax_{t-1}+B\epsilon_{t}
+k_{t+1} & =P_{kk}k_{t}+P_{kz}P_{zz}z_{t-1}+P_{kz}R\epsilon_{t}\\
+c_{t} & =F_{ck}k_{t}+F_{cz}P_{zz}z_{t-1}+F_{cz}R\epsilon_{t}\\
+z_{t} & =P_{zz}z_{t-1}+R\epsilon_{t}
 \end{align*}
 
 \end_inset
 
-where 
+so the state space can be written as
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\left[\begin{array}{c}
+k_{t+1}\\
+c_{t}\\
+z
+\end{array}\right]=\left[\begin{array}{ccc}
+P_{kk} & 0 & P_{kz}P_{zz}\\
+F_{ck} & 0 & F_{cz}P_{zz}\\
+0 & 0 & P_{zz}
+\end{array}\right]\left[\begin{array}{c}
+k_{t}\\
+c_{t-1}\\
+z_{t-1}
+\end{array}\right]+\left[\begin{array}{c}
+P_{kz}R\\
+F_{cz}R\\
+R
+\end{array}\right]\epsilon_{t}
+\]
+
+\end_inset
+
+and the state-space can be written as 
+\end_layout
+
+\begin_layout Standard
 \begin_inset Formula 
 \begin{align*}
-C & =\left[\begin{array}{c}
-F\\
-I
-\end{array}\right]
+y_{t} & =Hw_{t}\\
+w_{t} & =Aw_{t-1}+B\epsilon_{t}
 \end{align*}
 
 \end_inset
 
 
+\begin_inset Newline newline
+\end_inset
+
+
 \end_layout
 
 \begin_layout Standard
+One feature is that some of the exogenous variables may have more that one lag.
+ Say you have to exogenos variables 
 \begin_inset Formula 
 \[
-A=P
+z_{1t}=\rho_{10}z_{1t-1}+\rho_{11}z_{1t-2}+\epsilon_{t}^{z1}
 \]
 
 \end_inset
@@ -291,40 +343,45 @@ A=P
 \begin_layout Standard
 \begin_inset Formula 
 \[
-B=\left[\begin{array}{c}
-0_{(\text{n\_endogenos x n\_shock)}}\\
-R_{(\text{n\_exogenous x n\_shock)}}
-\end{array}\right]
+z_{2t}=\rho_{20}z_{2t-1}+\epsilon_{t}^{z2}
 \]
 
 \end_inset
 
+in this case 
+\begin_inset Formula 
+\[
+z_{t}=\left(\begin{array}{c}
+z_{1t}\\
+z_{1t-1}\\
+z_{2t}
+\end{array}\right)=\left[\begin{array}{ccc}
+\rho_{10} & \rho_{11} & 0\\
+1 & 0 & 0\\
+0 & \rho_{20} & 0
+\end{array}\right]\left(\begin{array}{c}
+z_{1t-1}\\
+z_{1t-2}\\
+z_{2t-1}
+\end{array}\right)+\left[\begin{array}{cc}
+1 & 0\\
+0 & 0\\
+0 & 1
+\end{array}\right]\left(\begin{array}{c}
+\epsilon_{t}^{z1}\\
+\epsilon_{t}^{z2}
+\end{array}\right)
+\]
 
-\end_layout
-
-\begin_layout Standard
-matrix dimensions are 
-\begin_inset Formula $B$
 \end_inset
 
-:
- (n_states x n_shock),
- A (n_states x n_states) C (n_obs x n_states).
- Since we assume in this representation that all variables are potentially observable the n_obs = n_states.
- Also note that n_states = len(variables) in the solution of the DSGE.
- n_endogenous = n_controls + n_endogenous_states,
- n_exogenous = exo_with_shocks + exo_without_shocks.
+where it is clear what R is in the notation above.
  
 \end_layout
 
 \end_deeper
 \begin_layout Enumerate
-The code parse_gpm.py contains all this transformation.
- 
-\end_layout
-
-\begin_layout Enumerate
-In the code full_code_includes_parser.py I'm working on an implementation that augments the state space by including stochastic trends and also has other caracteristics.
+In the code full_code_includes_parser.py I'm working on an implementation that augments the state space by including stochastic trends and also has other characteristics.
  
 \end_layout
 
@@ -482,7 +539,7 @@ The code is structure as follows:
 
 \begin_deeper
 \begin_layout Enumerate
-DynareParser just reads the file and produce some ausiliary function and constants needed for the solution
+DynareParser just reads the file and produce some auxiliary function and constants needed for the solution
 \end_layout
 
 \begin_layout Enumerate
@@ -498,7 +555,7 @@ AugmentedState Space creates the augmented representation.
 \end_deeper
 \begin_layout Enumerate
 There are several changes needed.
- ModelSolver has los of function not needed and is missing Klein solution (that is available in the code,
+ ModelSolver has of function not needed and is missing Klein solution (that is available in the code,
  just copy that into the class).
  Remove all not necesary functions.
  

@@ -1,10 +1,19 @@
 # ----- Inside main.py -----
 if __name__ == "__main__":
+
     import os
     import sys
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
+
+    import os
+
+    # Get the directory of the current file
+    file_directory = os.path.dirname(os.path.abspath(__file__))
+
+    # Set the working directory to the file's directory
+    os.chdir(file_directory)
 
     # --- Imports and Setup ---
     try:

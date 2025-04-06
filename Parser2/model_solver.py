@@ -100,20 +100,69 @@ class ModelSolver:
         self._load_model_components()
 
     def _load_model_components(self):
-        # ... (load json, jacobian evaluator) ...
-        # Load structure - CRITICAL: This must contain TARGET order labels and correct R
-        struct_path = os.path.join(self.output_dir, "model_structure.py")
-        spec = importlib.util.spec_from_file_location("model_structure", struct_path)
-        struct_module = importlib.util.module_from_spec(spec)
-        sys.modules["model_structure"] = struct_module
-        spec.loader.exec_module(struct_module)
-        self.indices = struct_module.indices # Use indices from structure
-        self.R = struct_module.R         # Use R from structure (maps eps_t -> z_t update)
-        self.labels = struct_module.labels   # Use labels from structure (TARGET order)
-        print(f"ModelSolver loaded structure. n_states={self.indices['n_states']}, n_endo={self.indices['n_endogenous']}, n_exo={self.indices['n_exo_states']}")
-        print(f"  State Labels: {self.labels['state_labels']}")
-        # Assuming observable_labels = controls + states
-        print(f"  Control Labels: {self.labels['observable_labels'][:self.indices['n_controls']]}")
+            # --- Load model.json (Needed for parameters) ---
+            model_path = os.path.join(self.output_dir, "model.json")
+            try:
+                with open(model_path, 'r') as f:
+                    self.model_json = json.load(f)
+                # Store parameter info directly for easier access later
+                self.parameter_names = self.model_json.get('parameters', [])
+                self.default_param_values = self.model_json.get('param_values', {})
+                print(f"Loaded parameters from {model_path}")
+            except FileNotFoundError:
+                print(f"Error: {model_path} not found.")
+                self.model_json = {} # Avoid attribute errors later
+                self.parameter_names = []
+                self.default_param_values = {}
+            except json.JSONDecodeError:
+                print(f"Error: Could not decode JSON from {model_path}.")
+                self.model_json = {}
+                self.parameter_names = []
+                self.default_param_values = {}
+
+
+            # --- Load Jacobian Evaluator ---
+            jac_path = os.path.join(self.output_dir, "jacobian_evaluator.py")
+            try:
+                spec = importlib.util.spec_from_file_location("jacobian_evaluator", jac_path)
+                jac_module = importlib.util.module_from_spec(spec)
+                sys.modules["jacobian_evaluator"] = jac_module
+                spec.loader.exec_module(jac_module)
+                self.evaluate_jacobians = jac_module.evaluate_jacobians
+                print(f"Loaded Jacobian evaluator from {jac_path}")
+            except FileNotFoundError:
+                print(f"Error: {jac_path} not found. Cannot solve model.")
+                self.evaluate_jacobians = None # Set to None to indicate failure
+            except Exception as e:
+                print(f"Error loading Jacobian evaluator: {e}")
+                self.evaluate_jacobians = None
+
+
+            # --- Load Structure (Contains TARGET order labels/indices/R) ---
+            struct_path = os.path.join(self.output_dir, "model_structure.py")
+            try:
+                spec = importlib.util.spec_from_file_location("model_structure", struct_path)
+                struct_module = importlib.util.module_from_spec(spec)
+                sys.modules["model_structure"] = struct_module
+                spec.loader.exec_module(struct_module)
+                self.indices = struct_module.indices
+                self.R = struct_module.R
+                self.labels = struct_module.labels
+                print(f"Loaded structure from {struct_path}. n_states={self.indices['n_states']}, n_endo={self.indices['n_endogenous']}, n_exo={self.indices['n_exo_states']}")
+                print(f"  State Labels: {self.labels['state_labels']}")
+                print(f"  Control Labels: {self.labels['observable_labels'][:self.indices['n_controls']]}")
+            except FileNotFoundError:
+                print(f"Error: {struct_path} not found. Cannot construct state space.")
+                # Set defaults to avoid errors, but indicate failure
+                self.indices = {}
+                self.R = None
+                self.labels = {'state_labels': [], 'observable_labels': [], 'shock_labels': []}
+            except Exception as e:
+                print(f"Error loading structure file: {e}")
+                self.indices = {}
+                self.R = None
+                self.labels = {'state_labels': [], 'observable_labels': [], 'shock_labels': []}
+
 
 
     def solve(self, params):
@@ -286,28 +335,19 @@ class ModelSolver:
 
     def impulse_response(self, state_space_system, shock_name, shock_size=1.0, periods=40):
         """
-        Calculate IRFs for a given state-space system (can be base or contemporaneous).
-        Assumes system is x_t = Ax_{t-1} + Beps_t, y_t = Cx_t + Deps_t
-        IRF calculation:
-        x_0 = 0
-        y_0 = D*eps_0
-        x_1 = B*eps_0
-        y_1 = C*x_1 + D*eps_1 (assume eps_1=0 for standard IRF) = C*x_1
-        x_2 = A*x_1 + B*eps_1 = A*x_1
-        y_2 = C*x_2 + D*eps_2 = C*x_2
-        ...
+        Calculate IRFs for a state-space system x_t = Ax_{t-1} + B*eps_t, y_t = Cx_t + D*eps_t.
+        Matches Dynare timing convention: response at period t=1 is the initial impact.
         """
-        print(f"\n--- Calculating Standard IRF for {shock_name} ---")
+        print(f"\n--- Calculating Standard IRF for {shock_name} (Corrected) ---")
         if state_space_system is None:
-            print("Error: State space system is None.")
-            return None
+             print("Error: State space system is None.")
+             return None
 
         try:
             A = state_space_system['A']
             B = state_space_system['B']
             C = state_space_system['C']
             D = state_space_system['D']
-            labels = state_space_system['labels'] # Use labels from the provided system
             n_states = state_space_system['n_states']
             n_observables = state_space_system['n_observables']
             n_shocks = state_space_system['n_shocks']
@@ -319,55 +359,53 @@ class ModelSolver:
             print(f"Error accessing data from state_space_system or finding shock: {e}")
             return None
 
+        # Check dimensions before starting
+        if not (A.shape == (n_states, n_states) and
+                B.shape == (n_states, n_shocks) and
+                C.shape == (n_observables, n_states) and
+                D.shape == (n_observables, n_shocks)):
+             print("Error: Matrix dimension mismatch in state_space_system.")
+             print(f"  A:{A.shape} vs ({n_states},{n_states}), B:{B.shape} vs ({n_states},{n_shocks})")
+             print(f"  C:{C.shape} vs ({n_observables},{n_states}), D:{D.shape} vs ({n_observables},{n_shocks})")
+             return None
+
+
         # --- Simulate IRF ---
-        # irf index k corresponds to response at period k (Dynare convention t=1 is shock)
+        # irf index k corresponds to response at period k+1 (index 0 = period 1)
         x_irf = np.zeros((periods, n_states))
         y_irf = np.zeros((periods, n_observables))
 
-        # Create shock vector for period 0 (impact period)
-        eps_0 = np.zeros(n_shocks)
-        eps_0[shock_idx] = shock_size
+        # Create shock vector for period 1 (impact period)
+        eps_1 = np.zeros(n_shocks)
+        eps_1[shock_idx] = shock_size
 
-        # Period 0 response (Contemporaneous)
-        if D.shape[0] == n_observables and D.shape[1] == n_shocks:
-            y_irf[0, :] = D @ eps_0
-        else:
-            print(f"Warning: D matrix shape {D.shape} mismatch. Setting y_irf[0,:] to zero.")
-            # y_irf[0, :] = 0 # Already initialized to zero
+        # --- Calculate Period 1 Response (Index 0) ---
+        # State x_1 = B * eps_1
+        x_t = B @ eps_1
+        x_irf[0, :] = x_t
 
-        # Calculate state response in period 1
-        if B.shape[0] == n_states and B.shape[1] == n_shocks:
-            x_1 = B @ eps_0
-            if periods > 0:
-                x_irf[0, :] = x_1 # Store x_1 at index 0
-        else:
-            print(f"Warning: B matrix shape {B.shape} mismatch. Cannot calculate initial state.")
-            return None # Cannot proceed
+        # Observation y_1 = C * x_1 + D * eps_1
+        y_t = C @ x_t + D @ eps_1
+        y_irf[0, :] = y_t
 
-
-        # Simulate periods 1 to T-1 (indices 1 to periods-1)
+        # --- Simulate Periods 2 to T (Indices 1 to periods-1) ---
         for t in range(1, periods):
-            # x_t = A*x_{t-1}
+            # x_{t+1} = A * x_t
             x_t = A @ x_irf[t-1, :]
             x_irf[t, :] = x_t
-            # y_t = C*x_t (assuming shock is only in period 0)
-            if C.shape[0] == n_observables and C.shape[1] == n_states:
-                y_irf[t, :] = C @ x_t
-            else:
-                print(f"Warning: C matrix shape {C.shape} mismatch at t={t}. Setting y_irf[{t},:] to zero.")
-                # y_irf[t, :] = 0
 
+            # y_{t+1} = C * x_{t+1} (assuming shock only at t=1)
+            y_t = C @ x_t
+            y_irf[t, :] = y_t
 
-        # Create DataFrame
-        # Index k corresponds to response at period k+1 (if shock is at t=0)
-        # Or index k corresponds to response at period k (if shock is at t=1, like Dynare)
-        # The loop above calculated y_0=Deps0, y_1=Cx1, y_2=Cx2... where x1=Beps0, x2=Ax1...
-        # Let's align index with Dynare: index 0 is period 1 impact (y1)
-        # We need to shift y_irf or adjust index.
-        # Let's keep index 0 = period 0 impact (Deps0), index 1 = period 1 impact (Cx1) etc.
-        # User can adjust index later if needed.
+        # --- Create DataFrame ---
+        # Index k corresponds to response at period k+1
         irf_df = pd.DataFrame(y_irf, columns=observable_labels)
-        irf_df.index.name = "Periods (t)" # Index t = response at time t
+        # Create a 'Period' column starting from 1 to match Dynare plots
+        irf_df.insert(0, 'Period', range(1, periods + 1))
+        # Or set index starting from 1
+        # irf_df.index = range(1, periods + 1)
+        # irf_df.index.name = "Period (t)"
 
         irf_df.attrs['shock_name'] = shock_name
         return irf_df
@@ -382,20 +420,34 @@ class ModelSolver:
         shock_name = irf_df.attrs.get('shock_name', 'Unknown Shock')
         plot_title = f'Impulse Responses to {shock_name}'
         if title_suffix:
-            plot_title += f" ({title_suffix})"
+             plot_title += f" ({title_suffix})"
+
+        # Use 'Period' column for x-axis if it exists, otherwise use index
+        if 'Period' in irf_df.columns:
+             x_axis = irf_df['Period']
+             x_label = 'Period'
+        else:
+             x_axis = irf_df.index
+             x_label = 'Periods (Index)'
 
 
         for var in variables_to_plot:
             if var in irf_df.columns:
-                plt.plot(irf_df.index, irf_df[var], label=var)
+                plt.plot(x_axis, irf_df[var], label=var)
             else:
                 print(f"Warning: Variable '{var}' not found in IRF results.")
 
-        plt.xlabel('Periods')
+        plt.xlabel(x_label)
         plt.ylabel('Deviation from Steady State')
         plt.title(plot_title)
         plt.legend()
         plt.grid(True)
         plt.axhline(y=0, color='k', linestyle='-', alpha=0.2)
+        # Set x-axis limits to start from 1 if using 'Period' column
+        if 'Period' in irf_df.columns:
+            plt.xlim(left=1) # Start plot at period 1
         plt.tight_layout()
-        plt.show()
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"Note: Plot display failed ({e}). May need GUI backend.")
