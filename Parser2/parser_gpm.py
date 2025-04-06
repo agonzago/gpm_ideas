@@ -674,6 +674,13 @@ class DynareParser:
         exogenous = self.varexo_list
         parameters = list(self.parameters.keys())
         
+
+        # In your ORIGINAL script, find where variables are finalized
+        # Let's assume you have lists like 'original_state_vars' and 'original_control_vars'
+        print("Original State Variables Order:", self.state_variables)
+        print("Original Control Variables Order:", self.control_variables)
+        
+        # The combined list used for Jacobians would be original_state_vars + original_control_vars
         # Create variables with "_p" suffix for t+1 variables
         variables_p = [var + "_p" for var in variables]
         
@@ -825,6 +832,227 @@ class DynareParser:
             with open(output_file, 'w') as f:
                 f.write(complete_code)
             print(f"Jacobian evaluator saved to {output_file}")
+        
+        return complete_code
+
+    def generate_doubling_jacobian_evaluator(self, output_file=None):
+        """
+        Generate Python code for the Jacobian matrices needed for the doubling algorithm.
+        
+        The model follows the structure:
+        0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t
+        
+        Args:
+            self: A DynareParser instance with parsed model
+            output_file (str, optional): Path to save the generated Python code
+                
+        Returns:
+            str: The generated Python code for the Jacobian evaluator
+        """
+        print("Generating Jacobian evaluator for doubling algorithm...")
+        
+        # Get model components from parser
+        variables = self.state_variables + self.control_variables
+        exogenous = self.varexo_list
+        parameters = list(self.parameters.keys())
+        
+        # Variables with "_p" suffix for t+1 variables
+        variables_p = [var + "_p" for var in variables]
+        
+        # Create symbolic variables for all model components
+        var_symbols = {var: sy.symbols(var) for var in variables}
+        var_p_symbols = {var_p: sy.symbols(var_p) for var_p in variables_p}
+        exo_symbols = {exo: sy.symbols(exo) for exo in exogenous}
+        param_symbols = {param: sy.symbols(param) for param in parameters}
+        
+        # Combine all symbols for equation parsing
+        all_symbols = {**var_symbols, **var_p_symbols, **exo_symbols, **param_symbols}
+        
+        # Get equations from the transformed model
+        formatted_equations = self.format_transformed_equations(
+            self.transformed_equations, 
+            self.auxiliary_equations
+        )
+        
+        # Parse endogenous equations into sympy expressions
+        equations = []
+        success_count = 0
+        error_count = 0
+        
+        for eq_dict in formatted_equations:
+            for eq_name, eq_str in eq_dict.items():
+                # Convert string to sympy expression
+                eq_expr = eq_str
+                for name, symbol in all_symbols.items():
+                    # Use regex to match whole words only
+                    pattern = r'\b' + re.escape(name) + r'\b'
+                    eq_expr = re.sub(pattern, str(symbol), eq_expr)
+                
+                # Try to parse the expression
+                try:
+                    expr = sy.sympify(eq_expr)
+                    equations.append(expr)
+                    success_count += 1
+                except Exception as e:
+                    print(f"Failed to parse equation {eq_name}: {eq_str}")
+                    print(f"Error: {str(e)}")
+                    # Try to recover by using a placeholder
+                    equations.append(sy.sympify("0"))
+                    error_count += 1
+        
+        print(f"Parsed {success_count} equations successfully, {error_count} with errors")
+        
+        # Create system as sympy Matrix
+        F = sy.Matrix(equations)
+        
+        # Get variable counts for matrix dimensions
+        n_states = len(self.state_variables)
+        n_vars = len(variables)
+        n_shocks = len(exogenous)
+        
+        # Extract symbols for different variable types
+        future_symbols = [var_p_symbols[var_p] for var_p in variables_p]
+        current_symbols = [var_symbols[var] for var in variables]
+        # State variables at t-1 (for past variables)
+        past_symbols = [var_symbols[var] for var in self.state_variables]
+        shock_symbols = [exo_symbols[exo] for exo in exogenous]
+        
+        # Compute Jacobians for the model structure:
+        # 0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t
+        print("Computing A matrix (coefficient on future variables)...")
+        A_symbolic = F.jacobian(future_symbols)
+        
+        print("Computing B matrix (coefficient on current variables)...")
+        B_symbolic = F.jacobian(current_symbols)
+        
+        print("Computing C matrix (coefficient on past state variables)...")
+        # Only state variables have t-1 values
+        C_symbolic = sy.zeros(n_vars, n_states)
+        for i in range(len(equations)):
+            for j, state_var in enumerate(self.state_variables):
+                lag_var = state_var + "_lag"
+                if lag_var in all_symbols:
+                    C_symbolic[i, j] = sy.diff(equations[i], all_symbols[lag_var])
+        
+        print("Computing D matrix (coefficient on shock variables)...")
+        D_symbolic = F.jacobian(shock_symbols)
+        
+        print("Generating output code...")
+        
+        # Generate code for the doubling algorithm Jacobian evaluation function
+        function_code = [
+            "import numpy as np",
+            "",
+            "def evaluate_doubling_jacobians(theta):",
+            "    \"\"\"",
+            "    Evaluates Jacobian matrices for the doubling algorithm",
+            "    ",
+            "    For the model structure: 0 = A E_t[y_{t+1}] + B y_t + C y_{t-1} + D ε_t",
+            "    ",
+            "    Args:",
+            "        theta: List or array of parameter values in the order of:",
+            f"            {parameters}",
+            "        ",
+            "    Returns:",
+            "        A_plus: Matrix for future variables (coefficient on t+1 variables)",
+            "        A_zero: Matrix for current variables (coefficient on t variables)",
+            "        A_minus: Matrix for past variables (coefficient on t-1 variables)",
+            "        shock_impact: Matrix for shock impacts (n_vars x n_shocks)",
+            "        state_indices: Indices of state variables",
+            "        control_indices: Indices of control variables",
+            "    \"\"\"",
+            "    # Unpack parameters from theta"
+        ]
+        
+        # Add parameter unpacking
+        for i, param in enumerate(parameters):
+            function_code.append(f"    {param} = theta[{i}]")
+        
+        # Initialize matrices
+        function_code.extend([
+            "",
+            f"    n_vars = {n_vars}",
+            f"    n_states = {n_states}",
+            f"    n_shocks = {n_shocks}",
+            f"    A_plus = np.zeros((n_vars, n_vars))",
+            f"    A_zero = np.zeros((n_vars, n_vars))",
+            f"    A_minus = np.zeros((n_vars, n_states))",
+            f"    shock_impact = np.zeros((n_vars, n_shocks))"   
+        ])
+        
+        # Add A_plus matrix elements (future variables)
+        function_code.append("")
+        function_code.append("    # A_plus matrix elements (future variables)")
+        for i in range(A_symbolic.rows):
+            for j in range(A_symbolic.cols):
+                if A_symbolic[i, j] != 0:
+                    expr = str(A_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        # Replace symbol with parameter name
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    A_plus[{i}, {j}] = {expr}")
+        
+        # Add A_zero matrix elements (current variables)
+        function_code.append("")
+        function_code.append("    # A_zero matrix elements (current variables)")
+        for i in range(B_symbolic.rows):
+            for j in range(B_symbolic.cols):
+                if B_symbolic[i, j] != 0:
+                    expr = str(B_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    A_zero[{i}, {j}] = {expr}")
+        
+        # Add A_minus matrix elements (past variables)
+        function_code.append("")
+        function_code.append("    # A_minus matrix elements (past variables)")
+        for i in range(C_symbolic.rows):
+            for j in range(C_symbolic.cols):
+                if C_symbolic[i, j] != 0:
+                    expr = str(C_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    A_minus[{i}, {j}] = {expr}")
+        
+        # Add shock_impact matrix elements (shock terms)
+        function_code.append("")
+        function_code.append("    # shock_impact matrix elements (shock impacts)")
+        for i in range(D_symbolic.rows):
+            for j in range(D_symbolic.cols):
+                if D_symbolic[i, j] != 0:
+                    expr = str(D_symbolic[i, j])
+                    # Clean up the expression
+                    for param in parameters:
+                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
+                        expr = re.sub(pattern, param, expr)
+                    function_code.append(f"    shock_impact[{i}, {j}] = {expr}")
+        
+        # Add state and control indices
+        function_code.extend([
+            "",
+            "    # Indices of state and control variables",
+            f"    state_indices = {list(range(n_states))}",
+            f"    control_indices = {list(range(n_states, n_vars))}"
+        ])
+        
+        # Return matrices
+        function_code.append("")
+        function_code.append("    return A_plus, A_zero, A_minus, shock_impact, state_indices, control_indices")
+        
+        # Join all lines to form the complete function code
+        complete_code = "\n".join(function_code)
+        
+        # Save to file if specified
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(complete_code)
+            print(f"Doubling algorithm Jacobian evaluator saved to {output_file}")
         
         return complete_code
 

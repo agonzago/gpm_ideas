@@ -4,10 +4,10 @@
 
 var
     // Main variables
-    L_GDP_GAP          // Output Gap    
+    L_GDP_GAP          // Output Gap
     DLA_CPI         // QoQ Core Inflation
     RS                 // MP Rate
-    RR_GAP             // Real Interest Rate Gap     
+    RR_GAP             // Real Interest Rate Gap
     RES_L_GDP_GAP      // exogenous states
     RES_DLA_CPI
     RES_RS
@@ -16,8 +16,8 @@ var
 varexo
     SHK_L_GDP_GAP     // Output gap shock
     SHK_DLA_CPI
-    SHK_RS            // Foreign interest rate shock   
-;   
+    SHK_RS            // Foreign interest rate shock
+;
 
 parameters b1, b4, a1, a2, g1, g2, g3, rho_DLA_CPI, rho_L_GDP_GAP, rho_rs, rho_rs2;
 
@@ -30,21 +30,21 @@ parameters b1, b4, a1, a2, g1, g2, g3, rho_DLA_CPI, rho_L_GDP_GAP, rho_rs, rho_r
     g2 = 0.3;          // Inflation response
     g3 = 0.25;         // Output gap response
     rho_L_GDP_GAP  =0.75;
-    rho_DLA_CPI   =0.75; 
-    rho_rs      =0.8;
-    rho_rs2      =0.1;
+    rho_DLA_CPI   =0.75;
+    rho_rs      =0.0;
+    rho_rs2      =0;
 model;
-    // Aggregate demand    
+    // Aggregate demand
     L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
-    
+
 
     // Core Inflation
     DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
-    
+
 
     // Monetary policy reaction function
     RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + RES_RS;
-    
+
 
     RR_GAP = RS - DLA_CPI(+1);
     RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
@@ -54,13 +54,13 @@ model;
 end;
 
 initval;
-    L_GDP_GAP = 0;    
+    L_GDP_GAP = 0;
     DLA_CPI = 0;
     RS = 0;
     RR_GAP = 0;
     RES_L_GDP_GAP =0;
     RES_DLA_CPI =0;
-    RES_RS =0;  
+    RES_RS =0;
 end;
 
 steady;
@@ -68,7 +68,7 @@ check;
 
 // Specify the shocks
 shocks;
-    var SHK_RS = 1;    
+    var SHK_RS = 1;
 end;
 
 stoch_simul(order=1, irf=40);

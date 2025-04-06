@@ -1321,6 +1321,8 @@ class ModelSolver:
         self.stab = stab
         self.eig = eig
 
+        # Store state space representation
+        
 
         return ss
 
@@ -1381,6 +1383,23 @@ class ModelSolver:
             state_space['shock_labels']) else f"shock_{shock_idx}"
         irf_df.attrs['shock_name'] = shock_name
 
+        # ... after calculating f, p ...
+        print("--- Original Script ---")
+        print("B matrix (first 5x5 from Original logic):\n", B[:5, :5])
+        print("Norm of B_orig:", np.linalg.norm(B))
+
+
+        # # Find index for SHK_RS
+        # try:
+        #     shock_name_to_compare = 'SHK_RS'
+        #     shock_idx_orig = parser.varexo_list.index(shock_name_to_compare)
+        #     x0_orig_calc = B_orig[:, shock_idx_orig] * 1.0 # Assuming shock size 1.0
+        #     print(f"x0 for {shock_name_to_compare} (Original logic):\n", x0_orig_calc)
+        #     print(f"Index of non-zero element in x0_orig_calc: {np.argmax(np.abs(x0_orig_calc))}")
+        # except ValueError:
+        #     print(f"Shock {shock_name_to_compare} not found in original varexo_list")
+
+
         return irf_df
 
     def plot_irf(self, irf_df, variables_to_plot, shock_name, figsize=(12, 8)):
@@ -1429,12 +1448,12 @@ class ModelSolver:
         # Solution matrices (from Context 3)
         print("\nKLEIN SOLUTION MATRICES:")
         print(f"f matrix ({self.f.shape}): Policy functions mapping states to controls")
-        print("First 3 rows/columns:")
-        print(self.f[:3, :3])  # Show top-left corner
+        print("First 5 rows/columns:")
+        print(self.f[:5, :5])  # Show top-left corner
         
         print(f"\np matrix ({self.p.shape}): State transition matrix")
-        print("First 3 rows/columns:")
-        print(self.p[:3, :3])
+        print("First 5 rows/columns:")
+        print(self.p[:5, :5])
         
         # Matrix-var relationships (from Context 3)
         print("\nSTRUCTURE:")
@@ -1448,6 +1467,9 @@ class ModelSolver:
         for i, val in enumerate(np.abs(self.eig)):
             print(f"  λ_{i+1}: {val:.6e}")
 
+
+
+        
         print("="*60)
 
 def solve_quadratic_matrix_equation_doubling(A, B, C, initial_guess=None, tol=1e-14, max_iter=100, verbose=False):

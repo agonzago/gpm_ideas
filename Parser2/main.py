@@ -139,9 +139,9 @@ if __name__ == "__main__":
         # Check if files exist to avoid re-parsing if not needed
         required_files = ["model.json", "jacobian_evaluator.py", "model_structure.py"]
         if not all(os.path.exists(os.path.join(output_dir, f)) for f in required_files):
-             print("Generating model files...")
-             DynareParser.parse_and_generate_files(dynare_file, output_dir)
-             print(f"Model files generated in {output_dir}")
+            print("Generating model files...")
+            DynareParser.parse_and_generate_files(dynare_file, output_dir)
+            print(f"Model files generated in {output_dir}")
         else:
              print("Model files already exist.")
     except Exception as e:
@@ -156,8 +156,8 @@ if __name__ == "__main__":
     base_ss = solver.solve(initial_params)
 
     if base_ss is None:
-         print("Failed to solve the base model.")
-         sys.exit(1)
+        print("Failed to solve the base model.")
+        sys.exit(1)
 
 
     print("Base Model Solved. State space dimensions:")
@@ -165,30 +165,51 @@ if __name__ == "__main__":
     # Optional: Print eigenvalues
     # print(f"  Eigenvalues (abs): {[abs(e) for e in base_ss['eig']]}")
 
-    # --- Step 2b: Analyze Base Model IRFs (for comparison) ---
+        # --- Step 2b: Analyze Base Model IRFs (for comparison) ---
     print("\n--- Generating IRFs from Base Model (for comparison) ---")
-    base_shock_to_plot = 'SHK_RS' # Same shock as original example
-    # *** Use shock size 1.0 for base comparison (likely matches original script) ***
+    print("--- Refactored Code ---")
+    # Print f and p from the solved base_ss
+    f_refactored = base_ss['f']
+    p_refactored = base_ss['A'] # Since A = p
+    print("f matrix (first 5x5):\n", f_refactored[:5, :5])
+    print("p matrix (first 5x5):\n", p_refactored[:5, :5])
+    print("Norm of f:", np.linalg.norm(f_refactored))
+    print("Norm of p:", np.linalg.norm(p_refactored))
+
+    # Print B matrix from base_ss
+    B_refactored = base_ss['B']
+    print("B matrix (first 5x5):\n", B_refactored[:5, :5])
+    print("Norm of B_refactored:", np.linalg.norm(B_refactored))
+
+    base_shock_to_plot = 'SHK_RS'
     base_shock_size = 1.0
 
-    # *** Variables plotted in your original correct plot ***
-    base_variables_to_plot = [
-        "RR_GAP", "RS", "DLA_CPI", "L_GDP_GAP",
-        "RES_RS_lag", "RES_L_GDP_GAP_lag", "RES_DLA_CPI_lag"
-    ]
-    # Ensure these variables are in the base model's observable list (controls + states)
-    valid_base_vars_to_plot = [v for v in base_variables_to_plot if v in base_ss['labels']['observable_labels']]
+    # Calculate and print x0 from B_refactored
+    try:
+        shock_idx_refactored = base_ss['labels']['shock_labels'].index(base_shock_to_plot)
+        x0_refactored = B_refactored[:, shock_idx_refactored] * base_shock_size
+        print(f"x0 for {base_shock_to_plot}:\n", x0_refactored)
+        print(f"Index of non-zero element in x0_refactored: {np.argmax(np.abs(x0_refactored))}")
 
-    # Use the ModelSolver's IRF method for the base system
-    base_irf_df = solver.impulse_response(base_ss, base_shock_to_plot, shock_size=base_shock_size, periods=40)
+        base_variables_to_plot = [
+            "RR_GAP", "RS", "DLA_CPI", "L_GDP_GAP",
+            "RES_RS_lag", "RES_L_GDP_GAP_lag", "RES_DLA_CPI_lag"
+        ]
+        valid_base_vars_to_plot = [v for v in base_variables_to_plot if v in base_ss['labels']['observable_labels']]
 
-    if base_irf_df is not None:
-        print(f"\nBase Model IRF to {base_shock_to_plot} (Selected Vars):\n", base_irf_df[valid_base_vars_to_plot].head())
-        # Use the solver's plot function
-        solver.plot_irf(base_irf_df, valid_base_vars_to_plot, title_suffix="Base Model (Refactored Code)")
-    else:
-        print(f"Could not generate base IRF for {base_shock_to_plot}")
+        # Use the ModelSolver's IRF method
+        base_irf_df = solver.impulse_response(base_ss, base_shock_to_plot, shock_size=base_shock_size, periods=40)
 
+        if base_irf_df is not None:
+            print(f"\nBase Model IRF to {base_shock_to_plot} (Selected Vars):\n", base_irf_df[valid_base_vars_to_plot].head())
+            solver.plot_irf(base_irf_df, valid_base_vars_to_plot, title_suffix="Base Model (Refactored Code)")
+        else:
+            print(f"Could not generate base IRF for {base_shock_to_plot}")
+
+    except ValueError:
+         print(f"Shock {base_shock_to_plot} not found in refactored shock_labels: {base_ss['labels']['shock_labels']}")
+    except Exception as e:
+         print(f"Error during refactored base IRF generation: {e}")
 
     # --- Step 3: Define Observation Specs ---
     observed_vars = ['L_GDP_GAP', 'DLA_CPI', 'RS'] # Example observables
@@ -216,7 +237,7 @@ if __name__ == "__main__":
     # IRF to an original model shock
     shock_to_plot_orig_aug = 'SHK_RS'
     # *** Adjust shock size if needed - your plot peak was ~0.2, maybe use 0.1? Or keep 1.0? ***
-    aug_shock_size = 0.1 # Let's try 0.1 to match the scale of your first plot
+    aug_shock_size = 1.0 # Let's try 0.1 to match the scale of your first plot
     irf_orig_shock_aug = aug_ss.impulse_response(shock_to_plot_orig_aug, shock_size=aug_shock_size, periods=40)
     if irf_orig_shock_aug is not None:
         print(f"\nAugmented IRF to {shock_to_plot_orig_aug} (Observed Vars):\n", irf_orig_shock_aug.head())
@@ -241,10 +262,10 @@ if __name__ == "__main__":
 
         new_base_ss = solver.solve(new_params)
         if new_base_ss:
-             aug_ss.update_parameters(new_base_ss)
-             print("Augmented state space updated with new parameters.")
-             kalman_A, kalman_C, kalman_Q = aug_ss.get_kalman_matrices()
-             print(f"Kalman matrices ready: A={kalman_A.shape}, C={kalman_C.shape}, Q={kalman_Q.shape}")
+            aug_ss.update_parameters(new_base_ss)
+            print("Augmented state space updated with new parameters.")
+            kalman_A, kalman_C, kalman_Q = aug_ss.get_kalman_matrices()
+            print(f"Kalman matrices ready: A={kalman_A.shape}, C={kalman_C.shape}, Q={kalman_Q.shape}")
 
     except ValueError:
         print(f"Parameter '{param_name_to_change}' not found for update example.")
