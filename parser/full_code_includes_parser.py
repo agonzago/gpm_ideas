@@ -1034,16 +1034,9 @@ class DynareParser:
     def generate_model_structure(self):
         """
         Generate the structural components of the state space representation
-        that don't depend on parameter values, including parts for
-        stochastic trends.
-
-        Args:
-            self: DynareParser instance with model information
-
-        Returns:
-            structure: Dictionary with structural components for state space
+        with consistent variable ordering.
         """
-        # Get variable counts and indices
+        # Get variable counts
         n_endogenous = len(self.endogenous_states)
         n_exo_with_shocks = len(self.exo_with_shocks)
         n_exo_without_shocks = len(self.exo_without_shocks)
@@ -1051,56 +1044,54 @@ class DynareParser:
         n_shocks = len(self.varexo_list)
         n_exo_states = n_exo_with_shocks + n_exo_without_shocks
         n_states = n_endogenous + n_exo_states
-
-        # Correctly define n_observables based on observed variables
-        n_observables = len(self.obs_vars) if hasattr(self, 'obs_vars') and self.obs_vars else 0
-
-        # Create indices dictionary with corrected dimensions
+        
+        # Create indices dictionary
         indices = {
             'n_endogenous': n_endogenous,
             'n_exo_states': n_exo_states,
             'n_controls': n_controls,
             'n_shocks': n_shocks,
             'n_states': n_states,
-            'n_observables': n_observables
+            'n_observables': n_controls + n_states
         }
         
         # Create shock selection matrix R
         R = np.zeros((n_exo_states, n_shocks))
-
-        # Fill R matrix using shock_to_state_map
+        
+        # Map shocks to exogenous states using the state_to_shock_map
+        # First create inverse mapping from shock to exo state position
+        shock_to_exo_pos = {}
+        for exo_pos, state_var in enumerate(self.exo_with_shocks):
+            if state_var in self.state_to_shock_map:
+                shock_name = self.state_to_shock_map[state_var]
+                shock_to_exo_pos[shock_name] = exo_pos
+        
+        # Fill R matrix using the mapping
         for shock_idx, shock_name in enumerate(self.varexo_list):
-            if shock_name in self.shock_to_state_map:
-                state_var = self.shock_to_state_map[shock_name]
-                try:
-                    # Find position in full state list
-                    state_full_idx = self.state_variables.index(state_var)
-                    # Calculate position in exogenous state vector
-                    exo_state_idx = state_full_idx - n_endogenous
-                    if 0 <= exo_state_idx < n_exo_states:
-                        R[exo_state_idx, shock_idx] = 1.0
-                except ValueError:
-                    print(f"Warning: State variable {state_var} not found in state_variables")
-
-        # Create B matrix structure (shock impacts on states)
+            if shock_name in shock_to_exo_pos:
+                exo_state_idx = shock_to_exo_pos[shock_name]
+                R[exo_state_idx, shock_idx] = 1.0
+        
+        # Create B matrix structure
         B_structure = np.zeros((n_states, n_shocks))
         B_structure[n_endogenous:, :] = R
-
-        # Create C matrix structure with correct dimensions
-        C_structure = np.zeros((n_observables, n_states))
-
-        # D matrix (direct shock impact on observables)
-        D = np.zeros((n_observables, n_shocks))
-
-        # Create labels for the state space
+        
+        # Create C matrix structure
+        C_structure = np.zeros((indices['n_observables'], n_states))
+        
+        # States mapped one-to-one in C matrix
+        C_structure[n_controls:, :] = np.eye(n_states)
+        
+        # D matrix
+        D = np.zeros((indices['n_observables'], n_shocks))
+        
+        # Create labels with consistent ordering
         labels = {
             'state_labels': self.state_variables,
             'observable_labels': self.control_variables + self.state_variables,
-            'shock_labels': self.varexo_list,
-            'param_labels': list(self.parameters.keys())
+            'shock_labels': self.varexo_list
         }
-
-        # Initialize structure dictionary
+        
         structure = {
             'indices': indices,
             'R': R,
@@ -1109,88 +1100,87 @@ class DynareParser:
             'D': D,
             'labels': labels
         }
-
-        # Only process trend and observation mapping if we have observed variables and model specs
+        
+        # Add trend structures if needed
         if hasattr(self, 'obs_vars') and self.obs_vars and hasattr(self, 'model_specs'):
-            # First pass: Count total trend states
-            n_trend_states = 0
-            for obs_var in self.obs_vars:
-                trend_type = self.model_specs[obs_var]['trend']
-                if trend_type == 'random_walk':
-                    n_trend_states += 1
-                elif trend_type == 'second_difference':
-                    n_trend_states += 3
-                elif trend_type == 'constant_mean':
-                    n_trend_states += 1
-            
-            # If we have trend states, create the trend matrices
-            if n_trend_states > 0:
-                # Create matrices with correct dimensions
-                T_trend_structure = np.zeros((n_trend_states, n_trend_states))
-                R_trend_structure = np.eye(n_trend_states)  # Identity for direct shock mapping
-                C_trend_structure = np.zeros((n_observables, n_trend_states))
-                
-                # Second pass: Fill in structures
-                trend_pos = 0
-                for i, obs_var in enumerate(self.obs_vars):
-                    trend_type = self.model_specs[obs_var]['trend']
-                    
-                    if trend_type == 'random_walk':
-                        # Level maps directly to observation
-                        C_trend_structure[i, trend_pos] = 1.0
-                        # Level follows random walk
-                        T_trend_structure[trend_pos, trend_pos] = 1.0
-                        trend_pos += 1
-                        
-                    elif trend_type == 'second_difference':
-                        # Level maps directly to observation
-                        C_trend_structure[i, trend_pos] = 1.0
-                        # Set transition dynamics
-                        T_trend_structure[trend_pos, trend_pos] = 1.0  # Level on itself
-                        T_trend_structure[trend_pos, trend_pos+1] = 1.0  # Level on slope
-                        T_trend_structure[trend_pos+1, trend_pos+1] = 1.0  # Slope on itself
-                        T_trend_structure[trend_pos+1, trend_pos+2] = 1.0  # Slope on curvature
-                        T_trend_structure[trend_pos+2, trend_pos+2] = 1.0  # Curvature on itself
-                        trend_pos += 3
-                        
-                    elif trend_type == 'constant_mean':
-                        # Mean maps directly to observation
-                        C_trend_structure[i, trend_pos] = 1.0
-                        # Mean follows AR(1) with coefficient near 1
-                        T_trend_structure[trend_pos, trend_pos] = 1.0
-                        trend_pos += 1
-                
-                # Add trend structures to output
-                structure['T_trend_structure'] = T_trend_structure.tolist()
-                structure['R_trend_structure'] = R_trend_structure.tolist()
-                structure['C_trend_structure'] = C_trend_structure.tolist()
-                structure['n_trend_states'] = n_trend_states
-            
-            # Create observation mapping
-            obs_mapping = {}
-            for i, obs_var in enumerate(self.obs_vars):
-                cycle_var = self.model_specs[obs_var]['cycle']
-                if cycle_var in self.control_variables:
-                    obs_mapping[obs_var] = {
-                        'type': 'control',
-                        'index': self.control_variables.index(cycle_var),
-                        'obs_index': i
-                    }
-                elif cycle_var in self.state_variables:
-                    obs_mapping[obs_var] = {
-                        'type': 'state',
-                        'index': self.state_variables.index(cycle_var),
-                        'obs_index': i
-                    }
-                    # Update C_structure for direct state observations
-                    C_structure[i, self.state_variables.index(cycle_var)] = 1.0
-                else:
-                    print(f"Warning: Cycle variable {cycle_var} for {obs_var} not found in model variables")
-            
-            # Add observation mapping to structure
-            structure['obs_mapping'] = obs_mapping
-
+            # Build trend structures (implementation from previous function)
+            structure = self._add_trend_structures(structure)
+        
         return structure
+
+    def _add_trend_structures(self, structure):
+        """Helper method to build trend structures"""
+        n_observables = len(self.obs_vars)
+        
+        # Count trend states
+        n_trend_states = 0
+        for obs_var in self.obs_vars:
+            trend_type = self.model_specs[obs_var]['trend']
+            if trend_type == 'random_walk':
+                n_trend_states += 1
+            elif trend_type == 'second_difference':
+                n_trend_states += 3
+            elif trend_type == 'constant_mean':
+                n_trend_states += 1
+        
+        # Create trend matrices
+        if n_trend_states > 0:
+            T_trend = np.zeros((n_trend_states, n_trend_states))
+            R_trend = np.eye(n_trend_states)
+            C_trend = np.zeros((n_observables, n_trend_states))
+            
+            trend_pos = 0
+            for i, obs_var in enumerate(self.obs_vars):
+                trend_type = self.model_specs[obs_var]['trend']
+                
+                if trend_type == 'random_walk':
+                    C_trend[i, trend_pos] = 1.0
+                    T_trend[trend_pos, trend_pos] = 1.0
+                    trend_pos += 1
+                elif trend_type == 'second_difference':
+                    C_trend[i, trend_pos] = 1.0
+                    T_trend[trend_pos, trend_pos] = 1.0
+                    T_trend[trend_pos, trend_pos+1] = 1.0
+                    T_trend[trend_pos+1, trend_pos+1] = 1.0
+                    T_trend[trend_pos+1, trend_pos+2] = 1.0
+                    T_trend[trend_pos+2, trend_pos+2] = 1.0
+                    trend_pos += 3
+                elif trend_type == 'constant_mean':
+                    C_trend[i, trend_pos] = 1.0
+                    T_trend[trend_pos, trend_pos] = 1.0
+                    trend_pos += 1
+            
+            structure['T_trend_structure'] = T_trend.tolist()
+            structure['R_trend_structure'] = R_trend.tolist()
+            structure['C_trend_structure'] = C_trend.tolist()
+            structure['n_trend_states'] = n_trend_states
+            
+            # Add observation mapping
+            structure['obs_mapping'] = self._create_obs_mapping()
+        
+        return structure
+
+    def _create_obs_mapping(self):
+        """Helper method to create observation mapping"""
+        obs_mapping = {}
+        
+        for i, obs_var in enumerate(self.obs_vars):
+            cycle_var = self.model_specs[obs_var]['cycle']
+            
+            if cycle_var in self.control_variables:
+                obs_mapping[obs_var] = {
+                    'type': 'control',
+                    'index': self.control_variables.index(cycle_var),
+                    'obs_index': i
+                }
+            elif cycle_var in self.state_variables:
+                obs_mapping[obs_var] = {
+                    'type': 'state',
+                    'index': self.state_variables.index(cycle_var),
+                    'obs_index': i
+                }
+        
+        return obs_mapping
     
 
 import numpy as np
@@ -1508,14 +1498,7 @@ class ModelSolver:
     
     def get_model_components(self, theta: np.ndarray = None) -> Dict[str, Any]:
         """
-        Returns core model components needed by AugmentedStateSpace.
-        
-        Args:
-            theta: Optional parameter vector to solve model first.
-                  If None, uses previously solved model.
-        
-        Returns:
-            dict: Dictionary containing model components
+        Returns core model components needed by AugmentedStateSpace with consistent ordering.
         """
         # Solve model if theta provided and model not already solved
         if theta is not None:
@@ -1526,20 +1509,27 @@ class ModelSolver:
         if self.f is None or self.p is None:
             raise ValueError("Model has not been solved. Call solve_model first.")
         
-        # Return components needed by AugmentedStateSpace
+        # Ensure var_names follows the same order used in Jacobian computation
+        # The order should be: state_variables followed by control_variables
+        var_names = self.model['state_variables'] + self.model['control_variables']
+        
+        # Ensure shock_names follows the order from the parser
+        shock_names = self.model['shocks']
+        
+        # Return components with consistent ordering
         return {
-            "f": self.f,                            # Policy function
-            "p": self.p,                            # State transition
-            "state_transition": self.state_transition,  # Same as p (alias)
-            "impulse_matrix": self.impulse_matrix,  # B matrix
-            "QQ": getattr(self, 'QQ', np.eye(self.indices['n_shocks'])),  # Shock covariance
-            "var_names": self.var_names,            # Variable names
-            "shock_names": self.shock_names,        # Shock names
-            "param_names": self.param_names,        # Parameter names
-            "n_states": self.indices['n_states'],   # Number of states
-            "n_controls": self.indices['n_controls'],  # Number of controls
-            "n_shocks": self.indices['n_shocks'],   # Number of shocks
-            "n_endogenous": self.indices['n_endogenous']  # Number of endogenous states
+            "f": self.f,
+            "p": self.p,
+            "state_transition": self.state_transition,
+            "impulse_matrix": self.impulse_matrix,
+            "QQ": getattr(self, 'QQ', np.eye(self.indices['n_shocks'])),
+            "var_names": var_names,
+            "shock_names": shock_names,
+            "param_names": self.model['parameters'],
+            "n_states": self.indices['n_states'],
+            "n_controls": self.indices['n_controls'],
+            "n_shocks": self.indices['n_shocks'],
+            "n_endogenous": self.indices['n_endogenous']
         }
 
 
@@ -1690,14 +1680,11 @@ class DataProcessor:
         return processed_results
 
 
-import numpy as np
-from scipy import linalg
-from typing import Dict, List, Optional, Tuple, Any
-
 class AugmentedStateSpace:
     def __init__(self, model_solver, model_specs, param_dict):
         """
-        Initializes the AugmentedStateSpace class.
+        Initializes the AugmentedStateSpace class with the DSGE model solution and 
+        creates an augmented state space representation with trend components.
 
         Args:
             model_solver: The ModelSolver instance with solved DSGE model
@@ -1723,6 +1710,7 @@ class AugmentedStateSpace:
         self.trend_variables = list(model_specs.keys())
         self.trend_types = {}
         self.n_trend_states = 0
+        self.n_trend_shocks = 0
         self.trend_shock_names = {}
 
         # Constants for trend types
@@ -1758,7 +1746,8 @@ class AugmentedStateSpace:
 
     def _process_trend_specifications(self):
         """
-        Processes the trend specifications from the model_specs dictionary.
+        Processes the trend specifications from the model_specs dictionary and
+        counts the number of trend states needed.
         """
         for obs_var, spec in self.model_specs.items():
             trend_type_str = spec.get('trend', 'none')
@@ -1770,15 +1759,17 @@ class AugmentedStateSpace:
             if trend_type_str == "random_walk":
                 trend_type = self.TREND_RW
                 self.n_trend_states += 1
+                self.n_trend_shocks += 1
             elif trend_type_str == "second_difference":
                 trend_type = self.TREND_SECOND_DIFF
-                self.n_trend_states += 2  # level and growth
+                self.n_trend_states += 2  # level and growth states
+                self.n_trend_shocks += 2  # level and growth shocks
             elif trend_type_str == "constant_mean":
                 trend_type = self.TREND_CONSTANT
-                self.n_trend_states += 1  # The trend has a state but no dynamics
+                self.n_trend_states += 1
+                self.n_trend_shocks += 1
             elif trend_type_str == "none":
                 trend_type = self.TREND_NONE
-                self.n_trend_states += 0
             else:
                 raise ValueError(f"Invalid trend type: {trend_type_str} for variable {obs_var}")
 
@@ -1791,23 +1782,24 @@ class AugmentedStateSpace:
         Creates constant parts of A_trend and B_trend matrices based on trend specifications.
         """
         n_trend_states = self.n_trend_states
-        n_trend_variables = len(self.trend_variables)
+        n_trend_shocks = self.n_trend_shocks
         
+        # Create matrices with correct dimensions
         self.constant_A_trend = np.zeros((n_trend_states, n_trend_states))
-        self.constant_B_trend = np.zeros((n_trend_states, n_trend_variables))
+        self.constant_B_trend = np.zeros((n_trend_states, n_trend_shocks))
 
         trend_state_index = 0
-        shock_index = 0
+        trend_shock_index = 0
 
-        for variable in self.trend_variables:
-            trend_type = self.trend_types[variable]
+        for obs_var in self.trend_variables:
+            trend_type = self.trend_types[obs_var]
 
             if trend_type == self.TREND_RW:
                 # Random walk: level_t = level_{t-1} + shock
                 self.constant_A_trend[trend_state_index, trend_state_index] = 1.0
-                self.constant_B_trend[trend_state_index, shock_index] = 1.0
+                self.constant_B_trend[trend_state_index, trend_shock_index] = 1.0
                 trend_state_index += 1
-                shock_index += 1
+                trend_shock_index += 1
                 
             elif trend_type == self.TREND_SECOND_DIFF:
                 # Second difference: 
@@ -1817,121 +1809,136 @@ class AugmentedStateSpace:
                 # Level transition
                 self.constant_A_trend[trend_state_index, trend_state_index] = 1.0  # level to level
                 self.constant_A_trend[trend_state_index, trend_state_index + 1] = 1.0  # growth to level
-                self.constant_B_trend[trend_state_index, shock_index] = 1.0  # shock to level
+                self.constant_B_trend[trend_state_index, trend_shock_index] = 1.0  # shock to level
                 
                 # Growth transition
                 self.constant_A_trend[trend_state_index + 1, trend_state_index + 1] = 1.0  # growth to growth
-                self.constant_B_trend[trend_state_index + 1, shock_index + 1] = 1.0  # shock to growth
+                self.constant_B_trend[trend_state_index + 1, trend_shock_index + 1] = 1.0  # shock to growth
                 
                 trend_state_index += 2
-                shock_index += 2
+                trend_shock_index += 2
                 
             elif trend_type == self.TREND_CONSTANT:
                 # Constant mean: mean_t = mean_{t-1} + small_shock
                 self.constant_A_trend[trend_state_index, trend_state_index] = 1.0
-                self.constant_B_trend[trend_state_index, shock_index] = 0.01  # Very small effect
+                self.constant_B_trend[trend_state_index, trend_shock_index] = 0.01  # Very small effect
                 trend_state_index += 1
-                shock_index += 1
-                
-            elif trend_type == self.TREND_NONE:
-                # No trend state, but still have a shock index
-                shock_index += 1
+                trend_shock_index += 1
 
     def _build_augmented_state_space(self):
         """
         Builds the augmented state-space matrices (A_aug, B_aug, C_aug, Q_aug).
         """
-        # 1. Get A and B from the DSGE solution
+        # 1. Get A and B matrices from the DSGE solution
         self.A = self.model_components['state_transition']  # P matrix from Klein
         self.B = self.model_components['impulse_matrix']    # DSGE impulse matrix
+        
+        # Print diagnostics for debugging
+        print(f"DSGE A matrix shape: {self.A.shape}")
+        print(f"DSGE B matrix shape: {self.B.shape}")
+        print(f"Trend A matrix shape: {self.constant_A_trend.shape}")
+        print(f"Trend B matrix shape: {self.constant_B_trend.shape}")
 
-        # 2. Create augmented A and B matrices
-        self.A_aug, self.B_aug = self._create_augmented_AB()
-
-        # 3. Create the C_aug matrix (observation matrix)
+        # 2. Create augmented A, B, C matrices
+        self.A_aug = self._create_A_aug()
+        self.B_aug = self._create_B_aug()
         self.C_aug = self._create_C_aug()
 
-        # 4. Create the selection matrix H (identity if all variables observed)
+        # 3. Create the selection matrix H (identity if all variables observed)
         self.H = np.eye(self.n_observables)  # Simple case: all specified variables observed
 
-        # 5. Create the augmented Q matrix (shock covariances)
+        # 4. Create the augmented Q matrix (shock covariances)
         self.Q_aug = self._create_augmented_Q()
 
-    def _create_augmented_AB(self):
+    def _create_A_aug(self):
         """
-        Creates the augmented A and B matrices.
+        Creates the augmented state transition matrix A_aug.
         
+        Following the specification:
+        A_aug = [A  0]
+                [0  A_trend]
+                
         Returns:
             A_aug: Augmented state transition matrix
-            B_aug: Augmented shock selection matrix
+        """
+        n_states = self.n_states
+        n_trend_states = self.n_trend_states
+        
+        # Create the block diagonal matrix
+        A_aug = np.zeros((n_states + n_trend_states, n_states + n_trend_states))
+        
+        # Add DSGE state transition to upper-left block
+        A_aug[:n_states, :n_states] = self.A
+        
+        # Add trend transition to lower-right block
+        A_aug[n_states:, n_states:] = self.constant_A_trend
+        
+        return A_aug
+
+    def _create_B_aug(self):
+        """
+        Creates the augmented shock selection matrix B_aug.
         """
         n_states = self.n_states
         n_trend_states = self.n_trend_states
         n_shocks = self.n_shocks
-        n_trend_variables = len(self.trend_variables)
-
-        # Create augmented state transition matrix
-        A_aug = np.zeros((n_states + n_trend_states, n_states + n_trend_states))
-        # DSGE state transition
-        A_aug[:n_states, :n_states] = self.A
-        # Trend state transition
-        A_aug[n_states:, n_states:] = self.constant_A_trend
-
-        # Create augmented shock selection matrix
-        B_aug = np.zeros((n_states + n_trend_states, n_shocks + n_trend_variables))
-        # DSGE shock selection
+        n_trend_shocks = self.n_trend_shocks
+        
+        # Create the block diagonal matrix
+        B_aug = np.zeros((n_states + n_trend_states, n_shocks + n_trend_shocks))
+        
+        # Add DSGE shock selection to upper-left block
+        # The model_solver should have already set up the correct shock ordering
         B_aug[:n_states, :n_shocks] = self.B
-        # Trend shock selection
+        
+        # Add trend shock selection to lower-right block
         B_aug[n_states:, n_shocks:] = self.constant_B_trend
-
-        return A_aug, B_aug
-
+        
+        return B_aug
+        
     def _create_C_aug(self):
         """
-        Creates the augmented observation matrix C_aug.
-        
-        Returns:
-            C_aug: Augmented observation matrix
+        Creates the augmented observation matrix C_aug using correct variable ordering.
         """
         n_observable = self.n_observables
         n_states = self.n_states
         n_trend_states = self.n_trend_states
-        f = self.model_components['f']  # Policy function from Klein
-
+        
+        # Get the policy function matrix F from Klein solution
+        F = self.model_components['f']
+        
+        # Get actual variable ordering from model JSON
+        state_vars = self.model_solver.model.get('state_variables', [])
+        control_vars = self.model_solver.model.get('control_variables', [])
+        
+        # Create augmented observation matrix
         C_aug = np.zeros((n_observable, n_states + n_trend_states))
-
+        
+        # Track current trend state index
         trend_state_index = n_states
         
+        # Process each observable variable
         for i, obs_var in enumerate(self.trend_variables):
-            # Get the corresponding model variable (cycle component)
             cycle_variable = self.model_specs[obs_var]['cycle']
-
-            # Find index of cycle variable in model's variables
-            try:
-                var_index = self.model_components['var_names'].index(cycle_variable)
-                
-                # Check if it's a control or state variable
-                if var_index < n_states:  # State variable
-                    C_aug[i, var_index] = 1.0  # Direct mapping
-                else:  # Control variable
-                    # Apply policy function for control variables
-                    control_idx = var_index - n_states
-                    C_aug[i, :n_states] = f[control_idx, :]
-            except ValueError:
-                print(f"Warning: Variable {cycle_variable} not found in model variables")
             
-            # Add trend component based on trend type
+            if cycle_variable in state_vars:
+                state_idx = state_vars.index(cycle_variable)
+                C_aug[i, state_idx] = 1.0
+            elif cycle_variable in control_vars:
+                control_idx = control_vars.index(cycle_variable)
+                C_aug[i, :n_states] = F[control_idx, :]
+            else:
+                raise ValueError(f"Cycle variable {cycle_variable} not found in model variables")
+            
+            # Add trend component
             trend_type = self.trend_types[obs_var]
-            
             if trend_type == self.TREND_RW or trend_type == self.TREND_CONSTANT:
-                # Direct effect from trend level
                 C_aug[i, trend_state_index] = 1.0
                 trend_state_index += 1
             elif trend_type == self.TREND_SECOND_DIFF:
-                # Only level affects observation
                 C_aug[i, trend_state_index] = 1.0
-                trend_state_index += 2  # Skip growth state in obs matrix
-
+                trend_state_index += 2
+        
         return C_aug
 
     def _create_augmented_Q(self):
@@ -1942,8 +1949,8 @@ class AugmentedStateSpace:
             Q_aug: Augmented shock covariance matrix
         """
         n_shocks = self.n_shocks
-        n_trend_variables = len(self.trend_variables)
-        n_aug_shocks = n_shocks + n_trend_variables
+        n_trend_shocks = self.n_trend_shocks
+        n_aug_shocks = n_shocks + n_trend_shocks
 
         Q_aug = np.zeros((n_aug_shocks, n_aug_shocks))
 
@@ -1957,19 +1964,34 @@ class AugmentedStateSpace:
             dsge_shock_stds = self.theta[dsge_shock_stds_start:dsge_shock_stds_end]
             Q_aug[:n_shocks, :n_shocks] = np.diag(dsge_shock_stds**2)
 
-        # Trend shock covariances
-        for i, obs_var in enumerate(self.trend_variables):
-            # Get parameter name for trend shock std dev
-            param_name = f"{obs_var}_level_shock_std"
+        # Trend shock variances - match them in order with the B_trend matrix
+        trend_shock_index = 0
+        for obs_var in self.trend_variables:
+            trend_type = self.trend_types[obs_var]
             
-            if param_name in self.theta_param_names:
-                param_index = self.theta_param_names.index(param_name)
-                # Variance = std_dev^2
-                Q_aug[n_shocks + i, n_shocks + i] = self.theta[param_index]**2
+            # Level shock
+            level_param_name = f"{obs_var}_level_shock_std"
+            if level_param_name in self.theta_param_names:
+                param_index = self.theta_param_names.index(level_param_name)
+                Q_aug[n_shocks + trend_shock_index, n_shocks + trend_shock_index] = self.theta[param_index]**2
             else:
-                # Use small default value if parameter not found
-                Q_aug[n_shocks + i, n_shocks + i] = 0.01
-                print(f"Warning: Trend shock parameter '{param_name}' not found. Using default.")
+                #print(f"Warning: Trend shock parameter '{level_param_name}' not found. Using default.")
+                sys.stderr.write(f"Warning: Trend shock parameter '{level_param_name}' not found.\n")
+                sys.exit(1)
+
+            trend_shock_index += 1
+            
+            # Growth shock for second difference trends
+            if trend_type == self.TREND_SECOND_DIFF:
+                growth_param_name = f"{obs_var}_slope_shock_std"
+                if growth_param_name in self.theta_param_names:
+                    param_index = self.theta_param_names.index(growth_param_name)
+                    Q_aug[n_shocks + trend_shock_index, n_shocks + trend_shock_index] = self.theta[param_index]**2
+                else:
+                    Q_aug[n_shocks + trend_shock_index, n_shocks + trend_shock_index] = 0.01
+                    print(f"Warning: Trend shock parameter '{growth_param_name}' not found. Using default.")
+                
+                trend_shock_index += 1
 
         return Q_aug
 
@@ -1990,64 +2012,98 @@ class AugmentedStateSpace:
             'n_trend_states': self.n_trend_states,
             'n_total_states': self.n_states + self.n_trend_states,
             'n_shocks': self.n_shocks,
-            'n_trend_shocks': len(self.trend_variables),
+            'n_trend_shocks': self.n_trend_shocks,
             'n_observables': self.n_observables
         }
 
-    def compute_irfs(self, shock_name, periods=40):
+    def compute_irfs(self, shock_name, periods=40, shock_size=1.0):
         """
         Computes the impulse response functions (IRFs) for a given shock.
 
         Args:
             shock_name: The name of the shock to compute the IRF for
             periods: The number of periods for the IRF
+            shock_size: Size of the shock in standard deviations
 
         Returns:
-            dict: IRFs for each observable variable
+            tuple: (irfs, state_irfs) with impulse responses for observables and states
         """
-        # Get shock index
+        # Get shock index - FIXED THIS PART FOR MORE ACCURATE IRFs
+        shock_index = None
+        
+        # Check if it's a DSGE core shock
         if shock_name in self.model_components['shock_names']:
-            # DSGE shock
             shock_index = self.model_components['shock_names'].index(shock_name)
-        elif shock_name in self.trend_shock_names.values():
-            # Trend shock
-            for i, (obs_var, trend_shock) in enumerate(self.trend_shock_names.items()):
+            shock_is_dsge = True
+            print(f"Found DSGE shock '{shock_name}' at index {shock_index}")
+        else:
+            # Check if it's a trend shock
+            for i, obs_var in enumerate(self.trend_variables):
+                trend_shock = f"{obs_var}_level_shock"
                 if trend_shock == shock_name:
                     shock_index = self.n_shocks + i
+                    shock_is_dsge = False
+                    print(f"Found trend shock '{shock_name}' at index {shock_index}")
                     break
-        else:
+                
+                # Check for growth shock in second difference trends
+                if self.trend_types[obs_var] == self.TREND_SECOND_DIFF:
+                    growth_shock = f"{obs_var}_growth_shock"
+                    if growth_shock == shock_name:
+                        # Need to calculate correct index based on previous shocks
+                        shock_is_dsge = False
+                        trend_shock_counter = 0
+                        for j, other_var in enumerate(self.trend_variables):
+                            if j < i:
+                                trend_shock_counter += 1
+                                if self.trend_types[other_var] == self.TREND_SECOND_DIFF:
+                                    trend_shock_counter += 1
+                            else:
+                                break
+                        shock_index = self.n_shocks + trend_shock_counter  # Skip level shock
+                        print(f"Found trend growth shock '{shock_name}' at index {shock_index}")
+                        break
+        
+        if shock_index is None:
             raise ValueError(f"Shock '{shock_name}' not found in model")
 
         # Initialize the state vector
         x = np.zeros(self.A_aug.shape[0])
 
-        # Create a shock vector
+        # Apply the shock - correct way with shock_size
         epsilon = np.zeros(self.B_aug.shape[1])
-        epsilon[shock_index] = 1.0  # 1 standard deviation shock
-
+        epsilon[shock_index] = shock_size
+        
+        # First state is B*ε
+        x = self.B_aug @ epsilon
+        
+        # Store all observables and states
+        n_total_states = self.n_states + self.n_trend_states
+        obs_irfs = np.zeros((periods, self.n_observables))
+        state_irfs = np.zeros((periods, n_total_states))
+        
+        # Record the initial response
+        y = self.C_aug @ x
+        obs_irfs[0, :] = y
+        state_irfs[0, :] = x
+        
         # Simulate the model forward
-        irfs = {var: np.zeros(periods) for var in self.trend_variables}
-        
-        # Store all state variables too (for debugging)
-        state_irfs = np.zeros((periods, len(x)))
-        
-        for t in range(periods):
-            # Store the observable variables
-            y = self.C_aug @ x
-            for i, var in enumerate(self.trend_variables):
-                irfs[var][t] = y[i]
+        for t in range(1, periods):
+            # Update the state vector without additional shocks
+            x = self.A_aug @ x
             
-            # Store all states
+            # Store states
             state_irfs[t, :] = x
             
-            # Update the state vector
-            x = self.A_aug @ x + self.B_aug @ epsilon
-            
-            # Reset the shock after the first period
-            if t == 0:
-                epsilon[:] = 0
+            # Compute observed variables
+            y = self.C_aug @ x
+            obs_irfs[t, :] = y
 
-        # Convert to dictionary of time series
+        # Convert to dictionary for observables
+        irfs = {}
+        for i, var in enumerate(self.trend_variables):
+            irfs[var] = obs_irfs[:, i]
+
         return irfs, state_irfs
 
     def kalman_filter(self, data):
@@ -2068,10 +2124,13 @@ class AugmentedStateSpace:
             # Add batch dimension (simdkalman expects [batch, time, obs])
             data = data.reshape(1, data.shape[0], data.shape[1])
         
+        # Process noise covariance
+        Q_state = self.B_aug @ self.Q_aug @ self.B_aug.T
+        
         # Create Kalman filter with our state space
         kf = simdkalman.KalmanFilter(
             state_transition=self.A_aug,
-            process_noise=self.B_aug @ self.Q_aug @ self.B_aug.T,
+            process_noise=Q_state,
             observation_model=self.C_aug,
             observation_noise=np.zeros((self.n_observables, self.n_observables))  # Assuming no measurement error
         )
@@ -2094,7 +2153,6 @@ class AugmentedStateSpace:
             'smoothed_covs': smoothed_covs,
             'raw_results': results
         }
-
 
 def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
     """
@@ -2324,71 +2382,71 @@ if __name__ == "__main__":
     # 4. Create augmented state space
     augmented_model = AugmentedStateSpace(solver, model_specs, initial_param_dict)
     
-    # 5. Compute IRFs
-    shock_name = 'SHK_RS'  # This should match one in solver.shock_names
-    irf_results, state_irfs = augmented_model.compute_irfs(
-        shock_name=shock_name,
-        periods=40
-    )
+    # # 5. Compute IRFs
+    # shock_name = 'SHK_RS'  # This should match one in solver.shock_names
+    # irf_results, state_irfs = augmented_model.compute_irfs(
+    #     shock_name=shock_name,
+    #     periods=40
+    # )
     
-    # Plot IRFs
-    plt.figure(figsize=(15, 10))
-    for i, (var, values) in enumerate(irf_results.items()):
-        plt.subplot(2, 2, i+1)
-        plt.plot(values)
-        plt.title(f"Response of {var} to {shock_name} shock")
-        plt.grid(True)
-        plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(f"IRF_{shock_name}.png")
-    plt.close()
+    # # Plot IRFs
+    # plt.figure(figsize=(15, 10))
+    # for i, (var, values) in enumerate(irf_results.items()):
+    #     plt.subplot(2, 2, i+1)
+    #     plt.plot(values)
+    #     plt.title(f"Response of {var} to {shock_name} shock")
+    #     plt.grid(True)
+    #     plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
+    # plt.tight_layout()
+    # plt.savefig(f"IRF_{shock_name}.png")
+    # plt.close()
+    # plt.show()
+    # # 6. Run Kalman filter on the data
+#     filter_results = augmented_model.kalman_filter(data_for_filter)
     
-    # 6. Run Kalman filter on the data
-    filter_results = augmented_model.kalman_filter(data_for_filter)
+#     # Create a DataFrame with filtered/smoothed states
+#     smoothed_states_df = pd.DataFrame(
+#         filter_results['smoothed_states'], 
+#         index=dates,
+#         columns=[f"State_{i}" for i in range(filter_results['smoothed_states'].shape[1])]
+#     )
     
-    # Create a DataFrame with filtered/smoothed states
-    smoothed_states_df = pd.DataFrame(
-        filter_results['smoothed_states'], 
-        index=dates,
-        columns=[f"State_{i}" for i in range(filter_results['smoothed_states'].shape[1])]
-    )
+#     # Extract trend states for reporting
+#     trend_states_df = pd.DataFrame(
+#         filter_results['trend_states'],
+#         index=dates,
+#         columns=[f"{var}_trend" for var in observed_variables]
+#     )
     
-    # Extract trend states for reporting
-    trend_states_df = pd.DataFrame(
-        filter_results['trend_states'],
-        index=dates,
-        columns=[f"{var}_trend" for var in observed_variables]
-    )
-    
-    # Plot trend components
-    plt.figure(figsize=(15, 10))
-    for i, var in enumerate(observed_variables):
-        plt.subplot(len(observed_variables), 1, i+1)
+#     # Plot trend components
+#     plt.figure(figsize=(15, 10))
+#     for i, var in enumerate(observed_variables):
+#         plt.subplot(len(observed_variables), 1, i+1)
         
-        # Plot observed data
-        plt.plot(dates, us_data[var], 'b-', label=f"Observed {var}")
+#         # Plot observed data
+#         plt.plot(dates, us_data[var], 'b-', label=f"Observed {var}")
         
-        # Plot trend component
-        plt.plot(dates, trend_states_df[f"{var}_trend"], 'r-', label=f"Trend {var}")
+#         # Plot trend component
+#         plt.plot(dates, trend_states_df[f"{var}_trend"], 'r-', label=f"Trend {var}")
         
-        plt.title(f"Decomposition of {var}")
-        plt.legend()
-        plt.grid(True)
+#         plt.title(f"Decomposition of {var}")
+#         plt.legend()
+#         plt.grid(True)
     
-    plt.tight_layout()
-    plt.savefig("trend_decomposition.png")
-    plt.close()
+#     plt.tight_layout()
+#     plt.savefig("trend_decomposition.png")
+#     plt.close()
     
-    print("Analysis complete. Check the output plots.")
+#     print("Analysis complete. Check the output plots.")
 
 
 
 
-# def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
-#     """
-#     Solves linear dynamic models with the form of:
+# # def klein(a=None, b=None, n_states=None, eigenvalue_warnings=True):
+# #     """
+# #     Solves linear dynamic models with the form of:
     
-#     a*Et[x(t+1)] = b*x(t)       
+# #     a*Et[x(t+1)] = b*x(t)       
             
 #     [s(t); u(t)] where s(t) is a vector of predetermined (state) variables and u(t) is
 #     a vector of nonpredetermined costate variables.

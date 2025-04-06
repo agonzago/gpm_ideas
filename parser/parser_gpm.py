@@ -2127,7 +2127,8 @@ def create_state_space_representation(parser, f, p):
     
     # First rows: controls as functions of states (via policy function F)
     C[:n_controls, :] = f
-    
+    print(f"f matrix:")
+    print(f)
     # Next rows: states mapped one-to-one (identity matrix)
     C[n_controls:, :] = np.eye(n_states)
     

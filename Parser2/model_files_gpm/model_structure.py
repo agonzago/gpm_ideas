@@ -2,12 +2,12 @@ import numpy as np
 
 indices = {'n_endogenous': 3, 'n_exo_states': 4, 'n_controls': 10, 'n_shocks': 3, 'n_states': 7, 'n_observables': 17}
 
-R = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+R = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]])
 
-B_structure = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+B_structure = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]])
 
 C_structure = np.array([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]])
 
 D = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
 
-labels = {'state_labels': ['L_GDP_GAP_lag', 'DLA_CPI_lag', 'RS_lag', 'RES_L_GDP_GAP_lag', 'RES_RS_lag', 'RES_DLA_CPI_lag', 'RES_RS_lag2'], 'observable_labels': ['RR_GAP', 'DLA_CPI_lead3', 'DLA_CPI', 'RES_L_GDP_GAP', 'DLA_CPI_lead1', 'L_GDP_GAP', 'RES_RS', 'RES_DLA_CPI', 'DLA_CPI_lead2', 'RS', 'L_GDP_GAP_lag', 'DLA_CPI_lag', 'RS_lag', 'RES_L_GDP_GAP_lag', 'RES_RS_lag', 'RES_DLA_CPI_lag', 'RES_RS_lag2'], 'shock_labels': ['SHK_L_GDP_GAP', 'SHK_DLA_CPI', 'SHK_RS']}
+labels = {'state_labels': ['DLA_CPI_lag', 'RS_lag', 'L_GDP_GAP_lag', 'RES_L_GDP_GAP_lag', 'RES_DLA_CPI_lag', 'RES_RS_lag', 'RES_RS_lag2'], 'observable_labels': ['L_GDP_GAP', 'DLA_CPI', 'DLA_CPI_lead2', 'RES_RS', 'RR_GAP', 'RES_DLA_CPI', 'RES_L_GDP_GAP', 'DLA_CPI_lead3', 'DLA_CPI_lead1', 'RS', 'DLA_CPI_lag', 'RS_lag', 'L_GDP_GAP_lag', 'RES_L_GDP_GAP_lag', 'RES_DLA_CPI_lag', 'RES_RS_lag', 'RES_RS_lag2'], 'shock_labels': ['SHK_L_GDP_GAP', 'SHK_DLA_CPI', 'SHK_RS']}
