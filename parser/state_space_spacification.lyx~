@@ -87,8 +87,247 @@
 \begin_body
 
 \begin_layout Enumerate
-I have a code that construct the state space representation starting from the solution of the DSGE model by Klein.
+I'm working on a code that reads a dynare file (of a linear model).
+ It can be any text file (so dynare is not fundamental).
+ The idea is that,
+ I read the dyanre-like file and create a json file with the equations written in timing t and t+1 as will be expected by Klein's method.
+ The model has long leads and lags so I need to create auxiliary equations and variables to accommodate this feature.
+ After creating the json file I compute the Jacobbian the equation with respect to the variables in t and t+1 using analytical methods and save the jacobbian's in the file that letter is loaded in memory.
+ The procedure loads these files and evaluate them a parameter value and call Klein's solution method.
+ The solution is working fine.
  
+\end_layout
+
+\begin_layout Enumerate
+The system of equations I'm working on is
+\end_layout
+
+\begin_deeper
+\begin_layout Standard
+\begin_inset Formula 
+\[
+AE_{t}x_{t+1}=Bx_{t}+C\epsilon_{t}
+\]
+
+\end_inset
+
+where 
+\begin_inset Formula $x_{t}$
+\end_inset
+
+ is a vector organized such that you have state first and control after.
+ Let's call controls 
+\begin_inset Formula $c_{t}$
+\end_inset
+
+ and states 
+\begin_inset Formula $s_{t}$
+\end_inset
+
+.
+ States included lagged values of the endogenous variables and lagged values of the exogenous variables.
+ 
+\end_layout
+
+\end_deeper
+\begin_layout Enumerate
+As mentioned before any variable in the model could have long lead and lags.
+ For these variables the parser generates auxiliary variables and equations to write the model in the standard Klein format.
+ So if there is a lead variable with orrder 2 for example the parser will create the following variables and equations.
+ Say there is a variable in the system with y(+2) that is with two leads in this case,
+ 
+\end_layout
+
+\begin_deeper
+\begin_layout Standard
+\begin_inset Formula 
+\begin{align*}
+x_{t}^{lead1} & =y(+1)\\
+x_{t}^{lead2} & =x_{t+1}^{lead1}
+\end{align*}
+
+\end_inset
+
+then effectively 
+\begin_inset Formula $x_{t}^{lead2}=y(+1)$
+\end_inset
+
+,
+ longer leads will follow the same approach.
+ If you longer lags,
+ say y(-2),
+ you will also create auxiliary variables,
+ in this case
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+x_{t+1}^{lag}=y
+\]
+
+\end_inset
+
+so 
+\begin_inset Formula $x_{t}^{lag}=y(-1),$
+\end_inset
+
+similarly longer lags can be accommodated.
+ 
+\end_layout
+
+\end_deeper
+\begin_layout Enumerate
+One aspect that deserves attention is the following:
+ In the model,
+ not all exogenous variables have the same lag structure.
+ For example,
+ you could you have two exogenous variables 
+\begin_inset Formula 
+\[
+z_{1t}=\rho_{10}z_{1t-1}+\rho_{11}z_{1t-2}+\epsilon_{t}^{z1}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_deeper
+\begin_layout Standard
+\begin_inset Formula 
+\[
+z_{2t}=\rho_{20}z_{2t-1}+\epsilon_{t}^{z2}
+\]
+
+\end_inset
+
+so in this case,
+ the 
+\begin_inset Formula $z_{1t}$
+\end_inset
+
+ variable will be represented in Klein's Canonical representation with the equations
+\begin_inset Formula 
+\begin{align*}
+x_{t+1}^{lag} & =z_{1t}
+\end{align*}
+
+\end_inset
+
+so the representation would be 
+\begin_inset Formula 
+\begin{align*}
+z_{1t+1} & =\rho_{10}z_{t}+\rho_{11}x_{t}^{lag}+\epsilon_{t+1}^{z1}\\
+x_{t+1}^{lag} & =z_{1t}
+\end{align*}
+
+\end_inset
+
+that leads to the following state vector 
+\begin_inset Formula $\left(z_{1t},x_{t}^{lag},x_{t}^{lag2}\right)^{\prime}$
+\end_inset
+
+ and associated Klein's Canonical representation 
+\begin_inset Formula 
+\[
+\left[\begin{array}{ccc}
+1 & 0 & 0\\
+0 & 1 & 0\\
+0 & 0 & 1
+\end{array}\right]\left[\begin{array}{c}
+z_{1t+1}\\
+x_{t+1}^{lag}\\
+z_{2t+1}
+\end{array}\right]=\left[\begin{array}{ccc}
+\rho_{10} & \rho_{11} & 0\\
+1 & 0 & 0\\
+0 & 0 & \rho_{20}
+\end{array}\right]\left[\begin{array}{c}
+z_{1t}\\
+x_{t}^{lag}\\
+z_{2t}
+\end{array}\right]+\left[\begin{array}{cc}
+1 & 0\\
+0 & 0\\
+0 & 1
+\end{array}\right]\left[\begin{array}{c}
+\epsilon_{t+1}^{z1}\\
+\epsilon_{t+1}^{z2}
+\end{array}\right]
+\]
+
+\end_inset
+
+that is,
+ two important things emerge:
+ 
+\end_layout
+
+\begin_layout Enumerate
+Even if the model in dynare syntax is written as 
+\begin_inset Formula $z_{1t}=\rho_{10}z_{1t-1}+\rho_{11}z_{1t-1}+\epsilon_{t}^{z1}$
+\end_inset
+
+ the parser should understand it as 
+\begin_inset Formula $z_{1t+1}=\rho_{10}z_{1t}+\rho_{11}z_{1t-1}+\epsilon_{t+1}^{z1}$
+\end_inset
+
+ and 
+\begin_inset Formula $z_{t}$
+\end_inset
+
+ is still the contemporaneous exogenous variable.
+ So that at shock at time 
+\begin_inset Formula $z_{t}$
+\end_inset
+
+ moves 
+\begin_inset Formula $z_{t}$
+\end_inset
+
+ and all other variables in the system.
+ Say 
+\begin_inset Formula 
+\[
+\tilde{y}_{t}=\alpha\tilde{y}_{t+1}+z_{t}
+\]
+
+\end_inset
+
+where 
+\begin_inset Formula $\tilde{y}_{t}$
+\end_inset
+
+ is an endogenous control.
+ 
+\end_layout
+
+\begin_layout Enumerate
+In the system above (with the Canonical representation for the shocks) there is matrix R multiplying the vector of exogenous shocks in the example 
+\begin_inset Formula 
+\[
+R=\left[\begin{array}{cc}
+1 & 0\\
+0 & 0\\
+0 & 1
+\end{array}\right]
+\]
+
+\end_inset
+
+this matrix is part of matrix 
+\begin_inset Formula $C$
+\end_inset
+
+ in the Canonical representation and should map shocks to exogenous states.
+ Not all states will get a shock by construction.
+\end_layout
+
+\end_deeper
+\begin_layout Enumerate
+The next task is to build a state space representation for the Kalman filter.
+ The way I'm doing this is 
 \end_layout
 
 \begin_deeper
@@ -115,11 +354,12 @@ For simplicity it is easier to split the matrices of the system taking into acco
 
 \end_deeper
 \begin_layout Enumerate
-When computing the solution of the model variables are ordered as follows 
+When computing the jacobbian of the model equations variables are ordered as follows 
 \end_layout
 
 \begin_deeper
 \begin_layout Verbatim
+
 variables = self.state_variables + self.control_variables
 \end_layout
 
@@ -128,11 +368,12 @@ where
 \end_layout
 
 \begin_layout Verbatim
+
 self.state_variables = endogenous_states + exo_with_shocks + exo_without_shocks
 \end_layout
 
 \begin_layout Standard
-So we can use this order to group variables in the F and P matrices cumming from Klein solution
+So we can use this order to group variables in the F and P matrices cumming from Klein's solution
 \end_layout
 
 \begin_layout Standard
@@ -146,7 +387,7 @@ Lets call
 \end_inset
 
  endogenous states and 
-\begin_inset Formula $z_{t}$
+\begin_inset Formula $\xi_{t}$
 \end_inset
 
  exogenous states.
@@ -160,7 +401,7 @@ Lets call
 \end_inset
 
  a vector containing endogenous_states and 
-\begin_inset Formula $z_{t}$
+\begin_inset Formula $\xi_{t}$
 \end_inset
 
  ordered as exo_with_shocks + exo_without_shocks.
@@ -172,47 +413,18 @@ Lets call
 \[
 \left(\begin{array}{c}
 k_{t+1}\\
-z_{t+1}
+\xi_{t+1}
 \end{array}\right)=\left(\begin{array}{cc}
-P_{kk} & P_{kz}\\
-0 & P_{zz}
+P_{kk} & P_{k\xi}\\
+0 & P_{\xi\xi}
 \end{array}\right)\left(\begin{array}{c}
 k_{t}\\
-z_{t}
-\end{array}\right)
+\xi_{t}
+\end{array}\right)+H\epsilon_{t}
 \]
 
 \end_inset
 
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-c_{t}=\left(\begin{array}{cc}
-F_{ck} & F_{cz}\end{array}\right)\left(\begin{array}{c}
-k_{t}\\
-z_{t}
-\end{array}\right)
-\]
-
-\end_inset
-
-so that the state space representation would be 
-\begin_inset Formula 
-\begin{align*}
-k_{t+1} & =P_{kk}k_{t}+P_{kz}z_{t}\\
-z_{t+1} & =P_{zz}z_{t}+R\epsilon_{t+1}\\
-c_{t} & =F_{ck}k_{t}+F_{cz}z_{t}
-\end{align*}
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
 where 
 \family roman
 \series medium
@@ -228,103 +440,101 @@ where
 \noun off
 \color none
 
-\begin_inset Formula $\epsilon_{t+1}$
+\begin_inset Formula $\epsilon_{t}$
 \end_inset
 
- is the vector of shocks consistent with self.varexo_list.
- R is a selection matrix that tells how each shock affects the 
+ contains the exogenous shocks and 
+\begin_inset Formula $H$
+\end_inset
+
+ will be determined later.
+ I'm using 
+\begin_inset Formula $\xi_{t}$
+\end_inset
+
+ to denote the exogenous states to make the point that given the lag structure of the exiguous process 
+\begin_inset Formula $\xi$
+\end_inset
+
+ is not equal to 
 \begin_inset Formula $z_{t}$
 \end_inset
 
-.
- Given the information on the parser 
-\begin_inset Formula $z_{t}$
+ but it could include auxiliary states.
+ 
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+c_{t}=\left(\begin{array}{cc}
+F_{ck} & F_{c\xi}\end{array}\right)\left(\begin{array}{c}
+k_{t}\\
+\xi_{t}
+\end{array}\right)
+\]
+
 \end_inset
 
- follows a particular order and each variable has it own shock.
- Here the issue is that some exogenous states may have more than one lag and hence in the representation they imply more states (current and lag).
- Only current states will have shock.
- This is typical of a companion form representation of AR process.
+
 \end_layout
 
 \end_deeper
 \begin_layout Enumerate
-With this notation we can write the state space model for the Kalman filter,
- under the assumption that all controls and states are observable 
+How to find H?
+ Let 
+\begin_inset Formula $x_{t}=\left(k_{t},\xi_{t}c_{t}\right)$
+\end_inset
+
+ and given the solution 
 \end_layout
 
 \begin_deeper
 \begin_layout Standard
 \begin_inset Formula 
-\begin{align*}
-y_{t} & =Cx_{t}\\
-x_{t} & =Ax_{t-1}+B\epsilon_{t}
-\end{align*}
+\[
+\left[\begin{array}{c}
+k_{t}\\
+\xi_{t}\\
+c_{t}
+\end{array}\right]=\left[\begin{array}{ccc}
+p_{kk} & p_{k\xi} & 0\\
+0 & p_{\xi\xi} & 0\\
+F_{ck} & F_{c\xi} & 0
+\end{array}\right]\left[\begin{array}{c}
+k_{t-1}\\
+\xi_{t-1}\\
+c_{t-1}
+\end{array}\right]+H\epsilon_{t}
+\]
 
 \end_inset
 
-where 
+or written in matrix form
 \begin_inset Formula 
-\begin{align*}
-C & =\left[\begin{array}{c}
-F\\
-I
-\end{array}\right]
-\end{align*}
+\[
+x_{t}=\Omega x_{t-1}+H\epsilon_{t}
+\]
 
 \end_inset
 
-
+ we can replace the solution in the Cannonical represenation to get H
 \end_layout
 
 \begin_layout Standard
 \begin_inset Formula 
 \[
-A=P
+A\Omega x_{t}=B\Omega x_{t-1}+\left(B\Omega H+C\right)\epsilon_{t}
 \]
 
 \end_inset
 
 
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-B=\left[\begin{array}{c}
-0_{(\text{n\_endogenos x n\_shock)}}\\
-R_{(\text{n\_exogenous x n\_shock)}}
-\end{array}\right]
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-matrix dimensions are 
-\begin_inset Formula $B$
-\end_inset
-
-:
- (n_states x n_shock),
- A (n_states x n_states) C (n_obs x n_states).
- Since we assume in this representation that all variables are potentially observable the n_obs = n_states.
- Also note that n_states = len(variables) in the solution of the DSGE.
- n_endogenous = n_controls + n_endogenous_states,
- n_exogenous = exo_with_shocks + exo_without_shocks.
- 
 \end_layout
 
 \end_deeper
 \begin_layout Enumerate
-The code parse_gpm.py contains all this transformation.
- 
-\end_layout
-
-\begin_layout Enumerate
-In the code full_code_includes_parser.py I'm working on an implementation that augments the state space by including stochastic trends and also has other caracteristics.
+In the code full_code_includes_parser.py I'm working on an implementation that augments the state space by including stochastic trends and also has other characteristics.
  
 \end_layout
 
@@ -482,7 +692,7 @@ The code is structure as follows:
 
 \begin_deeper
 \begin_layout Enumerate
-DynareParser just reads the file and produce some ausiliary function and constants needed for the solution
+DynareParser just reads the file and produce some auxiliary function and constants needed for the solution
 \end_layout
 
 \begin_layout Enumerate
@@ -498,7 +708,7 @@ AugmentedState Space creates the augmented representation.
 \end_deeper
 \begin_layout Enumerate
 There are several changes needed.
- ModelSolver has los of function not needed and is missing Klein solution (that is available in the code,
+ ModelSolver has of function not needed and is missing Klein solution (that is available in the code,
  just copy that into the class).
  Remove all not necesary functions.
  

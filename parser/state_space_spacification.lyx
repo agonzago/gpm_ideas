@@ -90,16 +90,243 @@
 I'm working on a code that reads a dynare file (of a linear model).
  It can be any text file (so dynare is not fundamental).
  The idea is that,
- I read this fle create a json file with the equations written for t and t+1 as will be expected by Klein's method.
- The model has lead and lags of long horizon so I need to create auxiliary equations to accommodate this feature.
- After creating the json file I take the derivatives of the equation with respect to the variables using analytical methods and save the jacobbian's in the file that letter is loaded in memory.
- The procedure loads these files and evaluate them a parameter value and call klein's solution method.
+ I read the dyanre-like file and create a json file with the equations written in timing t and t+1 as will be expected by Klein's method.
+ The model has long leads and lags so I need to create auxiliary equations and variables to accommodate this feature.
+ After creating the json file I compute the Jacobbian the equation with respect to the variables in t and t+1 using analytical methods and save the jacobbian's in the file that letter is loaded in memory.
+ The procedure loads these files and evaluate them a parameter value and call Klein's solution method.
  The solution is working fine.
  
 \end_layout
 
 \begin_layout Enumerate
-Tyhe next task is to build a state space representation for the kalman filter.
+The system of equations I'm working on is
+\end_layout
+
+\begin_deeper
+\begin_layout Standard
+\begin_inset Formula 
+\[
+AE_{t}x_{t+1}=Bx_{t}+C\epsilon_{t}
+\]
+
+\end_inset
+
+where 
+\begin_inset Formula $x_{t}$
+\end_inset
+
+ is a vector organized such that you have state first and control after.
+ Let's call controls 
+\begin_inset Formula $c_{t}$
+\end_inset
+
+ and states 
+\begin_inset Formula $s_{t}$
+\end_inset
+
+.
+ States included lagged values of the endogenous variables and lagged values of the exogenous variables.
+ 
+\end_layout
+
+\end_deeper
+\begin_layout Enumerate
+As mentioned before any variable in the model could have long lead and lags.
+ For these variables the parser generates auxiliary variables and equations to write the model in the standard Klein format.
+ So if there is a lead variable with orrder 2 for example the parser will create the following variables and equations.
+ Say there is a variable in the system with y(+2) that is with two leads in this case,
+ 
+\end_layout
+
+\begin_deeper
+\begin_layout Standard
+\begin_inset Formula 
+\begin{align*}
+x_{t}^{lead1} & =y(+1)\\
+x_{t}^{lead2} & =x_{t+1}^{lead1}
+\end{align*}
+
+\end_inset
+
+then effectively 
+\begin_inset Formula $x_{t}^{lead2}=y(+1)$
+\end_inset
+
+,
+ longer leads will follow the same approach.
+ If you longer lags,
+ say y(-2),
+ you will also create auxiliary variables,
+ in this case
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+x_{t+1}^{lag}=y
+\]
+
+\end_inset
+
+so 
+\begin_inset Formula $x_{t}^{lag}=y(-1),$
+\end_inset
+
+similarly longer lags can be accommodated.
+ 
+\end_layout
+
+\end_deeper
+\begin_layout Enumerate
+One aspect that deserves attention is the following:
+ In the model,
+ not all exogenous variables have the same lag structure.
+ For example,
+ you could you have two exogenous variables 
+\begin_inset Formula 
+\[
+z_{1t}=\rho_{10}z_{1t-1}+\rho_{11}z_{1t-2}+\epsilon_{t}^{z1}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_deeper
+\begin_layout Standard
+\begin_inset Formula 
+\[
+z_{2t}=\rho_{20}z_{2t-1}+\epsilon_{t}^{z2}
+\]
+
+\end_inset
+
+so in this case,
+ the 
+\begin_inset Formula $z_{1t}$
+\end_inset
+
+ variable will be represented in Klein's Canonical representation with the equations
+\begin_inset Formula 
+\begin{align*}
+x_{t+1}^{lag} & =z_{1t}
+\end{align*}
+
+\end_inset
+
+so the representation would be 
+\begin_inset Formula 
+\begin{align*}
+z_{1t+1} & =\rho_{10}z_{t}+\rho_{11}x_{t}^{lag}+\epsilon_{t+1}^{z1}\\
+x_{t+1}^{lag} & =z_{1t}
+\end{align*}
+
+\end_inset
+
+that leads to the following state vector 
+\begin_inset Formula $\left(z_{1t},x_{t}^{lag},x_{t}^{lag2}\right)^{\prime}$
+\end_inset
+
+ and associated Klein's Canonical representation 
+\begin_inset Formula 
+\[
+\left[\begin{array}{ccc}
+1 & 0 & 0\\
+0 & 1 & 0\\
+0 & 0 & 1
+\end{array}\right]\left[\begin{array}{c}
+z_{1t+1}\\
+x_{t+1}^{lag}\\
+z_{2t+1}
+\end{array}\right]=\left[\begin{array}{ccc}
+\rho_{10} & \rho_{11} & 0\\
+1 & 0 & 0\\
+0 & 0 & \rho_{20}
+\end{array}\right]\left[\begin{array}{c}
+z_{1t}\\
+x_{t}^{lag}\\
+z_{2t}
+\end{array}\right]+\left[\begin{array}{cc}
+1 & 0\\
+0 & 0\\
+0 & 1
+\end{array}\right]\left[\begin{array}{c}
+\epsilon_{t+1}^{z1}\\
+\epsilon_{t+1}^{z2}
+\end{array}\right]
+\]
+
+\end_inset
+
+that is,
+ two important things emerge:
+ 
+\end_layout
+
+\begin_layout Enumerate
+Even if the model in dynare syntax is written as 
+\begin_inset Formula $z_{1t}=\rho_{10}z_{1t-1}+\rho_{11}z_{1t-1}+\epsilon_{t}^{z1}$
+\end_inset
+
+ the parser should understand it as 
+\begin_inset Formula $z_{1t+1}=\rho_{10}z_{1t}+\rho_{11}z_{1t-1}+\epsilon_{t+1}^{z1}$
+\end_inset
+
+ and 
+\begin_inset Formula $z_{t}$
+\end_inset
+
+ is still the contemporaneous exogenous variable.
+ So that at shock at time 
+\begin_inset Formula $z_{t}$
+\end_inset
+
+ moves 
+\begin_inset Formula $z_{t}$
+\end_inset
+
+ and all other variables in the system.
+ Say 
+\begin_inset Formula 
+\[
+\tilde{y}_{t}=\alpha\tilde{y}_{t+1}+z_{t}
+\]
+
+\end_inset
+
+where 
+\begin_inset Formula $\tilde{y}_{t}$
+\end_inset
+
+ is an endogenous control.
+ 
+\end_layout
+
+\begin_layout Enumerate
+In the system above (with the Canonical representation for the shocks) there is matrix R multiplying the vector of exogenous shocks in the example 
+\begin_inset Formula 
+\[
+R=\left[\begin{array}{cc}
+1 & 0\\
+0 & 0\\
+0 & 1
+\end{array}\right]
+\]
+
+\end_inset
+
+this matrix is part of matrix 
+\begin_inset Formula $C$
+\end_inset
+
+ in the Canonical representation and should map shocks to exogenous states.
+ Not all states will get a shock by construction.
+\end_layout
+
+\end_deeper
+\begin_layout Enumerate
+The next task is to build a state space representation for the Kalman filter.
  The way I'm doing this is 
 \end_layout
 
@@ -146,7 +373,7 @@ self.state_variables = endogenous_states + exo_with_shocks + exo_without_shocks
 \end_layout
 
 \begin_layout Standard
-So we can use this order to group variables in the F and P matrices cumming from Klein solution
+So we can use this order to group variables in the F and P matrices cumming from Klein's solution
 \end_layout
 
 \begin_layout Standard
@@ -160,7 +387,7 @@ Lets call
 \end_inset
 
  endogenous states and 
-\begin_inset Formula $z_{t}$
+\begin_inset Formula $\xi_{t}$
 \end_inset
 
  exogenous states.
@@ -174,7 +401,7 @@ Lets call
 \end_inset
 
  a vector containing endogenous_states and 
-\begin_inset Formula $z_{t}$
+\begin_inset Formula $\xi_{t}$
 \end_inset
 
  ordered as exo_with_shocks + exo_without_shocks.
@@ -186,47 +413,18 @@ Lets call
 \[
 \left(\begin{array}{c}
 k_{t+1}\\
-z_{t+1}
+\xi_{t+1}
 \end{array}\right)=\left(\begin{array}{cc}
-P_{kk} & P_{kz}\\
-0 & P_{zz}
+P_{kk} & P_{k\xi}\\
+0 & P_{\xi\xi}
 \end{array}\right)\left(\begin{array}{c}
 k_{t}\\
-z_{t}
-\end{array}\right)
+\xi_{t}
+\end{array}\right)+H\epsilon_{t+1}
 \]
 
 \end_inset
 
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-c_{t}=\left(\begin{array}{cc}
-F_{ck} & F_{cz}\end{array}\right)\left(\begin{array}{c}
-k_{t}\\
-z_{t}
-\end{array}\right)
-\]
-
-\end_inset
-
-so that the state space representation would be 
-\begin_inset Formula 
-\begin{align*}
-k_{t+1} & =P_{kk}k_{t}+P_{kz}z_{t}\\
-z_{t+1} & =P_{zz}z_{t}+R\epsilon_{t+1}\\
-c_{t} & =F_{ck}k_{t}+F_{cz}z_{t}
-\end{align*}
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
 where 
 \family roman
 \series medium
@@ -242,146 +440,86 @@ where
 \noun off
 \color none
 
-\begin_inset Formula $\epsilon_{t+1}$
+\begin_inset Formula $\epsilon_{t}$
 \end_inset
 
- is the vector of shocks consistent with self.varexo_list.
- R is a selection matrix that tells how each shock affects the 
-\begin_inset Formula $z_{t}$
+ contains the exogenous shocks and 
+\begin_inset Formula $H$
+\end_inset
+
+ holds 1 and zeros selecting and it's function of 
+\begin_inset Formula $R$
 \end_inset
 
 .
- Given the information on the parser 
+ I'm using 
+\begin_inset Formula $\xi_{t}$
+\end_inset
+
+ to denote the exogenous states to make the point that given the lag structure of the exiguous process 
+\begin_inset Formula $\xi$
+\end_inset
+
+ is not equal to 
 \begin_inset Formula $z_{t}$
 \end_inset
 
- follows a particular order and each variable has it own shock.
- Here the issue is that some exogenous states may have more than one lag and hence in the representation they imply more states (current and lag).
- Only current states will have shock.
- This is typical of a companion form representation of AR process.
+ but it could include auxiliary states.
+ 
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+c_{t}=\left(\begin{array}{cc}
+F_{ck} & F_{c\xi}\end{array}\right)\left(\begin{array}{c}
+k_{t}\\
+\xi_{t}
+\end{array}\right)
+\]
+
+\end_inset
+
+
 \end_layout
 
 \end_deeper
 \begin_layout Enumerate
-To build the state space I'm lagging the equation for 
-\begin_inset Formula $z$
+How to get the steady space representation 
+\begin_inset Formula 
+\begin{align*}
+k_{t+1} & =p_{kk}k_{t}+p_{k\xi}\xi_{t}\\
+c_{t} & =F_{ck}k_{t}+F_{\xi\xi}\xi_{t}
+\end{align*}
+
 \end_inset
 
- and recomputing the system 
+if I lag 
+\begin_inset Formula $\xi_{t}$
+\end_inset
+
+ then,
 \end_layout
 
 \begin_deeper
 \begin_layout Standard
 \begin_inset Formula 
 \begin{align*}
-k_{t+1} & =P_{kk}k_{t}+P_{kz}P_{zz}z_{t-1}+P_{kz}R\epsilon_{t}\\
-c_{t} & =F_{ck}k_{t}+F_{cz}P_{zz}z_{t-1}+F_{cz}R\epsilon_{t}\\
-z_{t} & =P_{zz}z_{t-1}+R\epsilon_{t}
+k_{t+1} & =p_{kk}k_{t}+p_{k\xi}p_{\xi\xi}\xi_{t-1}+p_{k\xi}R\epsilon_{t}\\
+c_{t}= & F_{ck}k_{t}+F_{\xi\xi}p_{\xi\xi}\xi_{t-1}+F_{\xi\xi}R\epsilon_{t}\\
+\xi_{t}= & p_{\xi\xi}\xi_{t-1}+R\epsilon_{t}
 \end{align*}
 
 \end_inset
 
-so the state space can be written as
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\left[\begin{array}{c}
-k_{t+1}\\
-c_{t}\\
-z
-\end{array}\right]=\left[\begin{array}{ccc}
-P_{kk} & 0 & P_{kz}P_{zz}\\
-F_{ck} & 0 & F_{cz}P_{zz}\\
-0 & 0 & P_{zz}
-\end{array}\right]\left[\begin{array}{c}
-k_{t}\\
-c_{t-1}\\
-z_{t-1}
-\end{array}\right]+\left[\begin{array}{c}
-P_{kz}R\\
-F_{cz}R\\
-R
-\end{array}\right]\epsilon_{t}
-\]
-
-\end_inset
-
-and the state-space can be written as 
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\begin{align*}
-y_{t} & =Hw_{t}\\
-w_{t} & =Aw_{t-1}+B\epsilon_{t}
-\end{align*}
-
-\end_inset
-
-
-\begin_inset Newline newline
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-One feature is that some of the exogenous variables may have more that one lag.
- Say you have to exogenos variables 
-\begin_inset Formula 
-\[
-z_{1t}=\rho_{10}z_{1t-1}+\rho_{11}z_{1t-2}+\epsilon_{t}^{z1}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-z_{2t}=\rho_{20}z_{2t-1}+\epsilon_{t}^{z2}
-\]
-
-\end_inset
-
-in this case 
-\begin_inset Formula 
-\[
-z_{t}=\left(\begin{array}{c}
-z_{1t}\\
-z_{1t-1}\\
-z_{2t}
-\end{array}\right)=\left[\begin{array}{ccc}
-\rho_{10} & \rho_{11} & 0\\
-1 & 0 & 0\\
-0 & \rho_{20} & 0
-\end{array}\right]\left(\begin{array}{c}
-z_{1t-1}\\
-z_{1t-2}\\
-z_{2t-1}
-\end{array}\right)+\left[\begin{array}{cc}
-1 & 0\\
-0 & 0\\
-0 & 1
-\end{array}\right]\left(\begin{array}{c}
-\epsilon_{t}^{z1}\\
-\epsilon_{t}^{z2}
-\end{array}\right)
-\]
-
-\end_inset
-
-where it is clear what R is in the notation above.
- 
+in this representation a shock today can affect,
+ the endogenous states tomorrow,
+ controls and exogenous states contemporaneously.
 \end_layout
 
 \end_deeper
 \begin_layout Enumerate
-In the code full_code_includes_parser.py I'm working on an implementation that augments the state space by including stochastic trends and also has other characteristics.
+I'm working on an implementation that augments the state space by including stochastic trends and also has other characteristics.
  
 \end_layout
 
@@ -396,7 +534,7 @@ The code is written in a way the maximizes efficiency and limits the regeneratio
  That is,
  matrices,
  or submatrices that remain constant when parameters are changed.
- This is to generae a code that is efficient when computing the likelihood function or carry out mcmc.
+ This is to generate a code that is efficient when computing the likelihood function or carry out mcmc.
  
 \end_layout
 
@@ -521,17 +659,6 @@ trend_{t}=trend_{t-1}
 
 \end_deeper
 \end_deeper
-\begin_layout Enumerate
-The code is not producing the right IRFs but I think is because,
- 1) is not creating the state space representation in an organized for.
- I'm adding this information to seek you help and produce a state space represenation for the augmented model that matches the description above and repreduces the IRFS accordingly.
- 
-\end_layout
-
-\begin_layout Enumerate
-In a future specification we may consider situations where the trends can interact.
-\end_layout
-
 \end_deeper
 \begin_layout Enumerate
 The code is structure as follows:
@@ -554,18 +681,28 @@ AugmentedState Space creates the augmented representation.
 
 \end_deeper
 \begin_layout Enumerate
-There are several changes needed.
- ModelSolver has of function not needed and is missing Klein solution (that is available in the code,
- just copy that into the class).
- Remove all not necesary functions.
+Tasks
+\end_layout
+
+\begin_deeper
+\begin_layout Enumerate
+Check the parser and make sure it correctly creates the auxiliary equations as explained before.
  
 \end_layout
 
 \begin_layout Enumerate
+Given this jaccobians check that the state space representation is correct
+\end_layout
+
+\begin_layout Enumerate
 Check the augmented class and link it to the model solver.
- Check the the filtration is working and the irfs are correct.
  
 \end_layout
 
+\begin_layout Enumerate
+Create a function that computes the IRFs of the simple model and the augmented model (they should produce the same results for shocks in the econonomic model) 
+\end_layout
+
+\end_deeper
 \end_body
 \end_document
