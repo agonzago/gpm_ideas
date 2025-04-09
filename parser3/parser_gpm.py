@@ -84,6 +84,102 @@ class DynareParser:
             
             self.equations = equations
 
+    def identify_exogenous_processes(self):
+        """
+        Identify exogenous processes in the model based on variable names and equations.
+        Exogenous processes typically have names starting with 'RES_' and are AR processes.
+        
+        Returns:
+            Dictionary mapping exogenous process names to their equation details
+        """
+        exo_processes = {}
+        
+        # First, find variables that appear to be exogenous processes
+        exo_vars = [var for var in self.var_list if var.startswith("RES_")]
+        
+        # Then, find their corresponding equations
+        for eq in self.equations:
+            if "=" not in eq:
+                continue
+                
+            left, right = [s.strip() for s in eq.split("=", 1)]
+            
+            # Check if this equation defines an exogenous process
+            if left in exo_vars:
+                exo_processes[left] = {
+                    'equation': eq,
+                    'right_side': right
+                }
+                
+                # Check for AR parameters
+                ar_params = re.findall(r'(rho_\w+)\s*\*', right)
+                exo_processes[left]['ar_params'] = ar_params
+                
+                # Check for zero persistence
+                is_zero_persistence = True
+                for param in ar_params:
+                    if param in self.parameters and abs(self.parameters[param]) > 1e-10:
+                        is_zero_persistence = False
+                        break
+                exo_processes[left]['zero_persistence'] = is_zero_persistence
+                
+                # Check which shock drives this process
+                for shock in self.varexo_list:
+                    if shock in right:
+                        exo_processes[left]['shock'] = shock
+                        break
+        
+        return exo_processes
+
+    def rewrite_exogenous_equations_with_correct_timing(self):
+        """
+        Rewrite exogenous process equations to reflect the correct timing convention:
+        - Original: z_t = ρ * z_{t-1} + ε_t
+        - Correct:  z_{t+1} = ρ * z_t + ε_{t+1}
+        
+        This function modifies self.equations in place.
+        """
+        print("\n--- Rewriting Exogenous Process Equations with Correct Timing ---")
+        
+        # First identify exogenous processes
+        exo_processes = self.identify_exogenous_processes()
+        
+        # Create a mapping for equation rewrites
+        eq_rewrites = {}
+        
+        for process_name, process_info in exo_processes.items():
+            original_eq = process_info['equation']
+            
+            if "=" not in original_eq:
+                continue
+                
+            left, right = [s.strip() for s in original_eq.split("=", 1)]
+            
+            # Convert from z_t = ρ * z_{t-1} + ε_t to z_{t+1} = ρ * z_t + ε_{t+1}
+            # In our notation, z_{t+1} is represented as z_p
+            new_left = f"{process_name}_p"
+            
+            # Replace all instances of process_name(-1) with process_name
+            # and don't modify the shock name (it's implicitly t+1 in the new timing)
+            new_right = right.replace(f"{process_name}(-1)", process_name)
+            
+            new_eq = f"{new_left} = {new_right}"
+            eq_rewrites[original_eq] = new_eq
+            
+            print(f"Rewriting: {original_eq} -> {new_eq}")
+        
+        # Apply rewrites to equations
+        modified_equations = []
+        for eq in self.equations:
+            if eq in eq_rewrites:
+                modified_equations.append(eq_rewrites[eq])
+            else:
+                modified_equations.append(eq)
+        
+        self.equations = modified_equations
+        
+        return eq_rewrites
+
     def analyze_model_variables(self):
         """
         First pass: Analyze all variables and their time shifts across the entire model.
@@ -275,23 +371,29 @@ class DynareParser:
 
     def apply_transformation(self):
         """
-        Two-pass transformation of the model with proper handling of exogenous processes:
-        1. Analyze all variables and their time shifts
-        2. Create a comprehensive transformation plan
-        3. Apply transformations consistently across all equations
-        4. Update model variables and add auxiliary equations
-        5. Correctly analyze exogenous processes with proper timing
+        Complete model transformation with correct timing for exogenous processes:
+        1. Rewrite exogenous process equations to reflect correct timing
+        2. Analyze variables and their time shifts
+        3. Create transformation plan
+        4. Apply transformations consistently across all equations
+        5. Update model variables and add auxiliary equations
+        6. Correctly identify state and control variables
         
         Returns:
             Dictionary with transformed model information
         """
-        # First pass: Analyze variables and their shifts
+        print("\n=== Applying Model Transformation with Correct Timing ===")
+        
+        # Step 1: Rewrite exogenous process equations for correct timing
+        self.rewrite_exogenous_equations_with_correct_timing()
+        
+        # Step 2: Analyze variables and their shifts after rewriting
         variable_shifts, all_variables = self.analyze_model_variables()
         
-        # Create transformation plan based on the analysis
+        # Step 3: Create transformation plan
         transformation_map, aux_equations, model_variables = self.create_transformation_plan(variable_shifts)
         
-        # Apply transformations to all equations
+        # Step 4: Apply transformations to all equations
         transformed_equations = []
         for i, equation in enumerate(self.equations):
             # Remove comments and clean up
@@ -316,40 +418,70 @@ class DynareParser:
             
             transformed_equations.append(transformed_eq)
         
-        # Update class properties
+        # Step 5: Update class properties
         self.transformed_equations = transformed_equations
         self.auxiliary_equations = aux_equations
         
-        # Remove _p variables and shock variables from main model variables
-        endogenous_vars = set([v for v in model_variables['all_variables'] 
-                            if not v.endswith('_p') and v not in self.varexo_list])
+        # Step 6: Properly identify and assign state and control variables
+        # Get state variables from model_variables
+        self.state_variables = list(model_variables['state_variables'])
         
-        # Identify all state variables
-        all_state_variables = list(set(model_variables['state_variables']))
-
-        # Analyze exogenous processes with correct timing convention
-        exogenous_process_info = self.analyze_exogenous_processes_with_correct_timing()
+        # Variables that are lag states or are exogenous processes
+        exo_processes = [var for var in all_variables if var.startswith("RES_")]
         
-        # Update state variables with exogenous process classification
-        self.endogenous_states = exogenous_process_info['endogenous_states']
-        self.exo_with_shocks = exogenous_process_info['exo_with_shocks']
-        self.exo_without_shocks = exogenous_process_info['exo_without_shocks']
-        self.state_variables = self.endogenous_states + self.exo_with_shocks + self.exo_without_shocks
-        self.shock_to_state_map = exogenous_process_info['shock_to_state_map']
-        self.state_to_shock_map = exogenous_process_info['state_to_shock_map']
-        self.zero_persistence_processes = exogenous_process_info['zero_persistence_processes']
+        # Add any exogenous processes that weren't captured as states
+        exo_state_vars = []
+        for var in exo_processes:
+            if var not in model_variables['state_variables'] and var + "_lag" in model_variables['state_variables']:
+                exo_state_vars.append(var)
         
-        # Control variables are endogenous variables that are not state variables
-        self.control_variables = list(endogenous_vars - set(self.state_variables))
+        # Add exogenous processes to state variables if not already included
+        for var in exo_state_vars:
+            if var not in self.state_variables:
+                self.state_variables.append(var)
         
-        # Remove shock variables from all_variables
-        self.all_variables = list(endogenous_vars)
+        # For proper state/control classification, ensure all _lag variables are states
+        for var in all_variables:
+            if var.endswith("_lag") and var not in self.state_variables:
+                self.state_variables.append(var)
+        
+        # Control variables are all non-state variables (excluding shocks and _p variables)
+        self.control_variables = [
+            var for var in all_variables 
+            if var not in self.state_variables 
+            and var not in self.varexo_list 
+            and not var.endswith("_p")
+        ]
+        
+        # All model variables (excluding shocks and _p variables)
+        self.all_variables = list(set(self.state_variables + self.control_variables))
         
         # Keep auxiliary variables as defined
-        self.auxiliary_variables = list(set(model_variables['aux_variables']))
+        self.auxiliary_variables = list(model_variables['aux_variables'])
         
-        # Format equations for output
+        # Step 7: Process exogenous processes for shock mapping
+        exo_info = self.analyze_exogenous_processes_with_correct_timing()
+        
+        # Update state variables with the exogenous process classification
+        self.endogenous_states = exo_info['endogenous_states']
+        self.exo_with_shocks = exo_info['exo_with_shocks']
+        self.exo_without_shocks = exo_info['exo_without_shocks']
+        
+        # Ensure proper ordering of state variables
+        self.state_variables = self.endogenous_states + self.exo_with_shocks + self.exo_without_shocks
+        
+        # Update shock mappings
+        self.shock_to_state_map = exo_info['shock_to_state_map']
+        self.state_to_shock_map = exo_info['state_to_shock_map']
+        self.zero_persistence_processes = exo_info['zero_persistence_processes']
+        
+        # Step 8: Format equations for output
         formatted_equations = self.format_transformed_equations(transformed_equations, aux_equations)
+        
+        print(f"\nModel transformation complete:")
+        print(f"  {len(self.state_variables)} state variables")
+        print(f"  {len(self.control_variables)} control variables")
+        print(f"  {len(self.auxiliary_equations)} auxiliary equations")
         
         return {
             'equations': formatted_equations,
@@ -368,126 +500,88 @@ class DynareParser:
     def analyze_exogenous_processes_with_correct_timing(self):
         """
         Analyze exogenous processes in the model with the correct timing convention.
-        This implementation follows the state space specification document, where:
-        
-        Even if exogenous processes are written in Dynare as:
-            z_t = ρ * z_t-1 + ε_t
-        They should be interpreted in the state space framework as:
-            z_t+1 = ρ * z_t + ε_t+1
-            
-        This timing convention ensures that shocks at time t move z_t and 
-        all other variables in the system contemporaneously.
         
         Returns:
             Dictionary with exogenous process analysis results
         """
         print("\n--- Analyzing Exogenous Processes with Correct Timing ---")
         
-        # Initialize mapping dictionaries
+        # Initialize categories
+        endogenous_states = []
+        exo_with_shocks = []
+        exo_without_shocks = []
         shock_to_state_map = {}
         state_to_shock_map = {}
         zero_persistence_processes = []
         
-        # Identify all exogenous processes (variables starting with "RES_")
-        exo_processes = {}  # Maps base names to lists of their lag variables
-        for var in self.state_variables:
-            if var.startswith("RES_") and "_lag" in var:
-                # Extract base name (e.g., "RES_RS" from "RES_RS_lag")
-                base_name = var.split("_lag")[0]
-                
-                # Extract lag number
-                if var.endswith("_lag"):
-                    lag = 1
-                else:
-                    lag_suffix = var.split("_lag")[1]
-                    lag = int(lag_suffix) if lag_suffix.isdigit() else 1
-                
-                # Add to processes dictionary
-                if base_name not in exo_processes:
-                    exo_processes[base_name] = []
-                exo_processes[base_name].append((lag, var))
+        # Identify all exogenous processes (base variables starting with "RES_")
+        exo_processes = {}
+        for var in self.all_variables:
+            if var.startswith("RES_"):
+                # This is an exogenous process
+                exo_processes[var] = {
+                    'lags': [v for v in self.all_variables if v.startswith(f"{var}_lag")]
+                }
         
-        # Sort each process's lags
-        for process in exo_processes.values():
-            process.sort()
-        
-        print(f"Found {len(exo_processes)} exogenous processes:")
-        for base, lags in exo_processes.items():
-            lag_vars = [var for _, var in lags]
-            print(f"  {base}: {lag_vars}")
-        
-        # Find exogenous process definitions in equations
-        exo_process_equations = {}
-        for eq_idx, equation in enumerate(self.equations):
-            clean_eq = re.sub(r'//.*', '', equation).strip()
-            if "=" not in clean_eq:
+        # Analyze exogenous process equations to identify shock relationships
+        # We need to examine the transformed equations to find these relationships
+        for eq in self.transformed_equations:
+            if "=" not in eq:
                 continue
                 
-            left, right = [s.strip() for s in clean_eq.split("=", 1)]
+            left, right = [s.strip() for s in eq.split("=", 1)]
             
-            # Check if this equation defines an exogenous process
-            for base_name in exo_processes.keys():
-                if base_name == left:
-                    exo_process_equations[base_name] = {
-                        'equation': clean_eq,
-                        'right_side': right,
-                        'index': eq_idx
-                    }
-                    print(f"Found exogenous process equation: {clean_eq}")
-        
-        # Analyze each exogenous process equation
-        for base_name, eq_info in exo_process_equations.items():
-            right_side = eq_info['right_side']
-            
-            # Check for AR parameters and their values
-            ar_params = re.findall(r'(rho_\w+)\s*\*', right_side)
-            print(f"  Process {base_name} AR parameters: {ar_params}")
-            
-            # Check if this is a zero-persistence process
-            is_zero_persistence = True
-            for param in ar_params:
-                if param in self.parameters and abs(self.parameters[param]) > 1e-10:
-                    is_zero_persistence = False
-                    break
-            
-            if is_zero_persistence:
-                print(f"  Process {base_name} has ZERO PERSISTENCE")
-                zero_persistence_processes.append(base_name)
-            
-            # Find shocks that appear in this equation
-            for shock in self.varexo_list:
-                if shock in right_side:
-                    print(f"  Process {base_name} is driven by shock {shock}")
+            # Check for exogenous process definitions, which now have _p on the left side
+            for process_name in exo_processes.keys():
+                if left == f"{process_name}_p":
+                    exo_processes[process_name]['equation'] = eq
                     
-                    # FIXED TIMING: Map shock to the CURRENT variable, not its lag
-                    # This follows the specification document's convention where:
-                    # z_t+1 = ρ * z_t + ε_t+1
-                    # The shock at time t affects z_t directly, not z_t+1 
-                    if base_name in exo_processes and exo_processes[base_name]:
-                        # Get the base name itself, which will be a state variable
-                        base_var = base_name
-                        
-                        # For the lag state mapping, use the first lag
-                        first_lag = exo_processes[base_name][0][1]
-                        
-                        # Map shock to current exogenous variable
-                        shock_to_state_map[shock] = first_lag
-                        state_to_shock_map[first_lag] = shock
-                        
-                        print(f"  Mapped shock {shock} to state {first_lag} (correct timing)")
+                    # Check for AR parameters
+                    ar_params = re.findall(r'(rho_\w+)\s*\*', right)
+                    exo_processes[process_name]['ar_params'] = ar_params
+                    
+                    # Check for zero persistence
+                    is_zero_persistence = True
+                    for param in ar_params:
+                        if param in self.parameters and abs(self.parameters[param]) > 1e-10:
+                            is_zero_persistence = False
+                            break
+                    
+                    if is_zero_persistence:
+                        zero_persistence_processes.append(process_name)
+                    
+                    # Check which shock drives this process
+                    for shock in self.varexo_list:
+                        if shock in right:
+                            exo_processes[process_name]['shock'] = shock
+                            
+                            # Map shock to exogenous process and lag
+                            shock_to_state_map[shock] = process_name
+                            state_to_shock_map[process_name] = shock
+                            
+                            # Also map to the lag variable
+                            lag_var = f"{process_name}_lag"
+                            if lag_var in self.all_variables:
+                                shock_to_state_map[shock] = lag_var
+                                state_to_shock_map[lag_var] = shock
+                            
+                            print(f"  Process {process_name} is driven by shock {shock}")
+                            if is_zero_persistence:
+                                print(f"  Process {process_name} has ZERO PERSISTENCE")
         
         # Categorize state variables
-        endogenous_states = []
-        exo_with_shocks = []
-        exo_without_shocks = []
-        
         for var in self.state_variables:
-            if var.startswith("RES_") and "_lag" in var:
+            if var.startswith("RES_"):
                 # Exogenous state
                 if var in state_to_shock_map:
                     exo_with_shocks.append(var)
                 else:
-                    exo_without_shocks.append(var)
+                    # Check if it's a lag of a shocked variable
+                    base_name = var.split("_lag")[0] if "_lag" in var else var
+                    if base_name in state_to_shock_map:
+                        exo_with_shocks.append(var)
+                    else:
+                        exo_without_shocks.append(var)
             else:
                 # Endogenous state
                 endogenous_states.append(var)
@@ -917,8 +1011,6 @@ class DynareParser:
             f.write(f"labels = {repr(structure['labels'])}\n")
 
         print(f"All model files generated in {output_dir} with correct timing convention")
-
-
 
 #!/usr/bin/env python3
 
