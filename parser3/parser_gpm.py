@@ -134,8 +134,8 @@ class DynareParser:
     def rewrite_exogenous_equations_with_correct_timing(self):
         """
         Rewrite exogenous process equations to reflect the correct timing convention:
-        - Original: z_t = ρ * z_{t-1} + ε_t
-        - Correct:  z_{t+1} = ρ * z_t + ε_{t+1}
+        - Original: z_t = ρ * z_{t-1} + ρ2 * z_{t-2} + ε_t
+        - Correct:  z_{t+1} = ρ * z_t + ρ2 * z_{t-1} + ε_{t+1}
         
         This function modifies self.equations in place.
         """
@@ -155,13 +155,31 @@ class DynareParser:
                 
             left, right = [s.strip() for s in original_eq.split("=", 1)]
             
-            # Convert from z_t = ρ * z_{t-1} + ε_t to z_{t+1} = ρ * z_t + ε_{t+1}
+            # Convert from z_t = ρ * z_{t-1} + ρ2 * z_{t-2} + ε_t 
+            # to z_{t+1} = ρ * z_t + ρ2 * z_{t-1} + ε_{t+1}
             # In our notation, z_{t+1} is represented as z_p
             new_left = f"{process_name}_p"
+            new_right = right
             
-            # Replace all instances of process_name(-1) with process_name
-            # and don't modify the shock name (it's implicitly t+1 in the new timing)
-            new_right = right.replace(f"{process_name}(-1)", process_name)
+            # Replace all lag references properly:
+            # z_{t-1} becomes z_t
+            # z_{t-2} becomes z_{t-1} (which is z_lag)
+            
+            # First replace deepest lags (to avoid replacing parts of longer patterns)
+            for lag in range(10, 0, -1):  # From lag 10 down to lag 1
+                old_pattern = f"{process_name}(-{lag})"
+                if lag == 1:
+                    # z_{t-1} becomes z_t
+                    new_pattern = process_name
+                else:
+                    # z_{t-n} becomes z_{t-(n-1)} which is z_lag{n-1}
+                    adjusted_lag = lag - 1
+                    if adjusted_lag == 1:
+                        new_pattern = f"{process_name}_lag"
+                    else:
+                        new_pattern = f"{process_name}_lag{adjusted_lag}"
+                
+                new_right = new_right.replace(old_pattern, new_pattern)
             
             new_eq = f"{new_left} = {new_right}"
             eq_rewrites[original_eq] = new_eq
@@ -347,7 +365,7 @@ class DynareParser:
                     if first_lag_eq not in processed_aux_eqs:
                         aux_equations.append(first_lag_eq)
                         processed_aux_eqs.add(first_lag_eq)
-                        model_variables['aux_variables'].add(first_lag_var)
+                    model_variables['aux_variables'].add(first_lag_var)
                     
                     # Now create higher-order lags recursively
                     prev_lag_var = first_lag_var  # Start with the first lag
@@ -362,7 +380,7 @@ class DynareParser:
                         if aux_eq not in processed_aux_eqs:
                             aux_equations.append(aux_eq)
                             processed_aux_eqs.add(aux_eq)
-                            model_variables['aux_variables'].add(curr_lag_var)
+                        model_variables['aux_variables'].add(curr_lag_var)
                         
                         # Update prev_lag for next iteration
                         prev_lag_var = curr_lag_var
@@ -423,24 +441,16 @@ class DynareParser:
         self.auxiliary_equations = aux_equations
         
         # Step 6: Properly identify and assign state and control variables
-        # Get state variables from model_variables
-        self.state_variables = list(model_variables['state_variables'])
-        
-        # Variables that are lag states or are exogenous processes
+        # Track the exogenous processes
         exo_processes = [var for var in all_variables if var.startswith("RES_")]
         
-        # Add any exogenous processes that weren't captured as states
-        exo_state_vars = []
+        # Make sure all exogenous processes are states
+        self.state_variables = list(model_variables['state_variables'])
         for var in exo_processes:
-            if var not in model_variables['state_variables'] and var + "_lag" in model_variables['state_variables']:
-                exo_state_vars.append(var)
-        
-        # Add exogenous processes to state variables if not already included
-        for var in exo_state_vars:
             if var not in self.state_variables:
                 self.state_variables.append(var)
         
-        # For proper state/control classification, ensure all _lag variables are states
+        # Make sure all _lag variables are states
         for var in all_variables:
             if var.endswith("_lag") and var not in self.state_variables:
                 self.state_variables.append(var)
@@ -457,17 +467,34 @@ class DynareParser:
         self.all_variables = list(set(self.state_variables + self.control_variables))
         
         # Keep auxiliary variables as defined
-        self.auxiliary_variables = list(model_variables['aux_variables'])
+        self.auxiliary_variables = list(set(model_variables['aux_variables']))
         
         # Step 7: Process exogenous processes for shock mapping
         exo_info = self.analyze_exogenous_processes_with_correct_timing()
         
-        # Update state variables with the exogenous process classification
-        self.endogenous_states = exo_info['endogenous_states']
-        self.exo_with_shocks = exo_info['exo_with_shocks']
-        self.exo_without_shocks = exo_info['exo_without_shocks']
+        # Update exogenous process classification
+        self.endogenous_states = [var for var in self.state_variables if not var.startswith("RES_")]
+        self.exo_with_shocks = []
+        self.exo_without_shocks = []
         
-        # Ensure proper ordering of state variables
+        # First identify which exogenous processes have shocks
+        shock_driven_exo = set()
+        for shock, state in exo_info['shock_to_state_map'].items():
+            base_name = state.split("_lag")[0] if "_lag" in state else state
+            shock_driven_exo.add(base_name)
+        
+        # Now categorize all exogenous states
+        for var in self.state_variables:
+            if var.startswith("RES_"):
+                # Get base name without _lag suffix
+                base_name = var.split("_lag")[0] if "_lag" in var else var
+                
+                if base_name in shock_driven_exo:
+                    self.exo_with_shocks.append(var)
+                else:
+                    self.exo_without_shocks.append(var)
+        
+        # Update state variables order
         self.state_variables = self.endogenous_states + self.exo_with_shocks + self.exo_without_shocks
         
         # Update shock mappings
@@ -506,34 +533,30 @@ class DynareParser:
         """
         print("\n--- Analyzing Exogenous Processes with Correct Timing ---")
         
-        # Initialize categories
-        endogenous_states = []
-        exo_with_shocks = []
-        exo_without_shocks = []
+        # Initialize mappings
         shock_to_state_map = {}
         state_to_shock_map = {}
         zero_persistence_processes = []
         
-        # Identify all exogenous processes (base variables starting with "RES_")
+        # Identify all exogenous processes (RES_* variables)
         exo_processes = {}
         for var in self.all_variables:
             if var.startswith("RES_"):
-                # This is an exogenous process
                 exo_processes[var] = {
                     'lags': [v for v in self.all_variables if v.startswith(f"{var}_lag")]
                 }
         
-        # Analyze exogenous process equations to identify shock relationships
-        # We need to examine the transformed equations to find these relationships
+        # Analyze exogenous process equations
         for eq in self.transformed_equations:
             if "=" not in eq:
                 continue
                 
             left, right = [s.strip() for s in eq.split("=", 1)]
             
-            # Check for exogenous process definitions, which now have _p on the left side
+            # Check for exogenous process equations (now with _p on the left side)
             for process_name in exo_processes.keys():
                 if left == f"{process_name}_p":
+                    # This is the equation for this exogenous process
                     exo_processes[process_name]['equation'] = eq
                     
                     # Check for AR parameters
@@ -555,11 +578,12 @@ class DynareParser:
                         if shock in right:
                             exo_processes[process_name]['shock'] = shock
                             
-                            # Map shock to exogenous process and lag
+                            # Important: Map the shock to both the process
+                            # and its first lag variable if it exists
                             shock_to_state_map[shock] = process_name
                             state_to_shock_map[process_name] = shock
                             
-                            # Also map to the lag variable
+                            # Also map to lag variable
                             lag_var = f"{process_name}_lag"
                             if lag_var in self.all_variables:
                                 shock_to_state_map[shock] = lag_var
@@ -569,28 +593,7 @@ class DynareParser:
                             if is_zero_persistence:
                                 print(f"  Process {process_name} has ZERO PERSISTENCE")
         
-        # Categorize state variables
-        for var in self.state_variables:
-            if var.startswith("RES_"):
-                # Exogenous state
-                if var in state_to_shock_map:
-                    exo_with_shocks.append(var)
-                else:
-                    # Check if it's a lag of a shocked variable
-                    base_name = var.split("_lag")[0] if "_lag" in var else var
-                    if base_name in state_to_shock_map:
-                        exo_with_shocks.append(var)
-                    else:
-                        exo_without_shocks.append(var)
-            else:
-                # Endogenous state
-                endogenous_states.append(var)
-        
-        # Return categorized results
         return {
-            'endogenous_states': endogenous_states,
-            'exo_with_shocks': exo_with_shocks,
-            'exo_without_shocks': exo_without_shocks,
             'shock_to_state_map': shock_to_state_map,
             'state_to_shock_map': state_to_shock_map,
             'zero_persistence_processes': zero_persistence_processes,
@@ -885,8 +888,6 @@ class DynareParser:
         print(f"Controls: {n_controls}, Shocks: {n_shocks}")
         
         # Create shock selection matrix R that maps shocks to exogenous states
-        # KEY FIX: This implements the correct timing convention where shocks at t
-        # affect exogenous processes at t, not t+1
         R = np.zeros((n_exo_states, n_shocks))
         
         # Fill R matrix using shock-to-state mapping
@@ -896,6 +897,16 @@ class DynareParser:
                 state_var = self.shock_to_state_map[shock_name]
                 
                 try:
+                    # Make sure the state variable is in the state list
+                    if state_var not in self.state_variables:
+                        print(f"  Warning: State {state_var} not in state_variables list, adding it")
+                        self.state_variables.append(state_var)
+                        
+                        # Update classification
+                        if state_var.startswith("RES_"):
+                            if state_var not in self.exo_with_shocks:
+                                self.exo_with_shocks.append(state_var)
+                    
                     # Find position in state vector
                     state_idx = self.state_variables.index(state_var)
                     # Calculate position relative to exogenous state section
@@ -910,7 +921,6 @@ class DynareParser:
                     print(f"  Error: State {state_var} not found in state_variables")
         
         # Structures defining state-space matrices with correct timing
-        # B_structure maps shocks to state transitions but with CORRECT TIMING
         B_structure = np.zeros((n_states, n_shocks))
         
         # Fill in the exogenous part of B - maps shocks to exogenous states
@@ -923,41 +933,29 @@ class DynareParser:
         C_structure[n_controls:, :] = np.eye(n_states)
         
         # D_structure maps shocks directly to observables
-        # KEY FIX: With the correct timing convention, shocks at t directly affect observables at t
         D_structure = np.zeros((n_controls + n_states, n_shocks))
         
         # Direct shock to exogenous state mapping
         # This is crucial for zero-persistence processes
-        D_structure[n_controls + n_endogenous:, :] = R
+        if n_exo_states > 0:
+            D_structure[n_controls + n_endogenous:n_controls + n_endogenous + n_exo_states, :] = R
         
-        # Handle zero-persistence processes specially
-        # For zero-persistence processes, shocks directly affect controls
-        if hasattr(self, 'zero_persistence_processes') and self.zero_persistence_processes:
-            print("\nHandling zero-persistence processes:")
-            
-            # For each zero-persistence process
-            for process_name in self.zero_persistence_processes:
-                print(f"  Processing zero-persistence process: {process_name}")
-                
-                # Find which shock drives this process
-                for shock_name, state_var in self.shock_to_state_map.items():
-                    if state_var.startswith(f"{process_name}_lag"):
-                        print(f"    Process {process_name} is driven by shock {shock_name}")
-                        
-                        # Find which control variables depend on this process
-                        for i, control_var in enumerate(self.control_variables):
-                            # Check each equation to see if this control depends on the process
-                            for equation in self.equations:
-                                clean_eq = re.sub(r'//.*', '', equation).strip()
-                                
-                                # If equation defines this control and contains the process
-                                if "=" in clean_eq and control_var in clean_eq.split("=")[0].strip() and process_name in clean_eq:
-                                    shock_idx = self.varexo_list.index(shock_name)
-                                    print(f"    Control {control_var} depends on {process_name} - adding direct shock effect")
-                                    
-                                    # Add direct shock effect to control variable
-                                    # This is the key fix for zero-persistence processes
-                                    D_structure[i, shock_idx] = 1.0
+        # For control variables that depend on exogenous processes
+        # Add direct shock effects based on the Jacobian information
+        for i, control_var in enumerate(self.control_variables):
+            for j, shock_name in enumerate(self.varexo_list):
+                # If the control directly depends on an exogenous state driven by this shock
+                if shock_name in self.shock_to_state_map:
+                    state_var = self.shock_to_state_map[shock_name]
+                    base_var = state_var.split("_lag")[0] if "_lag" in state_var else state_var
+                    
+                    # Check if this control depends on the exogenous process
+                    for eq in self.transformed_equations:
+                        if "=" in eq and control_var in eq.split("=")[0].strip() and base_var in eq:
+                            # This control depends on the exogenous process
+                            D_structure[i, j] = 1.0
+                            print(f"  Adding direct effect: {shock_name} -> {control_var}")
+                            break
         
         # Store indices for later use
         indices = {
@@ -1011,121 +1009,3 @@ class DynareParser:
             f.write(f"labels = {repr(structure['labels'])}\n")
 
         print(f"All model files generated in {output_dir} with correct timing convention")
-
-#!/usr/bin/env python3
-
-"""
-Test script for the fixed DynareParser implementation.
-This script tests the parser with a focus on correct timing convention for exogenous variables.
-"""
-
-import os
-import sys
-import numpy as np
-import matplotlib.pyplot as plt
-
-def main():
-    print("\n===== Testing Fixed DynareParser Implementation =====\n")
-    
-    # Define input and output paths
-    dynare_file = "qpm_simpl1.dyn"  # Input Dynare file
-    output_dir = "model_files_test"  # Directory for generated files
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    try:
-        # Import the fixed parser
-        # Adjust this import based on where you've saved the fixed parser
-       # from fixed_parser import DynareParser
-        
-        # Step 1: Parse the Dynare file
-        print("\n=== Step 1: Parsing Dynare File ===")
-        parser = DynareParser(dynare_file)
-        parser.read_dynare_file()
-        parser.parse_variables()
-        parser.parse_exogenous()
-        parser.parse_parameters()
-        parser.parse_model()
-        
-        print(f"Successfully parsed {dynare_file}")
-        print(f"Found {len(parser.var_list)} variables, {len(parser.varexo_list)} exogenous variables, and {len(parser.parameters)} parameters")
-        
-        # Step 2: Display model equations
-        print("\n=== Step 2: Original Model Equations ===")
-        for i, eq in enumerate(parser.equations):
-            print(f"Equation {i+1}: {eq}")
-        
-        # Step 3: Apply transformation with correct timing
-        print("\n=== Step 3: Applying Transformation with Correct Timing ===")
-        transformed_model = parser.apply_transformation()
-        
-        # Step 4: Display state and control variables
-        print("\n=== Step 4: Variable Classification ===")
-        print("\nState Variables:")
-        print("  Endogenous states:", transformed_model['endogenous_states'])
-        print("  Exogenous states with shocks:", transformed_model['exo_with_shocks'])
-        print("  Exogenous states without shocks:", transformed_model['exo_without_shocks'])
-        print("\nControl Variables:")
-        print("  ", transformed_model['control_variables'])
-        print("\nAuxiliary Variables:")
-        print("  ", transformed_model['auxiliary_variables'])
-        
-        # Step 5: Check timing convention
-        print("\n=== Step 5: Verifying Exogenous Process Timing ===")
-        print("Shock to State Mapping (should map shocks to exogenous states at time t):")
-        for shock, state in transformed_model['shock_to_state_map'].items():
-            print(f"  {shock} -> {state}")
-        
-        # Check for zero-persistence processes
-        if 'zero_persistence_processes' in transformed_model:
-            print("\nZero-Persistence Processes:")
-            print("  ", transformed_model['zero_persistence_processes'])
-        
-        # Step 6: Generate model structure with correct timing
-        print("\n=== Step 6: Generating Model Structure ===")
-        structure = parser.generate_model_structure()
-        
-        # Display R matrix (shock to exogenous state mapping)
-        print("\nR Matrix (shock to exogenous state mapping):")
-        print(structure['R'])
-        
-        # Display D matrix (direct shock effects)
-        print("\nD Matrix (direct shock effects):")
-        print(structure['D_structure'])
-        
-        # Step 7: Generate and save all required files
-        print("\n=== Step 7: Generating Output Files ===")
-        model_json = parser.save_json(os.path.join(output_dir, "model.json"))
-        
-        # Generate Jacobian evaluator
-        jacobian_code = parser.generate_jacobian_evaluator(os.path.join(output_dir, "jacobian_evaluator.py"))
-        print(f"Generated Jacobian evaluator at {os.path.join(output_dir, 'jacobian_evaluator.py')}")
-        
-        # Generate model structure
-        structure = parser.generate_model_structure()
-        with open(os.path.join(output_dir, "model_structure.py"), 'w') as f:
-            f.write("import numpy as np\n\n")
-            f.write(f"indices = {repr(structure['indices'])}\n\n")
-            f.write(f"R = np.array({repr(structure['R'].tolist())})\n\n")
-            f.write(f"B_structure = np.array({repr(structure['B_structure'].tolist())})\n\n")
-            f.write(f"C_structure = np.array({repr(structure['C_structure'].tolist())})\n\n")
-            f.write(f"D = np.array({repr(structure['D_structure'].tolist())})\n\n")
-            f.write(f"labels = {repr(structure['labels'])}\n")
-        print(f"Generated model structure at {os.path.join(output_dir, 'model_structure.py')}")
-        
-        print("\n=== Test Summary ===")
-        print(f"Successfully parsed {dynare_file} with correct timing convention")
-        print(f"Generated output files in {output_dir}")
-        print("Test completed successfully")
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-    
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
