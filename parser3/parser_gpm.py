@@ -1,1058 +1,539 @@
+# parser_gpm.py
+# Complete implementation based on structured workflow V4
+# Aiming for correct state classification and substitutions.
+
 import re
 import json
 import os
 import numpy as np
-import scipy.linalg as la
-import sys
+import pandas as pd
 import sympy as sy
-import matplotlib.pyplot as plt
+import sys
+
+# Helper JSON Encoder
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, (np.generic,)): return obj.item()
+        return json.JSONEncoder.default(self, obj)
 
 class DynareParser:
+    """
+    Parses a Dynare .mod file, transforms it for Klein solution format
+    (t+1 notation, states as lags), and generates output files.
+    """
     def __init__(self, file_path):
-        self.file_path = file_path
-        self.var_list = []
-        self.varexo_list = []
-        self.parameters = {}
-        self.equations = []
-        self.model_text = ""
-        self.state_variables = []
-        self.control_variables = []
-        self.all_variables = []
-        self.auxiliary_variables = []
+        if not os.path.exists(file_path): raise FileNotFoundError(f"File not found: {file_path}")
+        self.file_path = file_path; self.parameters = pd.Series(dtype=float)
+        self.var_list = []; self.varexo_list = []; self.original_equations = []
+        self.content = ""; self.param_names_declared = []
+        # Attributes populated by parse()
+        self.exo_process_info = {}; self.state_variables = []; self.control_variables = []
+        self.all_variables = []; self.future_variables = []; self.auxiliary_variables = []
+        self.auxiliary_equations = []; self.transformed_equations = []
+        self.final_shock_to_process_var_map = {}; self.state_to_shock_map = {}
+        self.shock_to_state_map = {}; self.zero_persistence_processes = []
+        self.endogenous_states = set(); self.exo_with_shocks = set(); self.exo_without_shocks = set()
 
-    def read_dynare_file(self):
-        """Read and preprocess the Dynare .mod file content"""
-        with open(self.file_path, 'r') as file:
-            self.content = file.read()
-        self.preprocess_content()  # Clean content immediately after reading
+    # --- Stage 1: Basic Parsing ---
+    def _read_and_preprocess(self):
+        print("--- Reading & Preprocessing ---")
+        try:
+            with open(self.file_path, 'r', encoding='utf-8') as f: self.content = f.read()
+            self.content = re.sub(r'//.*|%.*', '', self.content)
+            self.content = re.sub(r'/\*.*?\*/', '', self.content, flags=re.DOTALL)
+            self.content = re.sub(r'\s+', ' ', self.content).strip()
+        except Exception as e: raise IOError(f"Error reading/preprocessing {self.file_path}: {e}")
 
-    def preprocess_content(self):
-        """Remove comments and clean up content before parsing"""
-        # Remove single-line comments
-        self.content = re.sub(r'//.*', '', self.content)
-        # Remove extra whitespace
-        self.content = re.sub(r'\s+', ' ', self.content)
+    def _parse_declarations(self):
+        print("--- Parsing Declarations ---")
+        # Variables
+        m_var = re.search(r'var\s+(.*?);', self.content, re.I | re.DOTALL)
+        if m_var: self.var_list = [v for v in re.findall(r'\b([a-zA-Z_]\w*)\b', m_var.group(1)) if v]
+        else: print("Warning: 'var' declaration not found.")
+        # Shocks
+        m_exo = re.search(r'varexo\s+(.*?);', self.content, re.I | re.DOTALL)
+        if m_exo: self.varexo_list = [v for v in re.findall(r'\b([a-zA-Z_]\w*)\b', m_exo.group(1)) if v]
+        else: print("Warning: 'varexo' declaration not found.")
+        self.shocks = list(self.varexo_list)
+        # Parameters
+        m_param_decl = re.search(r'parameters\s+(.*?);', self.content, re.I | re.DOTALL)
+        if m_param_decl: self.param_names_declared = [p for p in re.findall(r'\b([a-zA-Z_]\w*)\b', m_param_decl.group(1)) if p]
+        else: print("Warning: 'parameters' declaration not found.")
+        param_val_pattern = re.compile(r'\b([a-zA-Z_]\w*)\b\s*=\s*([+-]?\d+\.?\d*(?:[eE][+-]?\d+)?)\s*;')
+        param_dict = {}
+        for name, val_str in param_val_pattern.findall(self.content):
+             if not self.param_names_declared or name in self.param_names_declared:
+                 try: param_dict[name] = float(val_str)
+                 except ValueError: print(f"Warning: Cannot parse value for param '{name}'.")
+        for p in self.param_names_declared:
+            if p not in param_dict: param_dict[p] = np.nan; print(f"Warning: Param '{p}' unassigned.")
+        ordered_keys = self.param_names_declared if self.param_names_declared else sorted(param_dict.keys())
+        self.parameters = pd.Series(param_dict).reindex(ordered_keys)
+        print(f"  Found {len(self.var_list)} vars, {len(self.varexo_list)} shocks, {len(self.parameters)} params.")
 
-    def parse_variables(self):
-        """Extract variable declarations from the Dynare file"""
-        var_section = re.search(r'var\s+(.*?);', self.content, re.DOTALL)
-        if var_section:
-            var_text = var_section.group(1)
-            # No need for comment removal here since we preprocessed
-            var_list = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', var_text)
-            self.var_list = [v for v in var_list if v]
-        
-    def parse_exogenous(self):
-        """Extract exogenous variable declarations from the Dynare file"""
-        varexo_section = re.search(r'varexo\s+(.*?);', self.content, re.DOTALL)
-        if varexo_section:
-            varexo_text = varexo_section.group(1)
-            # Remove comments and split by whitespace
-            varexo_text = re.sub(r'//.*', '', varexo_text)
-            varexo_list = [v.strip() for v in re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', varexo_text)]
-            self.varexo_list = [v for v in varexo_list if v]  # Remove empty strings
-            
-    def parse_parameters(self):
-        """Extract parameter declarations and values from the Dynare file"""
-        # Get parameter names
-        params_section = re.search(r'parameters\s+(.*?);', self.content, re.DOTALL)
-        if params_section:
-            params_text = params_section.group(1)
-            params_text = re.sub(r'//.*', '', params_text)  # Remove comments
-            param_list = [p.strip() for p in re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', params_text)]
-            param_list = [p for p in param_list if p]  # Remove empty strings
-            
-            # Initialize parameters dictionary
-            for param in param_list:
-                self.parameters[param] = None
-                
-            # Get parameter values
-            for param in param_list:
-                param_value = re.search(rf'{param}\s*=\s*([0-9.-]+)', self.content)
-                if param_value:
-                    self.parameters[param] = float(param_value.group(1))
-    
-    def parse_model(self):
-        """Extract the model equations from the Dynare file"""
-        model_section = re.search(r'model;(.*?)end;', self.content, re.DOTALL)
-        if model_section:
-            self.model_text = model_section.group(1).strip()
-            
-            # Split by semicolons to get individual equations
-            equations = re.split(r';', self.model_text)
-            equations = [eq.strip() for eq in equations if eq.strip()]
-            
-            self.equations = equations
+    def _parse_model_block(self):
+        print("--- Parsing Model Block ---")
+        m_model = re.search(r'model\s*;(.*?)\s*end\s*;', self.content, re.I | re.DOTALL)
+        if m_model: self.original_equations = [eq.strip() for eq in m_model.group(1).strip().split(';') if eq.strip()]
+        else: raise ValueError("'model;'...'end;' block not found or empty.")
+        print(f"  Found {len(self.original_equations)} original equations.")
 
-    def identify_exogenous_processes(self):
+    # --- Stage 2: Identify Exogenous Processes ---
+    def _identify_exogenous_processes(self):
         """
-        Identify exogenous process variables by finding the equations
-        where the declared exogenous shocks appear. Flags error if multiple
-        shocks are found in the RHS of a single equation defining a variable.
-
-        Returns:
-            Dictionary mapping the *process variable name* to details about
-            the exogenous process (shock, equation, etc.).
-            e.g., {'RES_RS': {'driving_shock': 'SHK_RS', 'equation': '...', ...}}
+        Identifies exogenous process variables via driving shocks. V4.
+        Sets self.exo_process_info. Raises ValueError on multi-shock errors.
+        Ensures pv is assigned before use.
         """
-        exo_processes = {} # Key: process variable name
+        print("\n--- Step 2: Identifying Exogenous Processes ---")
+        # --- Input Checks ---
+        if not hasattr(self, 'original_equations') or not self.original_equations:
+             print("  Error: Original equations not available (self.original_equations).")
+             self.exo_process_info = {}
+             return
+        if not hasattr(self, 'varexo_list'): # Shocks list
+             print("  Warning: No exogenous shocks (varexo) declared.")
+             self.varexo_list = [] # Ensure it exists as an empty list
+        if not hasattr(self, 'parameters') or not isinstance(self.parameters, pd.Series):
+             print("  Warning: Parameters not parsed correctly (should be Series).")
+             if not hasattr(self, 'parameters'): self.parameters = pd.Series(dtype=float)
 
-        for eq in self.equations:
+        self.exo_process_info = {} # Reset the dictionary for this run
+
+        # --- Iterate through original equations ---
+        for eq in self.original_equations: # Use the original list
             eq_clean = eq.strip()
-            if "=" not in eq_clean:
-                continue
+            if not eq_clean or "=" not in eq_clean:
+                continue # Skip empty or non-assignment lines
 
-            left, right = [s.strip() for s in eq_clean.split("=", 1)]
-            process_variable = left.strip() # Variable being defined
+            # --- Safely Split Equation ---
+            try:
+                left, right = [s.strip() for s in eq_clean.split("=", 1)]
+                # --- CRITICAL ASSIGNMENT of Process Variable ---
+                process_variable = left # Assign Potential LHS variable (pv)
+                # -------------------------------------------
+            except ValueError:
+                 print(f"  Warning: Skipping malformed equation line: {eq_clean}")
+                 continue # Skip this equation entirely
 
-            # Find ALL shocks on the RHS
-            found_shocks = []
-            for shock in self.varexo_list:
-                if re.search(r'\b' + re.escape(shock) + r'\b', right):
-                    found_shocks.append(shock)
+            # --- Validate LHS ---
+            if not process_variable:
+                 print(f"  Warning: Skipping equation with empty LHS: {eq_clean}")
+                 continue # Skip this equation
 
-            # --- Process based on shocks found ---
+            # --- Find Shocks on RHS ---
+            # Use word boundaries (\b) to ensure full match
+            found_shocks = [
+                s for s in self.varexo_list
+                if re.search(r'\b' + re.escape(s) + r'\b', right)
+            ]
+
+            # --- Process based on Shocks Found ---
             if len(found_shocks) == 1:
-                # Exactly one shock found - this defines an exogenous process
+                # === Exactly One Shock: Process This Equation ===
                 driving_shock = found_shocks[0]
 
-                # --- Check for Re-definition ---
-                if process_variable in exo_processes:
-                    print(f"Warning: Exogenous process variable '{process_variable}' seems to be defined "
-                        f"by multiple equations/shocks ('{exo_processes[process_variable]['driving_shock']}' and '{driving_shock}'). "
-                        f"Using the definition from equation: {eq}")
-                    # Decide how to handle - overwrite or error? Overwriting for now.
+                # --- Check for Redefinition using the ASSIGNED process_variable ---
+                # 'process_variable' is guaranteed to be defined here if this block is reached
+                if process_variable in self.exo_process_info:
+                    print(f"  Warning: Redefinition of exogenous process variable '{process_variable}'. Overwriting with equation: {eq_clean}")
+                # -----------------------------------------------------------------
 
-                # Store information keyed by the PROCESS variable name
-                exo_processes[process_variable] = {
-                    'driving_shock': driving_shock,
-                    'equation': eq,
-                    'right_side': right,
-                    'left_side': left
-                }
-
-                # Analyze AR structure (same as before)
+                # --- Analyze AR Structure & Persistence ---
                 ar_params = {}
-                # ... (AR parameter detection logic remains the same) ...
-                for k in range(1, 5):
-                    lag_pattern = rf'\b{re.escape(process_variable)}\(\s*-{k}\s*\)\b'
-                    match = re.search(rf'(\b[a-zA-Z_]\w*\b)\s*\*\s*{lag_pattern}', right)
-                    if match:
-                        param_name = match.group(1)
-                        if param_name in self.parameters:
-                            ar_params[k] = param_name
-                        # else: print warning if needed
-
-                exo_processes[process_variable]['ar_params'] = ar_params
-
-                # Check for zero persistence (same as before)
                 is_zero_persistence = True
-                # ... (zero persistence check logic remains the same) ...
-                for lag, param in ar_params.items():
-                    if param in self.parameters and abs(self.parameters[param]) > 1e-10:
-                        is_zero_persistence = False
-                        break
-                exo_processes[process_variable]['zero_persistence'] = is_zero_persistence
+                max_ar_lag = 5
 
-                print(f"Identified exogenous process: Var='{process_variable}', driving_shock='{driving_shock}', "
-                    f"AR_params={list(ar_params.values())}, zero_persist={is_zero_persistence}")
+                for k in range(1, max_ar_lag + 1):
+                    lag_pattern_re = rf'\b{re.escape(process_variable)}\(\s*-{k}\s*\)\b'
+                    # Look for 'param * lag_term'
+                    mult_match = re.search(rf'(\b[a-zA-Z_][a-zA-Z0-9_]*\b)\s*\*\s*{lag_pattern_re}', right)
+                    if mult_match:
+                         param_name = mult_match.group(1)
+                         if param_name in self.parameters.index:
+                              ar_params[k] = param_name
+                              if abs(self.parameters.get(param_name, 0.0)) > 1e-9:
+                                   is_zero_persistence = False
+                         # else: print(f"Warning: Potential AR param '{param_name}' not found.")
 
+                if ar_params and is_zero_persistence: # Recheck if all found params are zero
+                     all_params_near_zero = all(abs(self.parameters.get(p, 0.0)) <= 1e-9 for p in ar_params.values())
+                     is_zero_persistence = all_params_near_zero
+
+                # Store results
+                self.exo_process_info[process_variable] = {
+                    'driving_shock': driving_shock, 'equation': eq,
+                    'right_side': right, 'left_side': left,
+                    'ar_params': ar_params, 'zero_persistence': is_zero_persistence
+                }
+                print(f"  Identified: Var='{process_variable}', Shock='{driving_shock}', ZP={is_zero_persistence}")
 
             elif len(found_shocks) > 1:
-                # --- ERROR: Multiple shocks found ---
-                raise ValueError(f"Equation defining '{process_variable}' contains multiple shocks "
-                                f"({', '.join(found_shocks)}) on the RHS. This is not allowed.\n"
-                                f"Equation: {eq}")
+                # === Multiple Shocks: Raise Error ===
+                # 'process_variable' is also guaranteed to be defined here
+                error_msg = (f"Equation defining '{process_variable}' contains multiple shocks "
+                             f"({', '.join(found_shocks)}) on the RHS. This parser requires "
+                             f"each exogenous process variable to be driven by a single shock.\n"
+                             f"Equation: {eq_clean}")
+                raise ValueError(error_msg)
 
-            # If len(found_shocks) == 0, this equation doesn't define a primary exogenous process.
+            # If len(found_shocks) == 0, it's treated as an endogenous equation.
 
-        # Store this map keyed by process variable name
-        self.exo_process_info = exo_processes # Renamed for clarity
-        return exo_processes
+        print(f"--- Finished identification. Found {len(self.exo_process_info)} shock-driven processes. ---")
+    
+    # --- Stage 3: Rewrite Exogenous Equations (In Memory) ---
+    def _rewrite_exogenous_equations(self):
+        print("\n--- Step 3: Rewriting Exogenous Equations ---")
+        rewritten_exo_eqs = {}; max_lag = 10
+        if not self.exo_process_info: print("  No processes to rewrite."); return {}
+        for pv, info in self.exo_process_info.items():
+            rhs=info['right_side']; shock=info['driving_shock']; orig_eq=info['equation']
+            if not all([rhs, shock, orig_eq]): continue
+            new_l = f"{pv}_p"; current_rhs = rhs
+            for k in range(max_lag, 0, -1): # Apply lag substitution
+                pat = rf'\b{re.escape(pv)}\(\s*-{k}\s*\)\b'; repl = pv if k == 1 else f"{pv}_lag{k-1}"
+                current_rhs = re.sub(pat, repl, current_rhs)
+            if not re.search(r'\b'+re.escape(shock)+r'\b', current_rhs): # Ensure shock present
+                if info['zero_persistence'] and len(current_rhs.replace(shock,'').split())==0: current_rhs=shock
+                elif shock not in current_rhs: current_rhs += f" + {shock}"
+            rewritten_eq = f"{new_l} = {current_rhs}"
+            rewritten_exo_eqs[pv] = rewritten_eq
+            print(f"  Rewriting '{orig_eq}' -> '{rewritten_eq}'")
+        print(f"--- Finished rewriting {len(rewritten_exo_eqs)} exo eqs. ---")
+        return rewritten_exo_eqs
 
-    def rewrite_exogenous_equations_with_correct_timing(self):
-        """
-        Rewrites equations defining exogenous processes (identified via shocks).
-        Uses self.exo_process_info. Modifies self.equations in place.
-        """
-        print("\n--- Rewriting Exogenous Process Equations (Shock-Driven ID, Process Key) ---")
+    # --- Stage 4: Analyze ALL Potential Equations ---
+    def _analyze_all_equations(self, equations_to_analyze):
+        print(f"\n--- Step 4: Analyzing Variables in {len(equations_to_analyze)} Combined Equations ---")
+        variable_shifts = {}; all_base_variables = set()
+        var_pat = re.compile(r'\b([a-zA-Z_]\w*)\b')
+        shift_pat = re.compile(r'\b([a-zA-Z_]\w*)\s*\(\s*([+-]\d+)\s*\)')
+        params = set(self.parameters.index); shocks = set(self.varexo_list)
+        for eq in equations_to_analyze:
+            pot_names = set(var_pat.findall(eq)); curr_vars = pot_names - params - shocks
+            all_base_variables.update(v for v in curr_vars if v)
+            shifts_found = set()
+            for var, shift_str in shift_pat.findall(eq):
+                if var in curr_vars: shifts_found.add(var); variable_shifts.setdefault(var,set()).add(int(shift_str))
+            for var in curr_vars:
+                if var not in shifts_found and re.search(rf'\b{re.escape(var)}\b(?!\s*\()', eq): variable_shifts.setdefault(var,set()).add(0)
+        all_base_variables = {v for v in all_base_variables if v}
+        variable_shifts = {k: v for k, v in variable_shifts.items() if k and v}
+        print(f"  Analysis found {len(all_base_variables)} unique potential vars.")
+        return variable_shifts, all_base_variables
 
-        if not hasattr(self, 'exo_process_info'):
-            self.identify_exogenous_processes() # Ensure it's run
+    # --- Stage 5: Generate Auxiliary Definitions ---
+    def _generate_auxiliaries(self, variable_shifts, all_base_variables):
+        """ Creates aux equations and classifies vars. State = _lag rule. """
+        print("\n--- Step 5: Generating Auxiliaries & Classifying Vars (State=Lag Rule) ---")
+        transformation_map = {}  # Maps X(-k) -> X_lagk
+        aux_equations = []
+        processed_aux_eqs = set()
+        model_vars = {'state_variables': set(), 'control_variables': set(), 'aux_variables': set(),
+                      'all_variables': set(), 'future_variables': set()}
+        parameter_names = set(self.parameters.index); shock_names = set(self.varexo_list)
 
-        if not self.exo_process_info:
-            print("No exogenous processes identified to rewrite.")
-            return {}
+        # Pass 1: Initial classification based on ALL detected base names
+        print("  Pass 1: Initial Classification...")
+        for var_name in all_base_variables:
+            if var_name in shock_names or var_name.endswith("_p") or var_name in parameter_names: continue
+            model_vars['all_variables'].add(var_name)
+            if re.search(r'_lag\d*$', var_name): model_vars['state_variables'].add(var_name)
+            else: model_vars['control_variables'].add(var_name)
 
-        eq_rewrites = {}
+        # Pass 2: Generate auxiliaries based on SHIFTS
+        print("  Pass 2: Generating Aux Equations based on shifts...")
+        unique_vars_with_shifts = set(variable_shifts.keys()) | \
+                                  {re.sub(r'_lag\d*$', '', v) for v in all_base_variables if '_lag' in v} | \
+                                  {re.sub(r'_lead\d*$', '', v) for v in all_base_variables if '_lead' in v}
+        unique_vars_with_shifts -= (shock_names | parameter_names)
 
-        # Iterate through {process_variable: info_dict}
-        for process_variable, process_info in self.exo_process_info.items():
-            original_eq = process_info['equation']
-            right_side = process_info['right_side']
-            driving_shock = process_info['driving_shock'] # Shock associated with this process
+        max_lag_needed = {}; max_lead_needed = {}
+        for var in unique_vars_with_shifts:
+            shifts = variable_shifts.get(var, set())
+            max_lag_needed[var] = abs(min((s for s in shifts if s <= 0), default=0))
+            max_lead_needed[var] = max((s for s in shifts if s >= 0), default=0)
 
-            # Apply correct timing: Z_t = f(Z_{t-k}) + SHK_t ==> Z_{t+1} = f(Z_{t+1-k}) + SHK_t
-            # Notation:             Z_p = f(Z, Z_lag, ...) + SHK
+        for base_name in unique_vars_with_shifts:
+            # Ensure base var is known & classified
+            if base_name not in model_vars['all_variables']: model_vars['all_variables'].add(base_name)
+            if base_name not in model_vars['state_variables']: model_vars['control_variables'].add(base_name)
 
-            new_left = f"{process_variable}_p"
-            new_right = right_side
+            # Generate Lag Aux
+            if max_lag_needed[base_name] > 0:
+                prev = base_name
+                for i in range(1, max_lag_needed[base_name] + 1):
+                    curr = f"{base_name}_lag" if i == 1 else f"{base_name}_lag{i}"
+                    model_vars['all_variables'].add(curr); model_vars['state_variables'].add(curr)
+                    model_vars['aux_variables'].add(curr); model_vars['control_variables'].discard(curr)
+                    transformation_map[f"{base_name}(-{i})"] = curr
+                    eq = f"{curr}_p = {prev}"; cp = f"{curr}_p"
+                    model_vars['all_variables'].add(cp); model_vars['future_variables'].add(cp)
+                    if eq not in processed_aux_eqs: aux_equations.append(eq); processed_aux_eqs.add(eq)
+                    if prev not in model_vars['all_variables']: model_vars['all_variables'].add(prev) # Ensure RHS exists
+                    prev = curr
+            # Generate Lead Aux
+            if max_lead_needed[base_name] > 0:
+                fp = f"{base_name}_p"; model_vars['all_variables'].add(fp); model_vars['future_variables'].add(fp)
+                if max_lead_needed[base_name] > 1:
+                    prev_p = fp
+                    for i in range(1, max_lead_needed[base_name]): # Need lead up to N-1 if N exists
+                         curr = f"{base_name}_lead{i}"
+                         model_vars['all_variables'].add(curr); model_vars['control_variables'].add(curr)
+                         model_vars['aux_variables'].add(curr)
+                         eq = f"{curr} = {prev_p}"
+                         if eq not in processed_aux_eqs: aux_equations.append(eq); processed_aux_eqs.add(eq)
+                         prev_p = f"{curr}_p"
+                         model_vars['all_variables'].add(prev_p); model_vars['future_variables'].add(prev_p)
 
-            # Rewrite lags Z(-k) -> Z_lag{k-1}
-            for lag in range(10, 0, -1):
-                old_pattern = rf'\b{re.escape(process_variable)}\(\s*-{lag}\s*\)\b'
-                new_pattern = process_variable if lag == 1 else f"{process_variable}_lag{lag-1}"
-                new_right = re.sub(old_pattern, new_pattern, new_right)
+        # Final Consolidation
+        model_vars['control_variables'] -= model_vars['state_variables']
+        model_vars['all_variables'] = {v for v in model_vars['all_variables'] if not v.endswith('_p')}
+        model_vars['state_variables'] = {v for v in model_vars['state_variables'] if not v.endswith('_p')}
+        model_vars['control_variables'] = {v for v in model_vars['control_variables'] if not v.endswith('_p')}
+        model_vars['future_variables'] = {v for v in model_vars['future_variables']}
 
-            # Keep original shock name on RHS (SHK)
-            if not re.search(r'\b' + re.escape(driving_shock) + r'\b', new_right):
-                # Handle if shock disappeared (e.g., zero persistence Z = SHK)
-                if process_info['zero_persistence'] and new_right.strip() == '':
-                    new_right = driving_shock # If eq was just Z = SHK, rewrite Z_p = SHK
-                elif driving_shock not in new_right:
-                    print(f"Warning: Shock '{driving_shock}' missing from rewritten RHS for '{process_variable}'. Re-adding.")
-                    new_right += f" + {driving_shock}"
+        print(f"  Generated {len(aux_equations)} aux equations.")
+        print(f"  Final Plan States ({len(model_vars['state_variables'])}): {sorted(list(model_vars['state_variables']))}")
+        print(f"  Final Plan Controls ({len(model_vars['control_variables'])}): {sorted(list(model_vars['control_variables']))}")
 
-            new_eq = f"{new_left} = {new_right}"
-            eq_rewrites[original_eq] = new_eq
-            print(f"Rewriting '{original_eq}' -> '{new_eq}'")
+        return transformation_map, aux_equations, model_vars
 
-            # Update map with rewritten info
-            self.exo_process_info[process_variable]['rewritten_equation'] = new_eq
-            # ... (add rewritten_left, rewritten_right if needed elsewhere) ...
-
-        # Apply rewrites (same as before)
-        modified_equations = [eq_rewrites.get(eq, eq) for eq in self.equations]
-        self.equations = modified_equations
-        print("Exogenous equation rewrite complete.")
-        return eq_rewrites
-
-    def analyze_model_variables(self):
-        """
-        First pass: Analyze all variables and their time shifts across the entire model.
-        
-        Returns:
-            variable_shifts: Dictionary mapping each variable to its set of time shifts
-            all_variables: Set of all base variable names found in the model
-        """
-        variable_shifts = {}  # Maps variables to their time shifts
-        all_variables = set()  # All base variable names
-        
-        # Process each equation to find variables and their time shifts
-        for equation in self.equations:
-            # Remove comments and clean up
-            equation = re.sub(r'//.*', '', equation).strip()
-            
-            # Find all base variables (excluding parameters)
-            base_vars = set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', equation))
-            base_vars = base_vars - set(self.parameters.keys())
-            
-            # Add to all_variables set
-            all_variables.update(base_vars)
-            
-            # For each variable, find all its lead/lag patterns
-            for var_name in base_vars:
-                # Initialize if not already in dictionary
-                if var_name not in variable_shifts:
-                    variable_shifts[var_name] = set()
-                    variable_shifts[var_name].add(0)  # Always include current period
-                
-                # Find all lead/lag patterns for this variable
-                lead_lag_pattern = rf'{var_name}\(\s*([+-]?\d+)\s*\)'
-                lead_lag_matches = re.findall(lead_lag_pattern, equation)
-                
-                # Add all time shifts found for this variable
-                for time_shift_str in lead_lag_matches:
-                    variable_shifts[var_name].add(int(time_shift_str))
-        
-        return variable_shifts, all_variables
-
-    def create_transformation_plan(self, variable_shifts):
-        """
-        Create transformation plan.
-        State Definition: Variable is a state IFF its name ends with _lag or _lagN.
-        Contemporaneous RES_* variables are controls.
-        """
-        # ... (initial setup: transformation_map, aux_equations, etc.) ...
-
-        model_variables = {
-            'state_variables': set(),
-            'control_variables': set(),
-            'aux_variables': set(),
-            'all_variables': set(),
-            'future_variables': set()
-        }
-
-        all_detected_var_names = set(variable_shifts.keys())
-
-        # --- Pass 1: Register variables and apply STRICT state classification ---
-        for var_name in all_detected_var_names:
-            if var_name in self.varexo_list or var_name.endswith("_p"):
-                continue
-            model_variables['all_variables'].add(var_name)
-
-            # --- STRICT Rule: State ONLY if it ends with _lag ---
-            if re.search(r'_lag\d*$', var_name):
-                model_variables['state_variables'].add(var_name)
-            elif var_name not in self.varexo_list: # Otherwise, it's a control
-                model_variables['control_variables'].add(var_name)
-
-        # --- Pass 2: Process shifts and generate auxiliary structures ---
-        # The logic here should remain largely the same as the previous version,
-        # ensuring that *if* a lag (like X_lag, X_lag2, RES_RS_lag) is needed
-        # (either by finding X(-k) or detecting X_lagk directly),
-        # it is added to the correct sets (all_variables, state_variables, aux_variables)
-        # and its defining equation (X_lag_p = X or X_lag2_p = X_lag) is generated.
-        # The classification done in Pass 1 is definitive for state/control status.
-
-        for var_name, shifts in variable_shifts.items():
-            # ... (skip shocks) ...
-
-            base_name = re.sub(r'_lag\d*$', '', var_name)
-            is_already_lag = re.search(r'_lag\d*$', var_name) is not None
-
-            # --- Handle Lags ---
-            min_lag_shift = min((s for s in shifts if s <= 0), default=1)
-            current_lag_level = 0
-            if is_already_lag:
-                lag_match = re.search(r'_lag(\d*)$', var_name)
-                current_lag_level = 1
-                if lag_match and lag_match.group(1):
-                    current_lag_level = int(lag_match.group(1))
-            effective_min_lag = min(min_lag_shift, -current_lag_level if current_lag_level > 0 else 0)
-
-            if effective_min_lag < 0:
-                # Ensure base variable exists and is classified (likely as control)
-                if base_name not in model_variables['all_variables']:
-                    model_variables['all_variables'].add(base_name)
-                    if base_name not in model_variables['state_variables'] and \
-                        base_name not in self.varexo_list:
-                        model_variables['control_variables'].add(base_name)
-
-
-                prev_lag_var = base_name
-                for i in range(1, abs(effective_min_lag) + 1):
-                    curr_lag_var = f"{base_name}_lag" if i == 1 else f"{base_name}_lag{i}"
-
-                    # Add lag variable (it MUST be a state by the rule)
-                    model_variables['all_variables'].add(curr_lag_var)
-                    model_variables['state_variables'].add(curr_lag_var) # Confirms state status
-                    model_variables['aux_variables'].add(curr_lag_var)
-                    if curr_lag_var in model_variables['control_variables']:
-                        model_variables['control_variables'].remove(curr_lag_var) # Remove if wrongly added
-
-                    # Define mapping if needed
-                    if -i in shifts:
-                        transformation_map[f"{base_name}(-{i})"] = curr_lag_var
-
-                    # Create auxiliary equation
-                    aux_eq = f"{curr_lag_var}_p = {prev_lag_var}"
-                    if aux_eq not in processed_aux_eqs:
-                        # ... (add aux_eq, register _p vars, etc. - same as before) ...
-                        aux_equations.append(aux_eq)
-                        processed_aux_eqs.add(aux_eq)
-                        model_variables['all_variables'].add(f"{curr_lag_var}_p")
-                        model_variables['future_variables'].add(f"{curr_lag_var}_p")
-                        model_variables['all_variables'].add(prev_lag_var)
-
-
-                    prev_lag_var = curr_lag_var
-
-            # --- Handle Leads ---
-            # Logic remains the same as before (leads -> controls, aux eqs up to n-1)
-            # Ensure base variable is classified correctly (likely control)
-            # ... (lead handling code from previous correct version) ...
-            max_lead_shift = max((s for s in shifts if s >= 0), default=-1)
-            if max_lead_shift >= 0: # Current or future shifts exist
-                if base_name not in model_variables['all_variables']:
-                    model_variables['all_variables'].add(base_name)
-                    if base_name not in model_variables['state_variables'] and \
-                        base_name not in self.varexo_list:
-                        model_variables['control_variables'].add(base_name)
-            # ... (rest of lead code: creating lead vars, aux eqs etc.)
-
-        # --- Final Consolidation ---
-        # Ensure sets are disjoint based on the strict _lag rule
-        model_variables['control_variables'] = model_variables['control_variables'] - model_variables['state_variables']
-        # Remove _p vars
-        model_variables['state_variables'] = {v for v in model_variables['state_variables'] if not v.endswith('_p')}
-        model_variables['control_variables'] = {v for v in model_variables['control_variables'] if not v.endswith('_p')}
-        model_variables['all_variables'] = {v for v in model_variables['all_variables'] if not v.endswith('_p')}
-
-        # ... (Debug prints) ...
-
-        return transformation_map, aux_equations, model_variables
-
-    def apply_transformation(self):
-        """
-        Complete model transformation.
-        Final Classification Rule: State iff ends with _lag.
-        """
-        print("\n=== Applying Model Transformation (State=Lag Rule) ===")
-
-        # Step 1: Rewrite exogenous equations (as before)
-        self.rewrite_exogenous_equations_with_correct_timing()
-
-        # Step 2: Analyze variables and shifts *after* rewriting
-        variable_shifts, all_base_variables = self.analyze_model_variables()
-
-        # Step 3: Create transformation plan (uses the modified logic)
-        transformation_map, aux_equations, model_variables_dict = self.create_transformation_plan(variable_shifts)
-
-        # Step 4: Apply transformations to all equations (as before)
-        transformed_equations = []
-        # ... (logic for substituting lags/leads remains the same) ...
-        for i, equation in enumerate(self.equations):
-            clean_eq = re.sub(r'//.*', '', equation).strip()
-            transformed_eq = clean_eq
-            eq_vars = set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', clean_eq))
-            eq_vars = eq_vars & all_base_variables
-            for var_name in sorted(list(eq_vars), key=len, reverse=True):
+    # --- Stage 6: Apply Final Substitutions ---
+    def _apply_substitutions(self, equations_to_transform, transformation_map, model_vars_dict):
+        """ Applies final lag/lead substitutions """
+        print(f"\n--- Step 6: Applying Final Substitutions to {len(equations_to_transform)} Equations ---")
+        fully_transformed_eqs = []
+        all_final_vars = model_vars_dict.get('state_variables', set()) | model_vars_dict.get('control_variables', set())
+        stems = sorted(list(all_final_vars | \
+                      {re.sub(r'_lag\d*$', '', v) for v in all_final_vars if '_lag' in v} | \
+                      {re.sub(r'_lead\d*$', '', v) for v in all_final_vars if '_lead' in v}),
+                   key=len, reverse=True)
+        print(f"  Substituting based on {len(stems)} stems...")
+        for eq_in in equations_to_transform:
+            eq_out = eq_in
+            for stem in stems:
+                if not stem: continue
+                # Lags: VAR(-k) -> VAR_lagk
                 for k in range(10, 0, -1):
-                    orig_expr_pattern = rf'{re.escape(var_name)}\(\s*-{k}\s*\)'
-                    map_key = f"{var_name}(-{k})"
-                    if map_key in transformation_map:
-                        transformed_eq = re.sub(orig_expr_pattern, transformation_map[map_key], transformed_eq)
-                orig_expr_p1 = rf'{re.escape(var_name)}\(\s*\+1\s*\)'
-                transformed_eq = re.sub(orig_expr_p1, f'{var_name}_p', transformed_eq)
-                for j in range(2, 10):
-                    orig_expr_pn = rf'{re.escape(var_name)}\(\s*\+{j}\s*\)'
-                    replacement = f'{var_name}_lead{j-1}_p'
-                    transformed_eq = re.sub(orig_expr_pn, replacement, transformed_eq)
-            transformed_equations.append(transformed_eq)
+                    mk=f"{stem}(-{k})"; pat=rf'\b{re.escape(stem)}\(\s*-{k}\s*\)\b'
+                    if mk in transformation_map: eq_out=re.sub(pat, transformation_map[mk], eq_out)
+                # Leads: VAR(+1)->VAR_p, VAR(+k)->VAR_lead{k-1}_p
+                pat_p1=rf'\b{re.escape(stem)}\(\s*\+1\s*\)\b'; eq_out=re.sub(pat_p1, f'{stem}_p', eq_out)
+                for k in range(2, 10):
+                    pat_pk=rf'\b{re.escape(stem)}\(\s*\+{k}\s*\)\b'; repl=f'{stem}_lead{k-1}_p'
+                    eq_out=re.sub(pat_pk, repl, eq_out)
+            if eq_out.strip(): fully_transformed_eqs.append(eq_out)
+        print(f"  Finished substitutions. Resulting model equations: {len(fully_transformed_eqs)}")
+        return fully_transformed_eqs
 
-        # Step 5: Update intermediate properties
-        self.transformed_equations = transformed_equations
-        self.auxiliary_equations = aux_equations
-
-        # --- Step 6: Final Variable Classification & Ordering ---
-        # Get the sets identified by create_transformation_plan
-        identified_states = model_variables_dict['state_variables'] # Should ONLY contain _lag vars now
-        identified_controls = model_variables_dict['control_variables'] # Should include RES_* vars
-        identified_all_vars = model_variables_dict['all_variables'] # All non-_p vars
-        identified_aux_vars = model_variables_dict['aux_variables']
-        identified_future_vars = model_variables_dict['future_variables']
-
-        # Analyze exogenous processes based on transformed model to map shocks
-        exo_info = self.analyze_exogenous_processes_with_correct_timing()
-        self.shock_to_state_map = exo_info.get('shock_to_state_map', {})
-        self.state_to_shock_map = exo_info.get('state_to_shock_map', {})
-        self.zero_persistence_processes = exo_info.get('zero_persistence_processes', [])
-
-        # Classify the identified states (_lag vars) into endogenous/exogenous
-        self.endogenous_states = set()
-        self.exo_with_shocks = set()
-        self.exo_without_shocks = set()
-
-        shock_driven_exo_bases = set()
-        for shock, state_target in self.shock_to_state_map.items():
-            # Map points to the base RES name (e.g., RES_X from RES_X or RES_X_lag)
-            base_name = re.sub(r'_lag\d*$', '', state_target)
-            if base_name.startswith("RES_"):
-                shock_driven_exo_bases.add(base_name)
-
-        for state_var in identified_states: # Iterate only over vars ending in _lag
-            if state_var.startswith("RES_"):
-                base_name = re.sub(r'_lag\d*$', '', state_var)
-                if base_name in shock_driven_exo_bases:
-                    self.exo_with_shocks.add(state_var)
-                else:
-                    self.exo_without_shocks.add(state_var)
-            else:
-                self.endogenous_states.add(state_var)
-
-        # Assign final sorted lists
-        self.state_variables = sorted(list(self.endogenous_states)) + \
-                            sorted(list(self.exo_with_shocks)) + \
-                            sorted(list(self.exo_without_shocks))
-
-        # Controls are everything in identified_controls
-        self.control_variables = sorted(list(identified_controls))
-
-        # Ensure consistency: All vars = states + controls
-        self.all_variables = self.state_variables + self.control_variables
-        # Double check identified_all_vars matches - potential debug step
-        if set(self.all_variables) != identified_all_vars:
-            print("Warning: Final all_variables mismatch with identified_all_vars!")
-            print(f"  Final: {set(self.all_variables)}")
-            print(f"  Identified: {identified_all_vars}")
-            # Fallback or recalculate? Let's use the constructed list for now.
-
-        self.auxiliary_variables = sorted(list(identified_aux_vars))
-        self.future_variables = sorted(list(identified_future_vars))
-
-
-        # Step 7: Format equations (as before)
-        formatted_equations = self.format_transformed_equations(transformed_equations, aux_equations)
-
-        print(f"\nModel transformation complete (State=Lag Rule):")
-        print(f"  States ({len(self.state_variables)}): {self.state_variables}")
-        print(f"  Controls ({len(self.control_variables)}): {self.control_variables}")
-        print(f"  All Variables ({len(self.all_variables)}): {self.all_variables}")
-        print(f"  Future Vars ({len(self.future_variables)}): {self.future_variables}")
-        print(f"  Aux Equations: {len(self.auxiliary_equations)}")
-
-        # Prepare the final output dictionary (as before)
-        output = {
-            'equations': formatted_equations,
-            'state_variables': self.state_variables,
-            'control_variables': self.control_variables,
-            'auxiliary_variables': self.auxiliary_variables,
-            'all_variables': self.all_variables,
-            'future_variables': self.future_variables,
-            'endogenous_states': sorted(list(self.endogenous_states)),
-            'exo_with_shocks': sorted(list(self.exo_with_shocks)),
-            'exo_without_shocks': sorted(list(self.exo_without_shocks)),
-            'shock_to_state_map': self.shock_to_state_map,
-            'state_to_shock_map': self.state_to_shock_map,
-            'zero_persistence_processes': self.zero_persistence_processes,
-            'parameters': list(self.parameters.keys()),
-            'param_values': self.parameters,
-            'shocks': self.varexo_list,
-        }
-        # output['output_text'] = self.generate_output_text(formatted_equations)
-
-        return output
-
-    def analyze_exogenous_processes_with_correct_timing(self):
-        """
-        Analyze exogenous processes in the model with the correct timing convention.
-        
-        Returns:
-            Dictionary with exogenous process analysis results
-        """
-        print("\n--- Analyzing Exogenous Processes with Correct Timing ---")
-        
-        # Initialize mappings
-        shock_to_state_map = {}
-        state_to_shock_map = {}
-        zero_persistence_processes = []
-        
-        # Identify all exogenous processes (RES_* variables)
-        exo_processes = {}
-        for var in self.all_variables:
-            if var.startswith("RES_"):
-                exo_processes[var] = {
-                    'lags': [v for v in self.all_variables if v.startswith(f"{var}_lag")]
-                }
-        
-        # Analyze exogenous process equations
-        for eq in self.transformed_equations:
-            if "=" not in eq:
-                continue
-                
-            left, right = [s.strip() for s in eq.split("=", 1)]
-            
-            # Check for exogenous process equations (now with _p on the left side)
-            for process_name in exo_processes.keys():
-                if left == f"{process_name}_p":
-                    # This is the equation for this exogenous process
-                    exo_processes[process_name]['equation'] = eq
-                    
-                    # Check for AR parameters
-                    ar_params = re.findall(r'(rho_\w+)\s*\*', right)
-                    exo_processes[process_name]['ar_params'] = ar_params
-                    
-                    # Check for zero persistence
-                    is_zero_persistence = True
-                    for param in ar_params:
-                        if param in self.parameters and abs(self.parameters[param]) > 1e-10:
-                            is_zero_persistence = False
-                            break
-                    
-                    if is_zero_persistence:
-                        zero_persistence_processes.append(process_name)
-                    
-                    # Check which shock drives this process
-                    for shock in self.varexo_list:
-                        if shock in right:
-                            exo_processes[process_name]['shock'] = shock
-                            
-                            # Important: Map the shock to both the process
-                            # and its first lag variable if it exists
-                            shock_to_state_map[shock] = process_name
-                            state_to_shock_map[process_name] = shock
-                            
-                            # Also map to lag variable
-                            lag_var = f"{process_name}_lag"
-                            if lag_var in self.all_variables:
-                                shock_to_state_map[shock] = lag_var
-                                state_to_shock_map[lag_var] = shock
-                            
-                            print(f"  Process {process_name} is driven by shock {shock}")
-                            if is_zero_persistence:
-                                print(f"  Process {process_name} has ZERO PERSISTENCE")
-        
-        return {
-            'shock_to_state_map': shock_to_state_map,
-            'state_to_shock_map': state_to_shock_map,
-            'zero_persistence_processes': zero_persistence_processes,
-            'exo_processes': exo_processes
-        }
-
-    def format_transformed_equations(self, main_equations, aux_equations):
-        """Format transformed equations for output"""
-        formatted_equations = []
-        
-        # Process main equations
-        for i, equation in enumerate(main_equations):
-            # Convert equation to standard form (right side - left side = 0)
-            if "=" in equation:
-                left_side, right_side = equation.split("=", 1)
-                formatted_eq = f"{right_side.strip()} - ({left_side.strip()})"
-            else:
-                formatted_eq = equation
-            
-            eq_dict = {f"eq{i+1}": formatted_eq}
-            formatted_equations.append(eq_dict)
-        
-        # Process auxiliary equations
-        for i, aux_equation in enumerate(aux_equations):
-            left_side, right_side = aux_equation.split("=", 1)
-            formatted_eq = f"{right_side.strip()} - ({left_side.strip()})"
-            
-            eq_dict = {f"eq{len(main_equations) + i + 1}": formatted_eq}
-            formatted_equations.append(eq_dict)
-        
-        return formatted_equations
-    
-    def generate_output_text(self, formatted_equations):
-        """Generate output text in the required format"""
-        output_text = "equations = {\n"
-        
-        for i, eq_dict in enumerate(formatted_equations):
-            for eq_name, eq_value in eq_dict.items():
-                output_text += f'\t{{"{eq_name}": "{eq_value}"}}'
-                if i < len(formatted_equations) - 1:
-                    output_text += ",\n"
-                else:
-                    output_text += "\n"
-        
-        output_text += "};\n\n"
-        
-        output_text += "variables = ["
-        output_text += ", ".join([f'"{var}"' for var in self.all_variables])
-        output_text += "];\n\n"
-        
-        output_text += "parameters = ["
-        output_text += ", ".join([f'"{param}"' for param in self.parameters.keys()])
-        output_text += "];\n\n"
-        
-        for param, value in self.parameters.items():
-            output_text += f"{param} = {value};\n"
-        
-        output_text += "\n"
-        
-        output_text += "shocks = ["
-        output_text += ", ".join([f'"{shock}"' for shock in self.varexo_list])
-        output_text += "];\n"
-        
-        return output_text
-    
+    # --- Main Orchestration Method ---
     def parse(self):
-        """Main parsing function with correct timing implementation"""
-        self.read_dynare_file()
-        self.parse_variables()
-        self.parse_exogenous()
-        self.parse_parameters()
-        self.parse_model()
-        
-        # Apply the model transformation with correct timing
-        output = self.apply_transformation()
-        
-        # Add other necessary output fields
-        output['parameters'] = list(self.parameters.keys())
-        output['param_values'] = self.parameters
-        output['shocks'] = self.varexo_list
-        output['output_text'] = self.generate_output_text(output['equations'])
-        
-        return output
-    
-    def save_json(self, output_file):
-        """Save the parsed model to a JSON file"""
-        output = self.parse()
-        with open(output_file, 'w') as f:
-            json.dump(output, f, indent=2)
-        print(f"Model parsed and saved to {output_file}")
-        return output
+        """ Main parsing function - Simplified & Direct V4 """
+        print("\n--- Starting Dynare File Parsing (Simplified V4) ---")
+        # Step 1: Initial Parse
+        self._read_and_preprocess(); self._parse_declarations(); self._parse_model_block()
+        if not self.original_equations: raise ValueError("No model equations found.")
 
+        # Step 2: Identify Exogenous Processes
+        self._identify_exogenous_processes() # -> self.exo_process_info
+
+        # Step 3: Rewrite ONLY Exogenous Equations (In Memory)
+        rewritten_exo_eqs_dict = self._rewrite_exogenous_equations()
+
+        # Step 4a: Compile Base Equations for Analysis/Substitution
+        base_equations = []
+        processed_exo_vars = set()
+        exo_pvars = set(self.exo_process_info.keys())
+        for eq in self.original_equations:
+            lvar = eq.split("=", 1)[0].strip() if "=" in eq else None
+            if lvar and lvar in exo_pvars:
+                if lvar in rewritten_exo_eqs_dict: base_equations.append(rewritten_exo_eqs_dict[lvar]); processed_exo_vars.add(lvar)
+                else: base_equations.append(eq) # Fallback if rewrite failed
+            else: base_equations.append(eq) # Original endogenous
+        for pvar, req in rewritten_exo_eqs_dict.items(): # Add potentially missed
+            if pvar not in processed_exo_vars: base_equations.append(req)
+
+        # Step 4b: Analyze these equations
+        variable_shifts, all_analyzed_base_vars = self._analyze_all_equations(base_equations)
+
+        # Step 5: Generate Auxiliaries & Classify Vars
+        transformation_map, aux_equations, model_vars_dict = \
+            self._generate_auxiliaries(variable_shifts, all_analyzed_base_vars)
+        self.auxiliary_equations = list(aux_equations)
+
+        # --- Step 6: Final Substitution Pass ---
+        # Apply substitutions to the combined list 'base_equations'
+        self.transformed_equations = self._apply_substitutions(
+            base_equations, transformation_map, model_vars_dict
+        )
+
+        # --- Step 7: Consolidate & Finalize Instance Attributes ---
+        print("\n--- Step 7: Consolidating Results ---")
+        self.state_variables = sorted(list(model_vars_dict.get('state_variables', set())))
+        self.control_variables = sorted(list(model_vars_dict.get('control_variables', set())))
+        self.auxiliary_variables = sorted(list(model_vars_dict.get('aux_variables', set())))
+        self.future_variables = sorted(list(model_vars_dict.get('future_variables', set())))
+        self.all_variables = self.state_variables + self.control_variables
+        self.final_shock_to_process_var_map = {info['driving_shock']: pvar for pvar, info in self.exo_process_info.items() if 'driving_shock' in info }
+        self.endogenous_states.clear(); self.exo_with_shocks.clear(); self.exo_without_shocks.clear()
+        for sv in self.state_variables: # Classify final states
+            bn=re.sub(r'_lag\d*$','',sv)
+            if bn in self.exo_process_info: self.exo_with_shocks.add(sv)
+            else: self.endogenous_states.add(sv)
+        self.state_variables = sorted(list(self.endogenous_states)) + sorted(list(self.exo_with_shocks)) + sorted(list(self.exo_without_shocks))
+        self.all_variables = self.state_variables + self.control_variables # Ensure final order
+
+        self.state_to_shock_map = {s: info['driving_shock'] for s in self.state_variables for bn in [re.sub(r'_lag\d*$', '', s)] if bn in self.exo_process_info for info in [self.exo_process_info[bn]] if 'driving_shock' in info }
+        self.shock_to_state_map = {}; [self.shock_to_state_map.setdefault(sh, []).append(st) for st, sh in self.state_to_shock_map.items()]
+        self.zero_persistence_processes = [ pvar for pvar, info in self.exo_process_info.items() if info.get('zero_persistence', False) ]
+        print(f"    Final States ({len(self.state_variables)}): {self.state_variables}")
+        print(f"    Final Controls ({len(self.control_variables)}): {self.control_variables}")
+
+        # Format equations list for output (transformed model + aux)
+        self.equations = self.format_transformed_equations(self.transformed_equations, self.auxiliary_equations)
+        print("--- Dynare File Parsing Finished ---")
+        # Return final dictionary matching target structure
+        output_dict = {
+             'parameters': list(self.parameters.keys()), 'param_values': self.parameters.to_dict(),
+             'states': self.state_variables, 'controls': self.control_variables,
+             'all_variables': self.all_variables, 'shocks': self.shocks,
+             'equations': self.equations,
+             'final_shock_to_process_var_map': self.final_shock_to_process_var_map,
+        }
+        return output_dict
+
+    # --- Helper to format equations ---
+    def format_transformed_equations(self, main_equations, aux_equations):
+        formatted = []
+        for i, eq in enumerate(main_equations + aux_equations):
+            eq_s=eq.strip(); idx=i+1; fmt_eq = eq_s # Default if no '='
+            if not eq_s: continue
+            if "=" in eq_s: l,r=eq_s.split("=",1); fmt_eq=f"{r.strip()} - ({l.strip()})"
+            formatted.append({f"eq{idx}": fmt_eq})
+        return formatted
+
+    # --- File Generation Method ---
+    def parse_and_generate_files(self, output_dir):
+        print(f"\n--- Parsing and Generating Files for: {self.file_path} ---")
+        print(f"--- Output Directory: {output_dir} ---")
+        try: parse_results_dict = self.parse() # Runs the full workflow
+        except Exception as e: print(f"ERROR: Parsing failed: {e}"); import traceback; traceback.print_exc(); raise
+        os.makedirs(output_dir, exist_ok=True)
+        # Save JSON
+        json_path = os.path.join(output_dir, "model.json")
+        print(f"  Saving model definition to: {json_path}")
+        try:
+            keys_to_keep = {'parameters', 'param_values', 'states', 'controls', 'all_variables', 'shocks', 'equations', 'final_shock_to_process_var_map'}
+            filtered_dict = {k: v for k, v in parse_results_dict.items() if k in keys_to_keep}
+            with open(json_path, 'w') as f: json.dump(filtered_dict, f, indent=2, cls=NumpyEncoder)
+            print(f"  Model JSON saved successfully.")
+        except Exception as e: print(f"ERROR: Failed to save model.json: {e}")
+        # Generate Jacobian
+        jacobian_path = os.path.join(output_dir, "jacobian_evaluator.py")
+        print(f"  Generating Jacobian evaluator: {jacobian_path}")
+        try:
+            if not self.transformed_equations and not self.auxiliary_equations: raise RuntimeError("No equations for Jacobian.")
+            self.generate_jacobian_evaluator(output_file=jacobian_path)
+            print(f"  Jacobian evaluator generated successfully.")
+        except Exception as e: print(f"ERROR: Failed to generate jacobian_evaluator.py: {e}"); import traceback; traceback.print_exc()
+        # Generate Structure
+        structure_path = os.path.join(output_dir, "model_structure.py")
+        print(f"  Generating model structure: {structure_path}")
+        try:
+            structure_dict = self.generate_model_structure()
+            with open(structure_path, 'w') as f:
+                f.write("import numpy as np\n\n"); f.write(f"indices = {repr(structure_dict.get('indices', {}))}\n\n")
+                r = structure_dict.get('R_struct'); c = structure_dict.get('C_selection'); d = structure_dict.get('D_struct')
+                f.write(f"R_struct = np.array({repr(r.tolist() if r is not None else [])})\n\n")
+                f.write(f"C_selection = np.array({repr(c.tolist() if c is not None else [])})\n\n")
+                f.write(f"D_struct = np.array({repr(d.tolist() if d is not None else [])})\n\n")
+                f.write("# R(shock->state direct)=0; C(selects states); D(shock->var direct)=hits controls\n\n")
+                f.write(f"labels = {repr(structure_dict.get('labels', {}))}\n")
+            print(f"  Model structure saved successfully.")
+        except Exception as e: print(f"ERROR: Failed to generate model_structure.py: {e}")
+        print(f"\n--- File Generation Process Finished for: {self.file_path} ---")
+        return os.path.abspath(output_dir)
+
+    # --- Include generate_jacobian_evaluator and generate_model_structure ---
     def generate_jacobian_evaluator(self, output_file=None):
-        """
-        Generate a Python function that evaluates the Jacobian matrices for the model.
-        
-        Args:
-            output_file (str, optional): Path to save the generated Python code
-                
-        Returns:
-            str: The generated Python code for the Jacobian evaluator
-        """
-        print("Generating Jacobian evaluator...")
-        
-        # First, apply the model transformation if it hasn't been done yet
-        if not hasattr(self, 'transformed_equations') or not self.transformed_equations:
-            print("Applying model transformation first...")
-            self.apply_transformation()
+        print("  Generating Jacobian evaluator function...")
+        if not self.transformed_equations and not self.auxiliary_equations: raise ValueError("Eqs missing for Jacobian.")
+        formatted_eqs_list = self.format_transformed_equations(self.transformed_equations, self.auxiliary_equations)
+        system_equations_str = [list(eq_dict.values())[0] for eq_dict in formatted_eqs_list]
+        current_vars = getattr(self, 'all_variables', []); future_vars = [v+"_p" for v in current_vars]
+        shock_vars = getattr(self, 'varexo_list', []); param_names = list(self.parameters.index)
+        if not current_vars: print("Warning: No variables for Jacobian."); return "def evaluate_jacobians(theta): return np.array([]), np.array([]), np.array([])"
+        print(f"    Jacobian w.r.t. {len(current_vars)} vars, {len(shock_vars)} shocks.")
+        current_syms_map={v: sy.symbols(v) for v in current_vars}; future_syms_map={v: sy.symbols(v) for v in future_vars}
+        shock_syms_map={s: sy.symbols(s) for s in shock_vars}; param_syms_map={p: sy.symbols(p) for p in param_names}
+        local_sym_map = {**current_syms_map, **future_syms_map, **shock_syms_map, **param_syms_map}
+        current_syms_list=[current_syms_map[v] for v in current_vars]; future_syms_list=[future_syms_map.get(v, None) for v in future_vars if future_syms_map.get(v, None) is not None] # Filter None
+        # Ensure future_syms_list has the same length as current_vars by adding placeholders if needed, though ideally all _p vars exist
+        if len(future_syms_list) != len(current_vars):
+            print(f"Warning: Mismatch between future symbols ({len(future_syms_list)}) and current vars ({len(current_vars)}). Jacobian A might be wrong size.")
+            # Pad or adjust future_syms_list based on `future_vars`? Risky. Best if all _p exist.
+            future_syms_list = [future_syms_map.get(f"{v}_p", sy.symbols(f"{v}_p_missing")) for v in current_vars] # Create placeholders
 
-        # Get the relevant model components after transformation
-        variables = self.state_variables + self.control_variables
-        exogenous = self.varexo_list
-        parameters = list(self.parameters.keys())
-        
-        print("State Variables Order:", self.state_variables)
-        print("Control Variables Order:", self.control_variables)
-        
-        # Create variables with "_p" suffix for t+1 variables
-        variables_p = [var + "_p" for var in variables]
-        
-        # Create symbolic variables for all model components
-        var_symbols = {var: sy.symbols(var) for var in variables}
-        var_p_symbols = {var_p: sy.symbols(var_p) for var_p in variables_p}
-        exo_symbols = {exo: sy.symbols(exo) for exo in exogenous}
-        param_symbols = {param: sy.symbols(param) for param in parameters}
-        
-        # Combine all symbols
-        all_symbols = {**var_symbols, **var_p_symbols, **exo_symbols, **param_symbols}
-        
-        # Get endogenous equations from the formatted equations
-        formatted_equations = self.format_transformed_equations(self.transformed_equations, self.auxiliary_equations)
-        endogenous_eqs = {}
-        for eq_dict in formatted_equations:
-            endogenous_eqs.update(eq_dict)
-        
-        # Parse endogenous equations into sympy expressions
-        equations = []
-        success_count = 0
-        error_count = 0
-        
-        for eq_name, eq_str in endogenous_eqs.items():
-            # Convert string to sympy expression
-            eq_expr = eq_str
-            for name, symbol in all_symbols.items():
-                # Use regex to match whole words only
-                pattern = r'\b' + re.escape(name) + r'\b'
-                eq_expr = re.sub(pattern, str(symbol), eq_expr)
-            
-            # Try to parse the expression
-            try:
-                expr = sy.sympify(eq_expr)
-                equations.append(expr)
-                success_count += 1
-            except Exception as e:
-                print(f"Failed to parse equation {eq_name}: {eq_str}")
-                print(f"Error: {str(e)}")
-                # Try to recover by using a placeholder
-                equations.append(sy.sympify("0"))
-                error_count += 1
-        
-        print(f"Parsed {success_count} equations successfully, {error_count} with errors")
-        
-        # Create system as sympy Matrix
-        F = sy.Matrix(equations)
-        
-        # Compute Jacobians for endogenous system
-        X_symbols = [var_symbols[var] for var in variables]
-        X_p_symbols = [var_p_symbols[var_p] for var_p in variables_p]
-        Z_symbols = [exo_symbols[exo] for exo in exogenous]  
-        
-        # A = ∂F/∂X_p (Jacobian with respect to future variables)
-        print("Computing A matrix...")
-        A_symbolic = -F.jacobian(X_p_symbols)
-        
-        # B = -∂F/∂X (negative Jacobian with respect to current variables)
-        print("Computing B matrix...")
-        B_symbolic = F.jacobian(X_symbols)
-        
-        # C = -∂F/∂Z (negative Jacobian with respect to exogenous processes)
-        print("Computing C matrix...")
-        C_symbolic = F.jacobian(Z_symbols)
-        
-        print("Generating output code...")
-        
-        # Generate code for the Jacobian evaluation function
-        function_code = [
-            "import numpy as np",
-            "",
-            "def evaluate_jacobians(theta):",
-            "    \"\"\"",
-            "    Evaluates Jacobian matrices for the Klein method and VAR representation",
-            "    ",
-            "    Args:",
-            "        theta: List or array of parameter values in the order of:",
-            f"            {parameters}",
-            "        ",
-            "    Returns:",
-            "        a: Matrix ∂F/∂X_p (Jacobian with respect to future variables)",
-            "        b: Matrix -∂F/∂X (negative Jacobian with respect to current variables)",
-            "        c: Matrix -∂F/∂Z (negative Jacobian with respect to exogenous processes)",
-            "    \"\"\"",
-            "    # Unpack parameters from theta"
-        ]
-        
-        # Add parameter unpacking
-        for i, param in enumerate(parameters):
-            function_code.append(f"    {param} = theta[{i}]")
-        
-        # Initialize matrices
-        function_code.extend([
-            "",
-            f"    a = np.zeros(({len(equations)}, {len(variables)}))",
-            f"    b = np.zeros(({len(equations)}, {len(variables)}))",
-            f"    c = np.zeros(({len(equations)}, {len(exogenous)}))"   
-        ])
-        
-        # Add A matrix elements
-        function_code.append("")
-        function_code.append("    # A matrix elements")
-        for i in range(A_symbolic.rows):
-            for j in range(A_symbolic.cols):
-                if A_symbolic[i, j] != 0:
-                    expr = str(A_symbolic[i, j])
-                    # Clean up the expression
-                    for param in parameters:
-                        # Replace symbol with parameter name
-                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
-                        expr = re.sub(pattern, param, expr)
-                    function_code.append(f"    a[{i}, {j}] = {expr}")
-        
-        # Add B matrix elements
-        function_code.append("")
-        function_code.append("    # B matrix elements")
-        for i in range(B_symbolic.rows):
-            for j in range(B_symbolic.cols):
-                if B_symbolic[i, j] != 0:
-                    expr = str(B_symbolic[i, j])
-                    # Clean up the expression
-                    for param in parameters:
-                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
-                        expr = re.sub(pattern, param, expr)
-                    function_code.append(f"    b[{i}, {j}] = {expr}")
-        
-        # Add C matrix elements
-        function_code.append("")
-        function_code.append("    # C matrix elements")
-        for i in range(C_symbolic.rows):
-            for j in range(C_symbolic.cols):
-                if C_symbolic[i, j] != 0:
-                    expr = str(C_symbolic[i, j])
-                    # Clean up the expression
-                    for param in parameters:
-                        pattern = r'\b' + re.escape(str(param_symbols[param])) + r'\b'
-                        expr = re.sub(pattern, param, expr)
-                    function_code.append(f"    c[{i}, {j}] = {expr}")
-        
-        # Return all matrices
-        function_code.append("")
-        function_code.append("    return a, b, c")
-        
-        # Join all lines to form the complete function code
-        complete_code = "\n".join(function_code)
-        
-        # Save to file if specified
+        shock_syms_list=[shock_syms_map[s] for s in shock_vars]; param_syms_list=[param_syms_map[p] for p in param_names]
+        F_vector = []
+        print(f"    Parsing {len(system_equations_str)} equations with Sympy...")
+        for i, eq_str in enumerate(system_equations_str):
+            try: F_vector.append(sy.sympify(eq_str, locals=local_sym_map))
+            except (sy.SympifyError, SyntaxError, TypeError, AttributeError) as e: raise ValueError(f"Sympy parsing failed eq {i+1}: {eq_str}\nError: {e}")
+        F_matrix = sy.Matrix(F_vector); print(f"    System Matrix F shape: {F_matrix.shape}")
+        print(f"    Computing Jacobians..."); A_sym = F_matrix.jacobian(future_syms_list); B_sym = F_matrix.jacobian(current_syms_list)
+        C_sym = F_matrix.jacobian(shock_syms_list) if shock_vars else sy.zeros(F_matrix.rows, 0)
+        print(f"    Symbolic Jacobians shapes: A={A_sym.shape}, B={B_sym.shape}, C={C_sym.shape}")
+        n_eqs, n_vars = B_sym.shape; n_shocks = C_sym.shape[1]
+        # Check dimensions
+        if n_vars != len(current_vars): print(f"Warning: Jacobian B columns ({n_vars}) != variables ({len(current_vars)})")
+        if A_sym.shape[1] != len(current_vars): print(f"Warning: Jacobian A columns ({A_sym.shape[1]}) != variables ({len(current_vars)})")
+        if n_shocks != len(shock_vars): print(f"Warning: Jacobian C columns ({n_shocks}) != shocks ({len(shock_vars)})")
+
+        header = ["import numpy as np", "# Generated by DynareParser","", "def evaluate_jacobians(theta):", f"    \"\"\"Evaluates A=dF/dxp, B=dF/dx, C=dF/de.\n    Params: {param_names}\n    Vars: {current_vars}\n    Shocks: {shock_vars}\"\"\"","    # Unpack params"]
+        param_unpack = [f"    {p} = theta[{i}]" for i, p in enumerate(param_names)]
+        # Use dimensions determined from Jacobian calculation
+        init_matrices = ["",f"    A=np.zeros(({n_eqs},{n_vars}))",f"    B=np.zeros(({n_eqs},{n_vars}))",f"    C=np.zeros(({n_eqs},{n_shocks}))",""]
+        body_A = ["    # Jacobian A = dF/dxp"]; body_B = ["    # Jacobian B = dF/dx"]; body_C = ["    # Jacobian C = dF/de"]
+        sympy_to_numpy = {'exp': 'np.exp', 'log': 'np.log', 'sqrt': 'np.sqrt'}
+        print("    Generating code strings for Jacobian elements...");
+        for r in range(n_eqs):
+            for c in range(n_vars):
+                if A_sym[r, c]!=0: body_A.append(f"    A[{r},{c}] = {sy.pycode(A_sym[r,c],user_functions=sympy_to_numpy)}")
+                if B_sym[r, c]!=0: body_B.append(f"    B[{r},{c}] = {sy.pycode(B_sym[r,c],user_functions=sympy_to_numpy)}")
+            for c in range(n_shocks):
+                if C_sym[r, c]!=0: body_C.append(f"    C[{r},{c}] = {sy.pycode(C_sym[r,c],user_functions=sympy_to_numpy)}")
+        footer = ["", "    return A, B, C"]; full_code = "\n".join(header+param_unpack+init_matrices+body_A+[""]+body_B+[""]+body_C+footer)
         if output_file:
-            with open(output_file, 'w') as f:
-                f.write(complete_code)
-            print(f"Jacobian evaluator saved to {output_file}")
-        
-        return complete_code
+            try:
+                with open(output_file, 'w', encoding='utf-8') as f: f.write(full_code)
+                print(f"    Jacobian code written to {output_file}")
+            except Exception as e: print(f"    ERROR writing Jacobian file: {e}")
+        else: return full_code
+        return None
 
     def generate_model_structure(self):
-        """
-        Generates structural components potentially useful for forming a
-        state-space representation:
-            s_t = P @ s_{t-1} + Q @ e_t
-            x_t = F @ s_t + G @ e_t
-        where s_t are states and x_t = [states; controls] are all variables.
-
-        Returns:
-            Dictionary with structural components for state space setup.
-        """
-        print("\n--- Generating Model Structure Components ---")
-
-        # Use the final classified variables after apply_transformation
-        state_vars = self.state_variables       # Only _lag variables
-        control_vars = self.control_variables   # Includes RES_*
-        all_vars = self.all_variables           # states + controls in order
-        shock_vars = self.varexo_list
-
-        n_states = len(state_vars)
-        n_controls = len(control_vars)
-        n_vars = len(all_vars) # n_states + n_controls
-        n_shocks = len(shock_vars)
-
-        # Find indices corresponding to state/control groups
-        state_indices = [all_vars.index(v) for v in state_vars]
-        control_indices = [all_vars.index(v) for v in control_vars]
-
-        print(f"Dimensions: States={n_states}, Controls={n_controls}, Total Vars={n_vars}, Shocks={n_shocks}")
-        if n_vars != n_states + n_controls:
-            print(f"Warning: Mismatch in variable counts: {n_vars} != {n_states} + {n_controls}")
-
-        # --- R: Shock-to-State Mapping ---
-        # Matrix mapping shocks e_t to the state variables s_t they *directly* affect
-        # This primarily comes from the definition of the exogenous AR processes
-        # R has shape (n_states, n_shocks)
-        R_struct = np.zeros((n_states, n_shocks))
-        print("\nConstructing R_struct matrix (shock -> state direct impact):")
-        if hasattr(self, 'state_to_shock_map'):
-            for i, state_name in enumerate(state_vars):
-                # Check if this state variable has a shock mapped to it
-                if state_name in self.state_to_shock_map:
-                    shock_name = self.state_to_shock_map[state_name]
-                    try:
-                        j = shock_vars.index(shock_name)
-                        R_struct[i, j] = 1.0 # Shock j directly drives state i
-                        print(f"  {shock_name} -> {state_name} (R_struct[{i}, {j}] = 1.0)")
-                    except ValueError:
-                        print(f"  Warning: Shock {shock_name} from state_to_shock_map not found in shock list.")
-                # Handle cases where the base RES process maps to the shock
-                # e.g., shock_map might have SHK_X -> RES_X, but RES_X_lag is the state
-                elif state_name.endswith("_lag"):
-                    base_name = re.sub(r'_lag\d*$', '', state_name)
-                    if base_name in self.state_to_shock_map:
-                        shock_name = self.state_to_shock_map[base_name]
-                        try:
-                            j = shock_vars.index(shock_name)
-                            # Even if shock hits RES_X, the impact on RES_X_lag state
-                            # is typically through the transition, not direct impact matrix R_struct.
-                            # R_struct represents the Q matrix structure in s_t = P*s_{t-1} + Q*e_t
-                            # Q maps e_t to s_t. If SHK_X -> RES_X and RES_X_lag_p = RES_X,
-                            # then SHK_X doesn't directly cause RES_X_lag, it causes RES_X which becomes RES_X_lag next period.
-                            # However, for zero-persistence shocks where RES_X_p = SHK_X,
-                            # and if RES_X were treated as a state, R would have an entry.
-                            # Since only _lag are states, R_struct likely remains zero here unless
-                            # the shock *directly* appears in the RES_X_lag_p equation (unusual).
-                            # Let's assume R_struct is only for shocks hitting the *state* variable itself directly.
-                            # We might need a separate matrix later for the full system dynamics.
-                            # For now, let's stick to direct shock->state mappings.
-                            # If SHK_X is mapped to RES_RS_lag in state_to_shock_map, this works.
-                            # If it's mapped to RES_RS, it doesn't go in R_struct.
-                            pass # Keep R_struct[i,j] = 0 unless shock maps *directly* to the _lag variable
-                        except ValueError:
-                            print(f"  Warning: Shock {shock_name} from state_to_shock_map (base) not found.")
-
-        else:
-            print("  Warning: state_to_shock_map not found in parser results.")
-
-
-        # --- Selection Matrix for Observables ---
-        # We define "observables" x_t as the combined vector [states; controls]
-        # C_selection maps the state vector s_t to the state portion of x_t
-        # C_selection has shape (n_vars, n_states)
-        C_selection = np.zeros((n_vars, n_states))
-        C_selection[state_indices, :] = np.eye(n_states) # Selects states
-        print("\nConstructing C_selection matrix (selects states from state vector):")
-        print(f"  Shape: {C_selection.shape}")
-
-
-        # --- Direct Shock Impact on Observables ---
-        # D_struct maps shocks e_t to the combined observable vector x_t = [states; controls]
-        # This is important for zero-persistence shocks that affect controls contemporaneously
-        # or shocks directly hitting states (captured via R_struct in the state part).
-        # D_struct has shape (n_vars, n_shocks)
-        D_struct = np.zeros((n_vars, n_shocks))
-        # Map shocks hitting states directly (from R_struct) into the state portion of D_struct
-        D_struct[state_indices, :] = R_struct
-        print("\nConstructing D_struct matrix (direct shock impact on states/controls):")
-        # Check for shocks directly impacting *control* variables (like RES_X if treated as control)
-        # A shock SHK_X affects RES_X contemporaneously if RES_X_p = rho*RES_X + SHK_X
-        # Since RES_X is a control, we need an entry in D_struct mapping SHK_X to RES_X position.
-        if hasattr(self, 'state_to_shock_map'): # Re-using state_to_shock_map, assuming it maps SHK_X -> RES_X
-            for control_name in control_vars:
-                if control_name in self.state_to_shock_map: # If a control (like RES_X) is mapped from a shock
-                    shock_name = self.state_to_shock_map[control_name]
-                    try:
-                        j = shock_vars.index(shock_name)       # Shock index
-                        i = all_vars.index(control_name) # Control variable index in all_vars
-                        D_struct[i, j] = 1.0
-                        print(f"  {shock_name} -> {control_name} (Control) (D_struct[{i}, {j}] = 1.0)")
-                    except ValueError:
-                        print(f"  Warning: Shock {shock_name} or Control {control_name} mapping issue.")
-        print(f"  Shape: {D_struct.shape}")
-
-        # --- Store labels ---
-        # Ensure labels only contain the necessary lists based on final classification
-        labels = {
-            'state_labels': state_vars,
-            'control_labels': control_vars,
-            'variable_labels': all_vars, # Combined list [states; controls]
-            'shock_labels': shock_vars,
-            # Include mappings if they exist
-            'shock_to_state_map': getattr(self, 'shock_to_state_map', {}),
-            'state_to_shock_map': getattr(self, 'state_to_shock_map', {})
-        }
-
-        # --- Store indices ---
-        indices = {
-            'n_states': n_states,
-            'n_controls': n_controls,
-            'n_vars': n_vars, # Total variables (states + controls)
-            'n_shocks': n_shocks,
-            # Keep old keys if needed elsewhere, but clarify meaning
-            'n_endogenous': len(getattr(self, 'endogenous_states', [])),
-            'n_exo_states': len(getattr(self, 'exo_with_shocks', [])) + len(getattr(self, 'exo_without_shocks', [])),
-            'zero_persistence_processes': getattr(self, 'zero_persistence_processes', [])
-        }
-
-
-        # Note: B_structure and C_structure from the prompt seemed specific to a
-        # particular state-space setup. The R_struct, C_selection, D_struct generated
-        # here are more fundamental building blocks. The final state-space matrices
-        # P, Q, F, G will depend on the solution matrices (self.p, self.f) and these structures.
-
-        return {
-            'indices': indices,
-            'R_struct': R_struct,         # Maps shocks to states they directly drive (e.g., for Q matrix)
-            'C_selection': C_selection,   # Selects states from state vector (e.g., for F matrix)
-            'D_struct': D_struct,         # Maps shocks to *all* variables they directly drive (e.g., for G matrix)
-            'labels': labels
-        }
-
-    @staticmethod
-    def parse_and_generate_files(dynare_file, output_dir):
-        """Run the parser and generate all required files for later use"""
-        parser = DynareParser(dynare_file)
-        # Parse model (implicitly calls apply_transformation)
-        model_json_data = parser.parse() # Use the dictionary returned by parse
-
-        # Save JSON (already done by parse if you modify it, or save here)
-        os.makedirs(output_dir, exist_ok=True)
-        json_path = os.path.join(output_dir, "model.json")
-        with open(json_path, 'w') as f:
-            # Save the relevant parts from model_json_data or parser attributes
-            json.dump({
-                'parameters': parser.parameters.keys().tolist(),
-                'param_values': parser.parameters.to_dict(),
-                'state_variables': parser.state_variables,
-                'control_variables': parser.control_variables,
-                'all_variables': parser.all_variables,
-                'shocks': parser.varexo_list,
-                'equations': model_json_data.get('equations', []) # Get equations if parse returns them
-                # Add other relevant info if needed
-            }, f, indent=2)
-        print(f"Model JSON saved to {json_path}")
-
-
-        # Generate Jacobian file
-        parser.generate_jacobian_evaluator(os.path.join(output_dir, "jacobian_evaluator.py"))
-
-        # --- Generate structure file with correct timing ---
-        structure = parser.generate_model_structure() # Call the updated method
-        structure_path = os.path.join(output_dir, "model_structure.py")
-        with open(structure_path, 'w') as f:
-            f.write("import numpy as np\n\n")
-            # Use repr for cleaner output of lists/dicts/arrays
-            f.write(f"indices = {repr(structure['indices'])}\n\n")
-            # Use np.array representation for arrays
-            f.write(f"R_struct = np.array({repr(structure['R_struct'].tolist())})\n\n")
-            f.write(f"C_selection = np.array({repr(structure['C_selection'].tolist())})\n\n")
-            f.write(f"D_struct = np.array({repr(structure['D_struct'].tolist())})\n\n")
-            f.write(f"# Note: R_struct maps shocks to states directly hit.\n")
-            f.write(f"# C_selection selects states from the state vector.\n")
-            f.write(f"# D_struct maps shocks to the combined variable vector [states; controls] they directly hit.\n\n")
-            f.write(f"labels = {repr(structure['labels'])}\n")
-        print(f"Model structure saved to {structure_path}")
-
-        print(f"All model files generated in {output_dir}")
-        # Return the path or data if needed
-        return output_dir
-    
+        print("\n--- Generating Model Structure Components (State=Lag Rule) ---")
+        state_vars=getattr(self,'state_variables',[]); control_vars=getattr(self,'control_variables',[])
+        all_vars=getattr(self,'all_variables',[]); shock_vars=getattr(self,'varexo_list',[])
+        n_states=len(state_vars); n_controls=len(control_vars); n_vars=len(all_vars); n_shocks=len(shock_vars)
+        if n_vars==0: return {'indices': {}, 'R_struct': np.array([]), 'C_selection': np.array([]), 'D_struct': np.array([]), 'labels': {}}
+        print(f"  Dims: St={n_states}, Co={n_controls}, Tot={n_vars}, Sh={n_shocks}")
+        R_struct=np.zeros((n_states,n_shocks)); C_selection=np.zeros((n_vars,n_states))
+        state_indices=[all_vars.index(v) for v in state_vars if v in all_vars]
+        if len(state_indices)==n_states: [C_selection.__setitem__((state_idx,i),1.0) for i,state_idx in enumerate(state_indices)]
+        else: print(f"Warn: State idx mismatch C_sel ({len(state_indices)} vs {n_states})")
+        D_struct=np.zeros((n_vars,n_shocks))
+        shock_map=getattr(self, 'final_shock_to_process_var_map', {})
+        if shock_map:
+            for shock,pvar in shock_map.items():
+                try: j=shock_vars.index(shock); i=all_vars.index(pvar); D_struct[i,j]=1.0
+                except (ValueError,AttributeError,IndexError): pass
+        labels={'state_labels':state_vars, 'control_labels':control_vars, 'variable_labels':all_vars, 'shock_labels':shock_vars}
+        indices={'n_states':n_states, 'n_controls':n_controls, 'n_vars':n_vars, 'n_shocks':n_shocks,
+                 'n_endogenous_states':len(getattr(self,'endogenous_states',set())),'n_exo_states_ws':len(getattr(self,'exo_with_shocks',set())),
+                 'n_exo_states_wos':len(getattr(self,'exo_without_shocks',set())),'zero_persistence_processes':getattr(self,'zero_persistence_processes',[])}
+        print(f"  Structure components generated.")
+        return {'indices': indices, 'R_struct': R_struct, 'C_selection': C_selection, 'D_struct': D_struct, 'labels': labels}

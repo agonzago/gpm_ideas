@@ -246,16 +246,11 @@ if __name__ == '__main__':
     dynare_file = "qpm_simpl1.dyn"
     if not all(os.path.exists(os.path.join(output_dir, f)) for f in ["model.json", "jacobian_evaluator.py", "model_structure.py"]):
         print("Generating model files with fixed parser...")
-        DynareParser.parse_and_generate_files(dynare_file, output_dir)
+        gpm = DynareParser(dynare_file)
+        gpm.parse_and_generate_files(output_dir)
         print("Model files generated successfully.")
     else:
         print("Model files already exist. Using existing files.")
-    
-
-    if not os.path.exists(parser_dir):
-        print(f"Error: Example usage expects parser output in '{parser_dir}'")
-        print("Please generate parser output first.")
-        sys.exit(1)
 
     try:
         from model_solver import ModelSolver

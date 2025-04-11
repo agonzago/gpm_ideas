@@ -1,0 +1,7 @@
+L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
+DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
+RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + RES_RS;
+RR_GAP = RS - DLA_CPI(+1);
+RES_L_GDP_GAP(+1) = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP;
+RES_DLA_CPI(+1) = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI;
+RES_RS(+1) = rho_rs*RES_RS + rho_rs2*RES_RS(-1) + SHK_RS;
