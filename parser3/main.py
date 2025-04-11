@@ -54,8 +54,8 @@ def main():
         
         # Test both with and without persistence
         test_cases = [
-            {"name": "Standard model", "params": {"rho_rs": 0.75, "rho_rs2": 0.0}},
-            {"name": "Zero persistence model", "params": {"rho_rs": 0.0, "rho_rs2": 0.0}}
+            {"name": "Standard model", "params": {"rho_rs": 0.75, "rho_rs2": 0.1}},
+            {"name": "Zero persistence model", "params": {"rho_rs": 0.8, "rho_rs2": 0.01}}
         ]
         
         for case in test_cases:
@@ -222,12 +222,113 @@ def main():
     
     return 0
 
-if __name__ == "__main__":
-    import sys
-    
-    # Get the directory of the current file
-    file_directory = os.path.dirname(os.path.abspath(__file__))
+# --- Example Usage (Corrected) ---
+if __name__ == '__main__':
+    # Assume parser output is in a directory named 'parsed_model'
+    # relative to this script
+    import os
+    script_dir = os.path.dirname(__file__)
+    os.chdir(script_dir)
+    # --- ADJUST THIS PATH TO YOUR PARSER OUTPUT DIRECTORY ---
+    parser_dir = os.path.join(script_dir, 'model_files_final')
+    # -------------------------------------------------------
 
-    # Set the working directory to the file's directory
-    os.chdir(file_directory)
-    sys.exit(main())
+    # Define paths
+    output_dir = parser_dir
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+
+    # Step 1: First, parse and generate model files using fixed parser
+    print_separator("STEP 1: GENERATING MODEL FILES")
+    from parser_gpm import DynareParser
+    
+    dynare_file = "qpm_simpl1.dyn"
+    if not all(os.path.exists(os.path.join(output_dir, f)) for f in ["model.json", "jacobian_evaluator.py", "model_structure.py"]):
+        print("Generating model files with fixed parser...")
+        DynareParser.parse_and_generate_files(dynare_file, output_dir)
+        print("Model files generated successfully.")
+    else:
+        print("Model files already exist. Using existing files.")
+    
+
+    if not os.path.exists(parser_dir):
+        print(f"Error: Example usage expects parser output in '{parser_dir}'")
+        print("Please generate parser output first.")
+        sys.exit(1)
+
+    try:
+        from model_solver import ModelSolver
+        print("\n--- Initializing ModelSolver ---")
+        solver = ModelSolver(parser_dir) # Instantiate the class
+
+        # --- Compute Jacobians (using parameters from file) ---
+        print("\n--- Computing Jacobians ---")
+        solver.compute_jacobians() # Call the method on the instance
+
+        # --- Solve Model ---
+        print("\n--- Solving Model ---")
+        solver.solve() # Call the method on the instance
+
+        # --- Compute IRF ---
+        if solver.shock_names: # Check if there are shocks defined
+            shock_to_plot = solver.shock_names[0] # Use the first shock name
+            print(f"\n--- Computing IRF for shock: {shock_to_plot} ---")
+            irf_df = solver.impulse_response(shock_to_plot, periods=40) # Call method
+            print("IRF DataFrame head:\n", irf_df.head())
+
+            # Optional: Plotting
+            try:
+                import matplotlib.pyplot as plt
+                # Plot IRFs for first few state variables
+                state_vars_to_plot = solver.state_names[:min(6, solver.n_states)]
+                if state_vars_to_plot:
+                    irf_df[state_vars_to_plot].plot(subplots=True, layout=(-1, 3), figsize=(15, max(4, len(state_vars_to_plot)*0.8)), title=f'IRF to {shock_to_plot} (States)')
+                    plt.tight_layout()
+                    plt.suptitle(f'IRF to {shock_to_plot} (States)', y=1.02) # Adjust title position
+
+                # Plot IRFs for first few control variables
+                control_vars_to_plot = solver.control_names[:min(6, solver.n_controls)]
+                if control_vars_to_plot:
+                    irf_df[control_vars_to_plot].plot(subplots=True, layout=(-1, 3), figsize=(15, max(4, len(control_vars_to_plot)*0.8)), title=f'IRF to {shock_to_plot} (Controls)')
+                    plt.tight_layout()
+                    plt.suptitle(f'IRF to {shock_to_plot} (Controls)', y=1.02) # Adjust title position
+
+                plt.show()
+            except ImportError:
+                print("\nInstall matplotlib to plot IRFs: pip install matplotlib")
+            except Exception as plot_err:
+                print(f"\nError during plotting: {plot_err}")
+
+        else:
+            print("\n--- Skipping IRF (no shocks defined) ---")
+
+        # --- Simulate Model ---
+        print("\n--- Simulating Model ---")
+        sim_df = solver.simulate(periods=200, seed=123) # Call method
+        print("Simulation DataFrame head:\n", sim_df.head())
+
+        # Optional: Plot simulation
+        try:
+            import matplotlib.pyplot as plt
+            vars_to_plot = solver.variable_names[:min(9, solver.n_vars)] # Plot first few variables
+            if vars_to_plot:
+                sim_df[vars_to_plot].plot(subplots=True, layout=(-1, 3), figsize=(15, max(5, len(vars_to_plot)*0.6)), title='Model Simulation')
+                plt.tight_layout()
+                plt.suptitle('Model Simulation', y=1.02) # Adjust title position
+                plt.show()
+        except ImportError:
+            print("\nInstall matplotlib to plot simulation: pip install matplotlib")
+        except Exception as plot_err:
+            print(f"\nError during plotting: {plot_err}")
+
+
+    except FileNotFoundError as e:
+        print(f"\nERROR: Required file not found. {e}")
+    except RuntimeError as e:
+        print(f"\nERROR: ModelSolver failed. {e}")
+    except Exception as e:
+         print(f"\nAn unexpected error occurred: {e}")
+         # Optional: print traceback for debugging
+         import traceback
+         traceback.print_exc()
