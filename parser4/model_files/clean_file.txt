@@ -8,7 +8,7 @@ g2 = 0.3;
 g3 = 0.25;
 rho_DLA_CPI = 0.75;
 rho_L_GDP_GAP = 0.75;
-rho_rs = 0.8;
+rho_rs = 0.75;
 rho_rs2 = 0.01;
 
 Variables:

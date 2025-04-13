@@ -133,7 +133,7 @@ def klein(a=None,b=None,c=None,phi=None,n_states=None,eigenvalue_warnings=True):
         mat1 = np.kron(np.transpose(phi),s22) - np.kron(np.identity(nz),t22)
         mat1i = la.inv(mat1)
         q2c = q2.dot(c)
-        vecq2c = q2c.flatten(1).T
+        vecq2c = q2c.flatten('C').T
         vecm = mat1i.dot(vecq2c)
         m = np.transpose(np.reshape(np.transpose(vecm),(nz,n_costates)))
         
@@ -255,10 +255,12 @@ class SimpleModelSolver:
                     print("Too few stable eigenvalues - no stable solution exists")
             
             # Store the solution matrices
-            self.f = f  # Control solution
-            self.n = n  # Control response to shocks
-            self.p = p  # State transition
-            self.l = l  # State response to shocks
+
+
+            self.f = np.real(f)  # Control solution
+            self.n = np.real(n)  # Control response to shocks
+            self.p = np.real(p)  # State transition
+            self.l = np.real(l)  # State response to shocks
             self.is_solved = True
             
             print(f"F matrix shape: {f.shape}, P matrix shape: {p.shape}")

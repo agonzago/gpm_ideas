@@ -366,45 +366,62 @@ class DynareParser:
                 
         return True
     
+
     def classify_variables(self):
         """
-        Simplified classification of variables:
-        - State variables: variables with "_lag" in their name or that appear with lags in final equations
-        - Controls: all other variables
+        Classifies variables into states and controls based on naming conventions
+        and exogenous process identification after auxiliary variables are created.
+        - State variables:
+            - Variables directly driven by exogenous shocks.
+            - Auxiliary variables representing lags (e.g., 'var_lag', 'var_lag2').
+        - Control variables: All other variables (including original non-state variables
+            and auxiliary lead variables like 'var_p', 'var_lead1_p').
         """
-        # Initialize lists
-        state_variables = []
-        control_variables = []
+        # Use sets for efficient handling and uniqueness
+        # self.var_names should contain original + auxiliary vars at this point
+        all_vars_set = set(self.var_names)
+        add_state_variables_set = set()
+
+        # 1. Add variables directly driven by shocks (exogenous states)
+        # Ensure these variables actually exist in the final list
+        exogenous_states = set(self.shock_to_process_var_map.values())
         
-        # Ensure we're working with the complete list of variables including auxiliaries
-        # Identify variables that are states (either have "_lag" suffix or appear with lags)
-        for var in self.var_names:
-            # Check if this is a lag variable (by naming convention)
-            if "_lag" in var:
-                state_variables.append(var)
-                continue
-                
-            # # Check if this variable appears with a lag in any final equation
-            # is_state = False
-            # for eq in self.final_equations:
-            #     # Look for var(-1) pattern
-            #     if f"{var}(-1)" in eq or f"{var}[-1]" in eq:
-            #         is_state = True
-            #         break                    
-            # if is_state:
-            #     state_variables.append(var)
-            else:
-                control_variables.append(var)
+
+        # 2. Add auxiliary variables representing lags based on naming convention
+        #    Regex to match '_lag' or '_lag' followed by digits at the end of the string
+        lag_var_pattern = re.compile(r'_lag\d*$') # Matches _lag or _lagN at the end
+        for var in all_vars_set:
+            # Check if the variable name ends with _lag or _lagN
+            if lag_var_pattern.search(var):
+                # Check if the base variable name exists (e.g., for 'X_lag', check if 'X' exists)
+                base_var = lag_var_pattern.sub('', var)
+                if base_var in self.var_list: # or base_var in self.auxiliary_vars:
+                    add_state_variables_set.add(var)
         
-        # Set the classified variables
-        self.state_variables = state_variables
-        self.control_variables = control_variables
-        
+        # 3. Control variables are all variables not classified as states
+    
+        state_variables_set =  exogenous_states | add_state_variables_set
+        control_variables_set = all_vars_set - state_variables_set
+
+        # Convert sets back to sorted lists for consistent ordering
+        self.state_variables = list(exogenous_states) + list(add_state_variables_set)
+        self.control_variables = list(control_variables_set)
+
+        # Sanity check
+        if len(self.state_variables) + len(self.control_variables) != len(all_vars_set):
+            print("Warning: Variable classification mismatch. Some variables might be unclassified or double-counted.")
+            print(f"Total unique vars: {len(all_vars_set)}")
+            print(f"States found ({len(self.state_variables)}): {self.state_variables}")
+            print(f"Controls found ({len(self.control_variables)}): {self.control_variables}")
+
+
         # Print classification results
         print("Variable Classification:")
         print(f"  States: {len(self.state_variables)}")
         print(f"  Controls: {len(self.control_variables)}")
-        
+        print(f"  Total Variables (incl. auxiliary): {len(self.var_names)} (Unique: {len(all_vars_set)})")
+        print(f"  State Variables: {self.state_variables}")
+        # print(f"  Control Variables: {self.control_variables}") # Uncomment to print controls
         return True
         
     def format_equations_for_json(self):
