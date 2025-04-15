@@ -165,7 +165,8 @@ class SimpleModelSolver:
         self.state_names = self.model_data.get('states', [])
         self.control_names = self.model_data.get('controls', [])
         self.shock_names = self.model_data.get('shocks', [])
-        
+        self.shock_to_process_var_map = self.model_data.get('shock_to_process_var_map',[])
+
         # Initialize solution matrices
         self.f = None  # Control solution matrix (f in klein)
         self.n = None  # Control response to shocks (n in klein)
@@ -240,11 +241,11 @@ class SimpleModelSolver:
         
         # Create autocorrelation matrix for exogenous shocks (phi)
         # Default to identity matrix (no autocorrelation)
-        phi = np.eye(n_shocks) if n_shocks > 0 else None
+        #phi = np.eye(n_shocks) if n_shocks > 0 else None
         
         # Call the klein function
         try:
-            f, n, p, l, stab, eig = klein(a=A, b=B, c=C, phi=phi, n_states=n_states)
+            f, n, p, l, stab, eig = klein(a=A, b=B, c=None, phi=None, n_states=n_states)
             
             # Check solution stability
             if stab != 0:
@@ -258,9 +259,9 @@ class SimpleModelSolver:
 
 
             self.f = np.real(f)  # Control solution
-            self.n = np.real(n)  # Control response to shocks
+            #self.n = np.real(n)  # Control response to shocks
             self.p = np.real(p)  # State transition
-            self.l = np.real(l)  # State response to shocks
+            #self.l = np.real(l)  # State response to shocks
             self.is_solved = True
             
             print(f"F matrix shape: {f.shape}, P matrix shape: {p.shape}")
@@ -293,7 +294,7 @@ class SimpleModelSolver:
         print("Model solved!")
         return f, p
     
-    def compute_irf(self, shock_index, periods=40):
+    def compute_irf(self, shock_name, shock_size: float = 1.0, periods=40):
         """Compute impulse response functions for a specific shock"""
         if not self.is_solved:
             raise RuntimeError("Model must be solved before computing IRFs")
@@ -303,56 +304,58 @@ class SimpleModelSolver:
         n_controls = len(self.control_names)
         n_shocks = len(self.shock_names)
         
-        if shock_index >= n_shocks:
-            raise ValueError(f"Shock index {shock_index} out of range (0-{n_shocks-1})")
+        # if shock_index >= n_shocks:
+        #     raise ValueError(f"Shock index {shock_index} out of range (0-{n_shocks-1})")
         
         # Get variable names
         state_vars = self.state_names
         control_vars = self.control_names
         all_vars = state_vars + control_vars
-        shock_name = self.shock_names[shock_index]
-        
-        # Create shock vector (unit shock)
-        shock = np.zeros(n_shocks)
-        shock[shock_index] = 1.0
+        # Find the target state variable name corresponding to the shock
+        if shock_name not in self.shock_to_process_var_map:
+            raise ValueError(f"Shock '{shock_name}' not found in shock_to_process_var_map.")
+        exo_to_shock = self.shock_to_process_var_map[shock_name]
+
+        # Find the index of the target state variable
+        try:
+            shock_state_index = state_vars.index(exo_to_shock)
+            print(f"Applying shock '{shock_name}' to state variable '{exo_to_shock}' at index {shock_state_index}")
+        except ValueError:
+            raise ValueError(f"State variable '{exo_to_shock}' (target for shock '{shock_name}') not found in state_names list: {state_vars}")
+
         
         # Initialize IRF arrays
         irf_states = np.zeros((periods + 1, n_states))
-        irf_controls = np.zeros((periods + 1, n_controls))
+        irf_controls = np.zeros((periods, n_controls))
         
-        # Set initial state responses using L matrix (state response to shocks)
-        if self.l is not None:
-            irf_states[0, :] = self.l[:, shock_index]
-        
-        # Set initial control responses using N matrix (control response to shocks)
-        if self.n is not None:
-            irf_controls[0, :] = self.n[:, shock_index]
-        
+        e = np.zeros(n_states)
+        e[shock_state_index] = shock_size  # Apply a unit shock to the target state variable    
         # Compute IRF dynamics using the state transition and control policy functions
-        for t in range(periods):
-            # State transition: s_{t+1} = P * s_t
+        irf_states[0, :] = e
+        #irf_controls[0 :] = self.f @ irf_states[0, :]
+        for t in range(0,periods):
+            # State transition: s_{t+1} = P * s_t                        
             irf_states[t+1, :] = self.p @ irf_states[t, :]
-            
-            # Control solution: c_t = F * s_t (for t>0)
-            if t+1 <= periods:
-                irf_controls[t+1, :] = self.f @ irf_states[t+1, :]
-        
+            irf_controls[t, :] = self.f @ irf_states[t, :]
         # Combine state and control IRFs
-        irf_all = np.zeros((periods + 1, len(all_vars)))
-        irf_all[:, :n_states] = irf_states
+        irf_all = np.zeros((periods, len(all_vars)))
+        irf_all[:, :n_states] = irf_states[0:periods,:]
         irf_all[:, n_states:] = irf_controls
         
         print(f"IRF computed for shock: {shock_name}")
-        return irf_all, all_vars
+        return irf_all
     
-    def plot_irf(self, shock_index, variables_to_plot=None, periods=40):
+    def plot_irf(self, shock_name, shock_size: float = 1.0, variables_to_plot=None, periods=40):
         """Plot impulse response functions for selected variables"""
-        irf_data, var_names = self.compute_irf(shock_index, periods)
         
-        # Get shock name
-        shock_name = self.shock_names[shock_index]
+    
+        irf_data = self.compute_irf(shock_name, shock_size, periods)
         
         # If variables_to_plot not specified, use all variables
+        state_vars = self.state_names
+        control_vars = self.control_names
+        var_names = state_vars + control_vars
+
         if variables_to_plot is None:
             variables_to_plot = var_names
         elif isinstance(variables_to_plot, str):
@@ -362,7 +365,7 @@ class SimpleModelSolver:
         variables_to_plot = [v for v in variables_to_plot if v in var_names]
         
         # Create time axis
-        time = np.arange(periods + 1)
+        time = np.arange(periods)
         
         # Create plot
         plt.figure(figsize=(12, 8))

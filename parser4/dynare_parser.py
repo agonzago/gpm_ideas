@@ -638,6 +638,8 @@ class DynareParser:
             "# R(shock->state direct)=0; C(selects states); D(shock->var direct)=hits controls",
             "",
             f"labels = {labels}"
+            "",
+            f"shock_to_process_var_map = {self.shock_to_process_var_map}" # Added shock map
         ]
         
         # Write to file
