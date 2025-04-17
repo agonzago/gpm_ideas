@@ -1,5 +1,0 @@
-ts ./patacon_bayes.out 135 par_final.csv xini_final.csv 1 
-ts ./patacon_bayes.out 135 par_final.csv xini_final.csv 2
-ts ./patacon_bayes.out 135 par_final.csv xini_final.csv 3
-ts ./patacon_bayes.out 135 par_final.csv xini_final.csv 4
-ts ./patacon_bayes.out 135 par_final.csv xini_final.csv 5
