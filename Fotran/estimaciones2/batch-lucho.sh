@@ -1,0 +1,36 @@
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	67
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	68
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	69
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	70
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	71
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	72
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	73
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	74
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	75
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	76
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	77
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	78
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	79
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	80
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	81
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	82
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	83
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	84
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	85
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	86
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	87
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	88
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	89
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	90
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	91
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	92
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	93
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	94
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	95
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	96
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	97
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	98
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	99
+ts ./patacon_bayes.out 135 par_final.csv xini_final.csv	100
+
+

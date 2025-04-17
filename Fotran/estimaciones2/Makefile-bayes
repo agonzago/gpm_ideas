@@ -1,0 +1,67 @@
+PROG =	patacon_bayes.out
+
+SRCS =	random.f90 modules.f90 PassPar.f90 \
+	ABMatrix.f90 dsolab.f90 fast_kalman_filter.f90 fast_kalman_filter_pat.f90 \
+	fcnhyd12.f90 fcnsa.f90 GetSteady12.f90 hbrd.f90 hibridA.f90 irfdsge.f90 kalmanLik.f90 \
+	KalmanSimul.f90 KalmanStates.f90 LogLik.f90 neldermean.f90  \
+	solveSS.f90 \
+	wrhbrd.f90 wrhibridA.f90 dgedi.f SimulModel.f90 dsoltokalman.f90	\
+	hessians.f90 Estim_bayes.f90 rmndraws.f90 rtdraws.f90 mcmcModel.f90 check_bounds.f90 \
+	main_bayesAG.f90 
+# 	try.f90 aim_solver.f90 build_a_del.f90 didentity.f90 find.f90 find_diag.f90 \
+# 	qr_sqr.f90 shiftright.f90 sparse_mult.f90 DATASIM.f90 HESSIANMAT.f90 hybridsa_est.f90 \
+# 	fdjac1.f90 fcnnm.f90
+
+
+OBJS =	random.o modules.o PassPar.o\
+	ABMatrix.o dsolab.o fast_kalman_filter.o fast_kalman_filter_pat.o \
+	fcnhyd12.o fcnsa.o GetSteady12.o hbrd.o hibridA.o irfdsge.o kalmanLik.o \
+	KalmanSimul.o KalmanStates.o LogLik.o neldermean.o  \
+	solveSS.o \
+	wrhbrd.o wrhibridA.o dgedi.o SimulModel.o dsoltokalman.o	\
+	hessians.o Estim_bayes.o rmndraws.o rtdraws.o mcmcModel.o \
+	check_bounds.o main_bayesAG.o
+	#  try.o aim_solver.o build_a_del.o \
+# 	didentity.o find.o find_diag.o \
+# 	qr_sqr.o shiftright.o sparse_mult.o DATASIM.o HESSIANMAT.o hybridsa_est.o \
+# 	fdjac1.o fcnnm.o
+
+
+
+##LIBS = ./libskit.a -llapack /home/agg/GotoBLAS/libgoto_penrynp-r1.26.a -lpthread -lm
+LIBS = -I./ -llapack_atlas -llapack -lblas -latlas -lm
+
+
+##LIBS = -L./ ./tmglib_LINUX.a ./lapack_LINUX.a ./blas_LINUX.a ./libskit.a
+
+CC = cc 
+CFLAGS = -funroll-all-loops -O3
+#  -funroll-all-loops -O3
+#  -g -Wall
+FC = gfortran
+FFLAGS = -funroll-all-loops -O3
+#-funroll-all-loops -O3
+F90 = gfortran
+F90FLAGS = -funroll-all-loops -O3
+#-funroll-all-loops -O3
+#-funroll-all-loops -O3
+
+LDFLAGS = -I./
+
+all: $(PROG)
+
+$(PROG): $(OBJS)
+	$(F90) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+
+clean:
+	rm -f $(PROG) $(OBJS) *.mod
+
+.SUFFIXES: $(SUFFIXES) .f90 .f
+
+.f.o:
+	$(F90) $(F90FLAGS) -c $< 
+
+.f90.o:
+	$(F90) $(F90FLAGS) -c $<
+
+

@@ -1,17 +1,16 @@
-SUBROUTINE LOGLIK_PAT(PAR,LOG_L,INFO)  
+subroutine forecast(PAR,FOR_PERIOD,N_FORECAST,Y_FORECAST,A_FORECAST)
   USE HYBRID_CONST_MOD
   USE LIKELIHOOD_CONST_MOD  
   USE MODEL_CONST_MOD
   USE XINI_MOD
   USE PARAMETER_VECTOR_MOD
-  !USE RANDOM_UNIFORM_MOD
-  
+    
   IMPLICIT NONE
-  INTEGER, PARAMETER  :: dp = SELECTED_REAL_KIND(12, 60)
+  !INTEGER, PARAMETER  :: dp = SELECTED_REAL_KIND(12, 60)
   !VARIABLES PARA ABMATRIX
   REAL(DP) , DIMENSION(NPAR) :: PARMODEL
   REAL (dp),  DIMENSION(NUM_N, NUM_N) :: AMAT, BMAT
-  REAL (dp),  DIMENSION(ESTIMSIZE) , INTENT(IN) :: PAR
+  REAL (dp),  DIMENSION(ESTIMSIZE) , INTENT(IN) :: PAR  ! ESTA DEFINIDO ESTIMSIZE ?   
 
   !VARIABLES PARA DSOLAB
   INTEGER , INTENT(OUT) :: INFO
@@ -23,9 +22,14 @@ SUBROUTINE LOGLIK_PAT(PAR,LOG_L,INFO)
   REAL (dp),  DIMENSION(NUM_EST,NUM_EST) :: T
   REAL (dp),  DIMENSION(NUM_EST,NUM_EXO) :: R
   REAL (dp),  INTENT(OUT) :: LOG_L
-  REAL(DP) ,  DIMENSION(NUM_RAT_OBS) :: RAT_OBS
+  REAL (dp),  INTENT(IN) :: FOR_PERIOD, N_FORECAST
+  REAL (dp),  DIMENSION(NUM_EST) :: A_T
+  REAL (dp),  DIMENSION(NUM_EST,NUM_EST) :: P_T
+ ! REAL(DP) ,  DIMENSION(NUM_RAT_OBS) :: RAT_OBS
   REAL (dp),  DIMENSION(NUM_OBS,NUM_PER) :: Y_CONS
-  
+  REAL (dp),  INTENT(OUT),   DIMENSION(NUM_OBS,N_FORECAST) :: Y_FORECAST
+  REAL (dp),  INTENT(OUT),   DIMENSION(NUM_EST,N_FORECAST+1) :: A_FORECAST
+!  REAL (DP),  INTENT(OUT) :: RAT_ERROR
   REAL (dp),  DIMENSION(NUM_OBS) :: H !VECTOR WITH THE ELEMENTS IN THE DIAGONAL OF MATRIX H  
   REAL (dp),  DIMENSION(NUM_EXO,NUM_EXO) :: Q  
   !VARIABLES PARA ESTADO ESTACIONARIO
@@ -35,57 +39,45 @@ SUBROUTINE LOGLIK_PAT(PAR,LOG_L,INFO)
   
   EXTERNAL KALMANFILTERMATRICES
   integer i,j
-  !!!!!!!!!!!
+  
   integer, DIMENSION(NUM_OBS) :: INDE
-  !!!!!!!!!!!!
+  
   CXINI = XINI
   PARMODEL = PARVECTOR
 
   DO I=1,NUM_PAR_EST
      PARMODEL(PARIND(I))=PAR(I) 
   END DO
- 
 
+ ! CALL PASSPAR(PARMODEL,NPAR)
+  
   CALL SOLVESS(PARMODEL, NPAR, CXINI, BST,INFO )  !Esta rutina llama PASSPAR(PARMODEL,NPAR) y actualiza los valores de los parámetros
+  
   IF ( ( INFO .NE. 0 ) ) then 
-     LOG_L = HUGE(DBLE(1.0))
-     ! LOG_L = -1.0
-     !      LOG_L = sqrt(LOG_L)    
-     
      print *, "No se encontro el ss"
-      RETURN
+     RETURN
   END IF
+
   CALL GETSTEADYSTATE(CXINI, NEQ, SSVAL, NUM_N, NUM_RAT_OBS, RAT_OBS)
 
   CALL ABMATRIX(NUM_N, AMAT, BMAT, log(SSVAL))   
+  if (any(isnan(AMAT)) .or. any(isnan(BMAT))) then
+     print *, "NAN en A o B"
+  endif
   CALL DSOLAB(F, P, AMAT, BMAT, NUM_N, NUM_K, INFO)  
-       IF ( INFO .NE. 0 ) THEN
-        LOG_L = HUGE(DBLE(1.0))
-        RETURN
-     END IF
-  !CALL AIM(AMAT,BMAT,NUM_N,NUM_K,INT(1),INT(1),F,P,INFO)     
-!   IF (INFO .NE. 0) THEN
-!      PRINT *, 'AIM no llego'
-!      CALL DSOLAB(F, P, AMAT, BMAT, NUM_N, NUM_K, INFO)  
-!      IF ( INFO .NE. 0 ) THEN
-!         LOG_L = HUGE(DBLE(1.0))
-!         RETURN
-!      END IF
-!   ENDIF
-  !print *,"CXINI=",CXINI
-
-
-  !Actualiza la semilla (xini)
-  XINI = CXINI
   
+  IF ( INFO .NE. 0 ) THEN
+     print *, "Solab no encontro la solucion"     
+     RETURN
+  END IF
+  
+  !Actualiza la semilla (xini)
+  XINI = CXINI  
   CALL OBSCONTROLKALMAN(F,F_OBS)
-
-
- ! do i=1,num_k
- ! PRINT *,F_OBS(1,i)
- ! enddo
-  !PRINT *,F(ZIND,1)
   CALL KALMANFILTERMATRICES(F_OBS, P, NUM_K, NUM_EXO, NUM_CNTRL_OBS,R, T) 
+
+
+!  CALL KALMANFILTERMATRICES(F_OBS, P, NUM_K, NUM_EXO, NUM_CNTRL_OBS,R, T) 
 
 !  OPEN (1,FILE="Tkal.txt" )
 !  DO J = 1, NUM_CNTRL_OBS+NUM_K
@@ -152,26 +144,36 @@ SUBROUTINE LOGLIK_PAT(PAR,LOG_L,INFO)
   !!!!!!!! FILTRO DE KALMAN!!!!!!!!!!!!!
   ! ADICIÓN DE CONSTANTES Y RAZONES DE LARGO PLAZO A LA ECUACION DE MEDIDA DEL FILTRO DE KALMAN
  ! CONS_OBS=0.0
+ ! print *,"num_obs=",num_obs
   DO I=1,NUM_OBS
-     IF (I .GT. NUM_OBS - NUM_RAT_OBS) THEN
-        J=I-(NUM_OBS-NUM_RAT_OBS)
-        CONS_OBS(I) = RAT_OBS(J)
-        H(I)=0.005
-        !PRINT *,RAT_OBS(J)
-       ! PRINT *,"J=",J
-     ENDIF
+     !IF (I .GT. NUM_OBS - NUM_RAT_OBS) THEN
+     !   J=I-(NUM_OBS-NUM_RAT_OBS)
+     !   CONS_OBS(I) = RAT_OBS(J)
+     !   H(I)=10.0 !0.005 !0.000001
+      !  PRINT *,RAT_OBS(J)
+     !print *,"rat=",CONS_OBS(I)
+    ! ENDIF
+    !    H(NUM_OBS)=0.001;
 !     print *,"Media de la serie",I,":",CONS_OBS(I)
      Y_CONS(I,:)=Y(I,:)-CONS_OBS(I)
+  !   print *,I,sum(Y(I,:))/22.0
   ENDDO
+!  PRINT *,"RAT_OBS:",cons_OBS(NUM_OBS)
+!
+!  PRINT *,"Y_CONS:",0.5*SUM(Y_CONS(NUM_OBS,:)**2.0)
+
+
+
 
       !PRINT*,"y_CONS=",Y_CONS(NUM_OBS,:)
 !     PRINT *,"MAXI:",MAXVAL(ABS(Y_CONS((/(I,I=2,50)/),30)))
-  CALL FAST_KAL_FILT_PAT(INDE,H,T,R,Q,Y_CONS,A_INI,P_INI,NUM_OBS,NUM_EST,NUM_K,NUM_EXO,NUM_PER,NUM_RAT_OBS,LOG_L)
-
-
- ! print *, "El valor del filtro : " , log_l
- 
+!  CALL FAST_KAL_FILT_PAT(INDE,H,T,R,Q,Y_CONS,A_INI,P_INI,NUM_OBS,NUM_EST,NUM_K,NUM_EXO,NUM_PER,NUM_RAT_OBS,LOG_L)
+  CALL FAST_KAL_FILT_PAT_LA(INDE,H,T,R,Q,Y_CONS,A_INI,P_INI,NUM_OBS,NUM_EST,NUM_K,NUM_EXO,NUM_PER,LOG_L,FOR_PERIOD,A_T,P_T)
+  !print *, "El valor del filtro : " , LOG_L  
+!  IF (log_l<-1e10) then
+!    print *,"PAR=",PAR
+!  endif
   
-END SUBROUTINE LOGLIK_PAT
-
-
+  KALMANSIMUL_LA(INDE,T, A_T, N_FORECAST,NUM_OBS, NUM_EST, Y_FORECAST, A_FORECAST)
+  
+end subroutine forecast

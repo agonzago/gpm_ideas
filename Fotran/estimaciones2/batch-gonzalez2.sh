@@ -1,0 +1,11 @@
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 12
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 13
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 14
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 15
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 16
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 17
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 18
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 19
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 20
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 21
+ts ./patacon_bayes.out 28 par_good.csv xini_good.csv 22
