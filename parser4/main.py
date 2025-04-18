@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple main function to generate IRFs with base and augmented solvers
-Assumes all trends are random walks
+Simple main function to generate IRFs with base and augmented solvers.
+Uses a single observation mapping dictionary that contains:
+  - The observable variable names,
+  - The trend specification ('rw' for random walk, etc.), and
+  - The model variable (cycle) to which it links.
 """
 
 import os
@@ -14,15 +17,12 @@ from augmented_statespace import SimpleModelSolver, AugmentedStateSpace
 from dynare_parser import DynareParser
 
 
-
-
 def main():
-    """
-    Load qpm_simpl1 model files, solve model, and generate IRFs with both solvers
-    """
-    import os
+    # Change working directory to script directory
     script_dir = os.path.dirname(__file__)
     os.chdir(script_dir)
+    
+    # Load Dynare model and generate required files
     dynare_file = "qpm_simpl1.dyn"
     dynare_parser = DynareParser(dynare_file)
     success = dynare_parser.parse()
@@ -38,14 +38,14 @@ def main():
         print("  - model_structure.py")
     else:
         print("Parsing failed.")
-    
+        return
 
     # Create base model solver
     print("Creating base model solver...")
     out_folder = "model_files"
-    json_file = os.path.join(out_folder, "model_json.json") 
-    jacobian_file = os.path.join(out_folder,"jacobian_matrices.py")
-    structure_file= os.path.join(out_folder,"model_structure.py")
+    json_file = os.path.join(out_folder, "model_json.json")
+    jacobian_file = os.path.join(out_folder, "jacobian_matrices.py")
+    structure_file = os.path.join(out_folder, "model_structure.py")
     solver = SimpleModelSolver(json_file, jacobian_file, structure_file)
     
     # Solve the model
@@ -56,69 +56,56 @@ def main():
         print("Error: Model solution failed.")
         return
 
-    #solver.compute_irf('SHK_RS', periods=40)
-    solver.plot_irf('SHK_RS', shock_size = 1, 
-                    variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI', 'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP'], 
+    # Plot IRFs using the base model solver
+    solver.plot_irf('SHK_RS', shock_size=1,
+                    variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI',
+                                       'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP'],
                     periods=40)
     
-    solver.plot_irf('SHK_L_GDP_GAP', shock_size = 1, 
-                    variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI', 'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP'], 
+    solver.plot_irf('SHK_L_GDP_GAP', shock_size=1,
+                    variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI',
+                                       'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP'],
                     periods=40)
     
+    solver.plot_irf('SHK_DLA_CPI', shock_size=1,
+                    variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI',
+                                       'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP'],
+                    periods=40)
+    
+    shock_size = 1
+    impulse = np.zeros(len(solver.shock_names))
+    impulse[0] = shock_size
+    x_sim = solver.simulate_state_space(impulse, periods=40)
+    solver.plot_simulation(x_sim,
+                           variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI',
+                                              'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP'])
+    
+    # Define a single observation mapping dictionary that contains all information:
+    observation_map = {
+        "RS_OBS": { "trend": "rw", "model_var": "RS" },
+        "DLA_CPI_OBS": { "trend": "cm", "model_var": "DLA_CPI" },
+        "L_GDP_OBS": { "trend": "rw", "model_var": "L_GDP_GAP" }  # constant mean option
+    }
+    
+    # Create an AugmentedStateSpace instance using the observation mapping.
+    # The AugmentedStateSpace class should derive its trend specs and observable list from this mapping.
+    
+    aug_model = AugmentedStateSpace(solver, obs_mapping=observation_map)
+    
+    # Plot an IRF for the augmented model.
+    # Here, shock index 0 corresponds to the first (base) shock.
+    
+    
+    aug_model.plot_irf(3, variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI',
+                                            'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP', 
+                                            'RS_OBS', 'DLA_CPI_OBS','L_GDP_OBS'], periods=40)
 
-    solver.plot_irf('SHK_DLA_CPI', shock_size = 1, 
-                    variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI', 'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP'], 
-                    periods=40)
-    
-    # # Get model variables
-    # observable_vars = solver.model_data.get('variables', [])[:10]  # Limit to first 10 for simplicity
-    
-    # # Create trend specifications - all random walks
-    # trend_specs = {}
-    # for var in observable_vars:
-    #     trend_specs[var] = 'rw'  # Random walk for all variables
-    
-    # print(f"Using {len(observable_vars)} variables with random walk trends")
-    
-    # # Create augmented state space model
-    # print("Creating augmented state space model...")
-    # aug_model = AugmentedStateSpace(solver, trend_specs, observable_vars)
-    
-    # # Create output directory
-    # os.makedirs("irfs", exist_ok=True)
-    
-    # # Generate IRFs for base model
-    # shocks = solver.model_data.get('shocks', [])
-    # print(f"Generating IRFs for {len(shocks)} economic shocks in base model...")
-    
-    # for i, shock in enumerate(shocks):
-    #     print(f"  Shock {i}: {shock}")
-    #     solver.plot_irf(i, periods=20)
-    
-    # # Generate IRFs for augmented model - economic shocks
-    # print(f"Generating IRFs for economic shocks in augmented model...")
-    
-    # for i, shock in enumerate(shocks):
-    #     print(f"  Shock {i}: {shock}")
-    #     # Plot with cycle components only
-    #     aug_model.plot_irf(i, periods=20, include_trend=False)
-    #     # Plot with trend included
-    #     aug_model.plot_irf(i, periods=20, include_trend=True)
-    #     # Compare base and augmented models
-    #     aug_model.compare_with_base_model(i, periods=20)
-    
-    # # Generate IRFs for trend shocks
-    # n_base_shocks = len(shocks)
-    # n_aug_shocks = aug_model.B_aug.shape[1]
-    # n_trend_shocks = n_aug_shocks - n_base_shocks
-    
-    # print(f"Generating IRFs for {n_trend_shocks} trend shocks...")
-    
-    # for i in range(n_base_shocks, n_aug_shocks):
-    #     print(f"  Trend shock {i - n_base_shocks}")
-    #     aug_model.plot_irf(i, periods=20)
-    
-    # print("All IRFs generated successfully!")
+    # Compare the base model IRF (cycle only) with the augmented IRF (excluding trend parts)
+    # for the same base shock.
+    # aug_model.compare_with_base_model(0, variables_to_plot=['RES_RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI',
+    #                                         'RS', 'L_GDP_GAP', 'DLA_CPI', 'RR_GAP', 
+    #                                         'RS_OBS', 'DLA_CPI_OBS','L_GDP_OBS'], periods=40)
+
 
 if __name__ == "__main__":
     main()

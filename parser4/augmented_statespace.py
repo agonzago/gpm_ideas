@@ -173,7 +173,9 @@ class SimpleModelSolver:
         self.p = None  # State transition matrix (p in klein)
         self.l = None  # State response to shocks (l in klein)
         self.is_solved = False
-    
+        self.T = None 
+        self.R  =None
+
     def _load_json(self, file_path):
         """Load a JSON file"""
         try:
@@ -385,792 +387,489 @@ class SimpleModelSolver:
         plt.savefig(f"irf_{shock_name}.png")
         plt.show()
 
+    # def build_kalman_matrices(self):
+    #     """
+    #     Build Kalman filter matrices (T and R) following the Fortran-style routine.
+    #     Maps parser‐defined constants to the required dimensions:
+    #         num_cntrl_obs = number of control variables (from base_solver.control_names)
+    #         num_k        = number of states in Klein’s solution (from base_solver.p.shape[0])
+    #         num_exo      = number of shocks (from base_solver.shock_names)
+    #     """
+    #     # Map constants from the parser via base_solver
+    #     num_cntrl = len(self.model_data['controls'])
+    #     num_k =  len(self.model_data['states'])
+    #     num_exo = len(self.model_data['shocks'])
+        
+    #     # Derive Fortran-style constants
+    #     num_est = num_cntrl + num_k    # Total Kalman states = controls + states
+    #     n_k     = num_cntrl            # observed controls block size
+    #     k_ex    = num_k - num_exo           # non-exogenous state block size
+    #     n_ex    = n_k + k_ex               # index end for non-exo states
+
+    #     # Get Klein’s solution matrices from the base solver
+    #     # f is the policy matrix (shape: (num_cntrl_obs, num_k))
+    #     # p is the state transition matrix (shape: (num_k, num_k))
+    #     F_obs = self.f
+    #     P = self.p
+
+    #     if F_obs.shape != (num_cntrl, num_k):
+    #         raise ValueError(f"F_obs shape mismatch: expected ({num_cntrl_obs},{num_k}), got {F_obs.shape}")
+    #     if P.shape != (num_k, num_k):
+    #         raise ValueError(f"P shape mismatch: expected ({num_k},{num_k}), got {P.shape}")
+    #     if not (0 <= num_exo <= num_k):
+    #         raise ValueError("num_exo must be between 0 and num_k")
+    #     if num_cntrl < 0:
+    #         raise ValueError("num_cntrl_obs cannot be negative")
+        
+    #     # Partition the input matrices as in KleintoKalman
+    #     F1 = F_obs[:, :k_ex]  # (n_k, k_ex)
+    #     F2 = F_obs[:, k_ex:]  # (n_k, num_exo)
+        
+    #     P11 = P[:k_ex, :k_ex]   # (k_ex, k_ex)
+    #     P12 = P[:k_ex, k_ex:]   # (k_ex, num_exo)
+    #     # P21 is assumed zero
+    #     P22 = P[k_ex:, k_ex:]   # (num_exo, num_exo)
+        
+    #     # Initialize T and R matrices
+    #     T = np.zeros((num_est, num_est))
+    #     R = np.zeros((num_est, num_exo))
+        
+    #     # Construct T matrix block by block
+    #     # Block 1: Observed controls update
+    #     if k_ex > 0:
+    #         T[0:n_k, n_k:n_ex] = F1       # maps non-exo state variables to observed controls
+    #     if num_exo > 0:
+    #         T[0:n_k, n_ex:num_est] = F2 @ P22   # maps exo state changes
+        
+    #     # Block 2: Non-exogenous state update
+    #     if k_ex > 0:
+    #         T[n_k:n_ex, n_k:n_ex] = P11
+    #         if num_exo > 0:
+    #             T[n_k:n_ex, n_ex:num_est] = P12 @ P22
+        
+    #     # Block 3: Exogenous state update
+    #     if num_exo > 0:
+    #         T[n_ex:num_est, n_ex:num_est] = P22
+        
+    #     # Construct R matrix block by block (shock impact)
+    #     if num_exo > 0:
+    #         R[0:n_k, 0:num_exo] = F2      # Impact on observed controls
+    #     if k_ex > 0 and num_exo > 0:
+    #         R[n_k:n_ex, 0:num_exo] = P12    # Impact on non-exogenous states
+    #     if num_exo > 0:
+    #         np.fill_diagonal(R[n_ex:num_est, 0:num_exo], 1.0)  # Exogenous state shock impact
+        
+    #     # Save the built matrices in the instance (or return them)
+    #     self.T = T
+    #     self.R = R
+    #     return T, R
+
+    def build_kalman_matrices(self):
+        """
+        Build the augmented state space matrices using the ordering:
+            [ states; controls ]
+        where
+            states:    x (dimension n_states)
+            controls:  y = f * x (dimension n_controls)
+            
+        With Klein's solution, the dynamics for the states are
+              xₜ₊₁ = p * xₜ + shock
+        and the controls are given algebraically by
+              yₜ = f * xₜ.
+            
+        Thus, the augmented system becomes:
+            x_aug = [ x; y ]
+            x_augₜ₊₁ = T * x_augₜ + R * εₜ
+            
+        with
+                T = [ p       0
+                        f * p   0 ]
+                R = [ I
+                        f ]
+        """
+        # Map constants from the parsed model
+        n_states = len(self.model_data['states'])
+        n_controls = len(self.model_data['controls'])
+        
+        # Klein's solution matrices: 
+        #    p (n_states x n_states) and f (n_controls x n_states)
+        if self.p.shape != (n_states, n_states):
+            raise ValueError(f"State transition matrix p shape mismatch: expected ({n_states}, {n_states}), got {self.p.shape}")
+        if self.f.shape != (n_controls, n_states):
+            raise ValueError(f"Policy matrix f shape mismatch: expected ({n_controls}, {n_states}), got {self.f.shape}")
+        
+        # Build augmented T matrix
+        T = np.zeros((n_states + n_controls, n_states + n_controls))
+        # Upper-left block: state evolution from p
+        T[:n_states, :n_states] = self.p
+        # Lower-left block: controls evolve as f * p
+        T[n_states:, :n_states] = self.f @ self.p
+        # The other blocks remain zero since controls are algebraically determined
+        
+        # Build augmented R matrix
+        R = np.zeros((n_states + n_controls, n_states))
+        
+        #Instead of assuming shocks hit every state, we only apply shocks to selected states
+        shock_map = self.model_data.get('shock_to_process_var_map', {})
+        n_shocks = len(self.shock_names)
+        
+        R = np.zeros((n_states + n_controls, n_shocks))
+        # Build a selection matrix S (n_states x n_shocks_active) such that only selected states get a shock
+        S = np.zeros((n_states, n_shocks))
+        for j, (shock_name, target_state) in enumerate(shock_map.items()):
+            if target_state not in self.state_names:
+                raise ValueError(f"Target state '{target_state}' for shock '{shock_name}' not found in state_names.")
+            i = self.state_names.index(target_state)
+            S[i, j] = 1.0
+        # Top block: states only get a shock if selected in S
+        R[:n_states, :] = S
+        # Bottom block: controls respond to shocks through f
+        R[n_states:, :] = self.f @ S
+
+        
+        # Save the augmented matrices
+        self.T = T
+        self.R = R
+        return T, R
+    
+    def simulate_state_space(self, shock, periods=40):
+        """
+        Simulate the state space model using the Fortran‑style matrices T and R.
+        
+        The simulation follows:
+            x(0) = R @ shock
+            x(t+1) = T @ x(t)
+        
+        Assumes the state vector ordering:
+            [observed_controls; non_exo_states; exo_states]
+        
+        Returns:
+        --------
+        x_sim : np.ndarray
+            Simulated state vectors over time (shape: (periods+1, num_est))
+        y_sim : np.ndarray
+            Simulated output (observables), taken as the first num_cntrl_obs elements
+                    of the state vector (shape: (periods+1, num_cntrl_obs))
+        """
+        # Ensure that the Kalman matrices have been built
+        if self.T is None or self.R is None:
+            self.build_kalman_matrices()
+        
+        # Dimensions
+        num_est = self.T.shape[0]
+        num_cntrl_obs =  len(self.model_data['controls'])
+        
+        # Initialize state simulation array
+        x_sim = np.zeros((periods + 1, num_est))
+        # At time zero, the state is the shock impact
+        x_sim[0, :] = self.R @ shock
+        
+        # Propagate the state using the transition matrix T
+        for t in range(periods):
+            x_sim[t + 1, :] = self.T @ x_sim[t, :]
+        
+        # Observed outputs taken as the first num_cntrl_obs elements of the state vector
+        #y_sim = x_sim[:, :num_cntrl_obs]
+        return x_sim #, y_sim
+
+    def plot_simulation(self, x_sim, variables_to_plot=None):
+        """
+        Create a plot of the simulation output, mimicking the style of plot_irf.
+        
+        Parameters:
+        -----------
+        x_sim : np.ndarray
+            Simulated full state vectors over time (shape: (periods+1, num_est))
+        
+        """
+        import matplotlib.pyplot as plt
+        
+        # Get observable variable names from the model data.
+        #obs_vars = self.get_simulation_names()
+        state_vars = self.state_names
+        control_vars = self.control_names
+        var_names = state_vars + control_vars
+
+        
+        # Filter to only include variables that exist
+        variables_to_plot = [v for v in variables_to_plot if v in var_names]
+        
+        # Create time axis
+        periods = x_sim.shape[0]
+        time = np.arange(periods)
+        
+        # Create plot
+        plt.figure(figsize=(12, 8))
+        for var in variables_to_plot:
+            if var in var_names:
+                var_idx = var_names.index(var)
+                plt.plot(time, x_sim[:, var_idx], label=var)
+        
+        plt.title(f"Impulse Response to Shock")
+        plt.xlabel("Periods")
+        plt.ylabel("Deviation from Steady State")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        
+        # Save plot
+        #plt.savefig(f"irf_{shock_name}.png")
+        plt.show()
 
 
-
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.linalg as la
 
 class AugmentedStateSpace:
-    """
-    Augmented state space representation with trend components
-    This extends the base model to include random walk trend specifications
-    """
-    
-    def __init__(self, base_solver, trend_specs=None, observable_vars=None):
+    def __init__(self, base_solver, obs_mapping=None):
         """
-        Initialize the augmented state space with a base model solver
+        Initialize the augmented state space.
+        Uses base_solver's T and R matrices and augments the state vector with stochastic trends.
+        The augmented state vector is: [ base states (states+controls); trend states ]
         
         Parameters:
-        -----------
-        base_solver : SimpleModelSolver
-            The base model solver with solution already computed
-        trend_specs : dict, optional
-            Dictionary mapping variable names to trend specifications:
-            - 'rw': Random walk
-        observable_vars : list, optional
-            List of variable names that are observable
+          base_solver : SimpleModelSolver
+            The base model solver that has built the Kalman matrices T and R.
+          obs_mapping : dict, optional
+            Mapping from observable names to specifications.
+            Example:
+              {
+                "RS_OBS": {"cycle": "RS", "trend": "rw", "model_var": "RS"},
+                "DLA_CPI_OBS": {"cycle": "DLA_CPI", "trend": "rw", "model_var": "DLA_CPI"},
+                "L_GDP_OBS": {"cycle": "L_GDP_GAP", "trend": "cm", "model_var": "L_GDP_GAP"}
+              }
         """
         self.base_solver = base_solver
         
-        # Make sure the base model is solved
-        if not base_solver.is_solved:
-            raise ValueError("Base model must be solved before creating augmented state space")
+        # Ensure Kalman matrices T and R are built.
+        if self.base_solver.T is None or self.base_solver.R is None:
+            self.base_solver.build_kalman_matrices()
+        self.T_base = self.base_solver.T   # base state-transition matrix
+        self.R_base = self.base_solver.R   # base shock impact matrix
         
-        # Default trend specification (all random walks)
-        if trend_specs is None:
-            trend_specs = {}
-            # Default to random walk for all variables
-            for var in base_solver.var_names:
-                trend_specs[var] = 'rw'
-            
-        self.trend_specs = trend_specs
+        # Base state labels: states plus controls.
+        self.base_state_labels = self.base_solver.state_names + self.base_solver.control_names
+        self.base_shock_labels = self.base_solver.shock_names
         
-        # Default all variables are observable if not specified
-        if observable_vars is None:
-            observable_vars = base_solver.var_names
-            
-        self.observable_vars = observable_vars
+        # Process obs_mapping to extract observable list and trend specifications.
+        if obs_mapping is not None:
+            self.obs_mapping = obs_mapping
+            self.observable_vars = list(obs_mapping.keys())
+            self.trend_specs = {}
+            for obs, spec in obs_mapping.items():
+                if "trend" in spec:
+                    key = spec.get("model_var", obs)
+                    self.trend_specs[key] = spec["trend"]
+        else:
+            self.obs_mapping = {var: {"cycle": var, "trend": None} for var in self.base_solver.var_names}
+            self.observable_vars = list(self.obs_mapping.keys())
+            self.trend_specs = {var: None for var in self.base_solver.var_names}
         
-        # Initialize augmented matrices
-        self.A_aug = None  # Augmented transition matrix
-        self.B_aug = None  # Augmented shock impact matrix
-        self.C_aug = None  # Augmented measurement matrix
-        self.H = None      # Selection matrix for observable variables
+        # Augmented matrices to be built.
+        self.A_aug = None
+        self.B_aug = None
+        self.C_aug = None
+        self.aug_state_labels = None
+        self.aug_shock_labels = None
         
-        # Build the augmented state space
         self._build_augmented_state_space()
     
-    def _build_augmented_state_space(self):
-        """Build the augmented state space with random walk trend components"""
-        # Get base model dimensions
-        n_states = len(self.base_solver.state_names)
-        n_controls = len(self.base_solver.control_names)
-        n_vars = n_states + n_controls
-        n_shocks = len(self.base_solver.shock_names)
-        
-        # Create the base model state transition matrix A
-        A = np.zeros((n_vars, n_vars))
-        
-        # Fill the upper-left block with P (state transition)
-        A[:n_states, :n_states] = self.base_solver.p
-        
-        # Fill the lower-left block with F (control policy)
-        A[n_states:, :n_states] = self.base_solver.f
-        
-        # Create the base model shock impact matrix B
-        B = np.zeros((n_vars, n_shocks))
-        
-        # Fill the state response using L matrix (from klein)
-        if self.base_solver.l is not None:
-            B[:n_states, :] = self.base_solver.l
-        
-        # Fill the control response using N matrix (from klein)
-        if self.base_solver.n is not None:
-            B[n_states:, :] = self.base_solver.n
-        
-        # Create the measurement matrix C (identity for now)
-        C = np.eye(n_vars)
-        
-        # Count trend components needed (all random walks in this case)
-        n_trend_states = 0
-        n_trend_shocks = 0
-        
-        # Track which variables have trends
-        rw_vars = []   # Random walk
-        
-        # Count trend states and shocks
-        for var, trend_type in self.trend_specs.items():
-            if var in self.base_solver.var_names:
-                if trend_type == 'rw':  # Random walk
-                    n_trend_states += 1
-                    n_trend_shocks += 1
-                    rw_vars.append(var)
-        
-        # Create the augmented state transition matrix A_aug
-        n_aug_states = n_vars + n_trend_states
-        A_aug = np.zeros((n_aug_states, n_aug_states))
-        
-        # Fill the upper-left block with A (base model)
-        A_aug[:n_vars, :n_vars] = A
-        
-        # Fill the trend block (lower-right)
-        trend_start = n_vars
-        for i in range(n_trend_states):
-            # Random walk: trend_{t} = trend_{t-1} + eps_level
-            A_aug[trend_start + i, trend_start + i] = 1.0
-        
-        # Create the augmented shock impact matrix B_aug
-        n_aug_shocks = n_shocks + n_trend_shocks
-        B_aug = np.zeros((n_aug_states, n_aug_shocks))
-        
-        # Fill the upper-left block with B (base model)
-        B_aug[:n_vars, :n_shocks] = B
-        
-        # Fill the trend shock impacts (diagonal ones for each trend shock)
-        for i in range(n_trend_shocks):
-            B_aug[n_vars + i, n_shocks + i] = 1.0
-        
-        # Create the augmented measurement matrix C_aug
-        C_aug = np.zeros((n_vars, n_aug_states))
-        
-        # Fill the base model part (cycle components)
-        C_aug[:, :n_vars] = C
-        
-        # Add trend components to observed variables
-        for i, var in enumerate(self.base_solver.var_names):
-            if var in self.trend_specs and var in rw_vars:
-                # Find position of this trend in the state vector
-                trend_pos = n_vars + rw_vars.index(var)
-                C_aug[i, trend_pos] = 1.0
-        
-        # Create selection matrix H for observable variables
-        H = np.zeros((len(self.observable_vars), n_vars))
-        
-        for i, var in enumerate(self.observable_vars):
-            if var in self.base_solver.var_names:
-                var_idx = self.base_solver.var_names.index(var)
-                H[i, var_idx] = 1.0
-        
-        # Store augmented matrices
-        self.A_aug = A_aug
-        self.B_aug = B_aug
-        self.C_aug = C_aug
-        self.H = H
-        
-        # Calculate final observation matrix
-        self.obs_matrix = H @ C_aug
-        
-        print(f"Augmented state space created:")
-        print(f"  - Base states+controls: {n_vars}")
-        print(f"  - Trend states: {n_trend_states}")
-        print(f"  - Base shocks: {n_shocks}")
-        print(f"  - Trend shocks: {n_trend_shocks}")
-        print(f"  - Observable variables: {len(self.observable_vars)}")
-    
-    def compute_irf(self, shock_index, periods=40, include_trend=True):
+    def _build_trend_matrices(self):
         """
-        Compute impulse response functions for the augmented model
+        Build trend matrices based on self.trend_specs.
         
-        Parameters:
-        -----------
-        shock_index : int
-            Index of the shock to analyze (base model shocks come first)
-        periods : int, optional
-            Number of periods to simulate (default: 40)
-        include_trend : bool, optional
-            Whether to include trend components in the IRF (default: True)
-            
         Returns:
-        --------
-        irf_all : 2D array
-            IRF data for observable variables (periods+1 x n_observables)
-        obs_vars : list
-            Names of observable variables
+          A_trend (np.ndarray): Trend state transition matrix.
+          B_trend (np.ndarray): Trend shock impact matrix.
+          trend_labels (list): Trend state labels.
+          trend_shock_labels (list): Trend shock labels.
         """
-        # Get dimensions
-        n_base_shocks = len(self.base_solver.shock_names)
-        n_aug_shocks = self.B_aug.shape[1]
-        n_states = self.A_aug.shape[0]
-        n_obs = self.H.shape[0]
-        
-        if shock_index >= n_aug_shocks:
-            raise ValueError(f"Shock index {shock_index} out of range (0-{n_aug_shocks-1})")
-        
-        # Determine shock name
-        if shock_index < n_base_shocks:
-            shock_name = self.base_solver.shock_names[shock_index]
-        else:
-            # This is a trend shock
-            trend_shock_idx = shock_index - n_base_shocks
-            var_index = trend_shock_idx  # Each trend variable has one shock
-            
-            if var_index < len(self.base_solver.var_names):
-                shock_name = f"{self.base_solver.var_names[var_index]}_trend_shock"
-            else:
-                shock_name = f"Trend_shock_{trend_shock_idx}"
-        
-        # Create shock vector (unit shock)
-        shock = np.zeros(n_aug_shocks)
-        shock[shock_index] = 1.0
-        
-        # Initialize IRF arrays
-        irf_states = np.zeros((periods + 1, n_states))
-        
-        # Compute initial state impact
-        irf_states[0, :] = self.B_aug @ shock
-        
-        # Compute IRF dynamics using the augmented state space
-        for t in range(periods):
-            # State transition: x_{t+1} = A_aug * x_t
-            irf_states[t+1, :] = self.A_aug @ irf_states[t, :]
-        
-        # Compute observed variables: y_t = H * C_aug * x_t
-        irf_obs = np.zeros((periods + 1, n_obs))
-        
-        for t in range(periods + 1):
-            if include_trend:
-                # Use the full state for observation
-                irf_obs[t, :] = self.obs_matrix @ irf_states[t, :]
-            else:
-                # Use only the cycle component (base model part)
-                n_base_vars = len(self.base_solver.var_names)
-                irf_obs[t, :] = self.H @ self.C_aug[:, :n_base_vars] @ irf_states[t, :n_base_vars]
-        
-        print(f"Augmented IRF computed for shock: {shock_name}")
-        return irf_obs, self.observable_vars
-    
-    def plot_irf(self, shock_index, variables_to_plot=None, periods=40, include_trend=True):
-        """Plot impulse response functions for the augmented model"""
-        irf_data, obs_vars = self.compute_irf(shock_index, periods, include_trend)
-        
-        # Get shock name
-        n_base_shocks = len(self.base_solver.shock_names)
-        if shock_index < n_base_shocks:
-            shock_name = self.base_solver.shock_names[shock_index]
-        else:
-            trend_shock_idx = shock_index - n_base_shocks
-            if trend_shock_idx < len(self.observable_vars):
-                shock_name = f"{self.observable_vars[trend_shock_idx]}_trend_shock"
-            else:
-                shock_name = f"Trend_shock_{trend_shock_idx}"
-        
-        # If variables_to_plot not specified, use all observable variables
-        if variables_to_plot is None:
-            variables_to_plot = self.observable_vars
-        elif isinstance(variables_to_plot, str):
-            variables_to_plot = [variables_to_plot]  # Handle single variable case
-        
-        # Filter to only include variables that exist
-        variables_to_plot = [v for v in variables_to_plot if v in obs_vars]
-        
-        # Create time axis
-        time = np.arange(periods + 1)
-        
-        # Create plot
-        plt.figure(figsize=(12, 8))
-        for var in variables_to_plot:
-            if var in obs_vars:
-                var_idx = obs_vars.index(var)
-                plt.plot(time, irf_data[:, var_idx], label=var)
-        
-        trend_str = " with Trend Components" if include_trend else " (Cycle Components Only)"
-        plt.title(f"Augmented Model IRF to {shock_name} Shock{trend_str}")
-        plt.xlabel("Periods")
-        plt.ylabel("Deviation from Steady State")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        
-        # Save plot
-        trend_suffix = "with_trend" if include_trend else "cycle_only"
-        plt.savefig(f"aug_irf_{shock_name}_{trend_suffix}.png")
-        plt.show()
-    
-    def compare_with_base_model(self, shock_index, variables_to_plot=None, periods=40):
-        """
-        Compare IRFs between base model and augmented model
-        for the same economic shock (excluding trend shocks)
-        
-        Parameters:
-        -----------
-        shock_index : int
-            Index of the base model shock to analyze
-        variables_to_plot : list or str, optional
-            Variable(s) to plot (default: all observable variables)
-        periods : int, optional
-            Number of periods to simulate (default: 40)
-        """
-        # Check that this is a base model shock
-        n_base_shocks = len(self.base_solver.shock_names)
-        if shock_index >= n_base_shocks:
-            raise ValueError(f"Only base model shocks (0-{n_base_shocks-1}) can be compared")
-        
-        # Get shock name
-        shock_name = self.base_solver.shock_names[shock_index]
-        
-        # Compute IRFs for both models
-        base_irf, base_vars = self.base_solver.compute_irf(shock_index, periods)
-        aug_irf, aug_vars = self.compute_irf(shock_index, periods, include_trend=False)
-        
-        # If variables_to_plot not specified, use intersection of observable variables
-        if variables_to_plot is None:
-            variables_to_plot = [v for v in aug_vars if v in base_vars]
-        elif isinstance(variables_to_plot, str):
-            if variables_to_plot in base_vars and variables_to_plot in aug_vars:
-                variables_to_plot = [variables_to_plot]
-            else:
-                print(f"Warning: Variable {variables_to_plot} not found in both models")
-                variables_to_plot = [v for v in aug_vars if v in base_vars][:5]  # Show first 5 common variables
-        
-        # Create time axis
-        time = np.arange(periods + 1)
-        
-        # Create plot
-        plt.figure(figsize=(12, 8))
-        
-        line_styles = ['-', '--']
-        colors = ['b', 'r']
-        
-        for var in variables_to_plot:
-            if var in base_vars and var in aug_vars:
-                # Get indices
-                base_idx = base_vars.index(var)
-                aug_idx = aug_vars.index(var)
-                
-                # Plot both IRFs
-                plt.plot(time, base_irf[:, base_idx], f'{colors[0]}{line_styles[0]}', label=f'{var} (Base Model)')
-                plt.plot(time, aug_irf[:, aug_idx], f'{colors[1]}{line_styles[1]}', label=f'{var} (Augmented Model)')
-        
-        plt.title(f"Comparison of IRFs to {shock_name} Shock")
-        plt.xlabel("Periods")
-        plt.ylabel("Deviation from Steady State")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        
-        # Save plot
-        plt.savefig(f"compare_irf_{shock_name}.png")
-        plt.show()
-    """
-    Augmented state space representation with trend components
-    This extends the base model to include various trend specifications
-    """
-    
-    def __init__(self, base_solver, trend_specs=None, observable_vars=None):
-        """
-        Initialize the augmented state space with a base model solver
-        
-        Parameters:
-        -----------
-        base_solver : SimpleModelSolver
-            The base model solver with solution already computed
-        trend_specs : dict, optional
-            Dictionary mapping variable names to trend specifications:
-            - 'rw': Random walk
-            - 'sd': Second difference
-            - 'cm': Constant mean
-        observable_vars : list, optional
-            List of variable names that are observable
-        """
-        self.base_solver = base_solver
-        
-        # Make sure the base model is solved
-        if not base_solver.is_solved:
-            raise ValueError("Base model must be solved before creating augmented state space")
-        
-        # Default trend specification (constant mean)
-        if trend_specs is None:
-            trend_specs = {}
-            
-        self.trend_specs = trend_specs
-        
-        # Default all variables are observable if not specified
-        if observable_vars is None:
-            observable_vars = base_solver.var_names
-            
-        self.observable_vars = observable_vars
-        
-        # Initialize augmented matrices
-        self.A_aug = None  # Augmented transition matrix
-        self.B_aug = None  # Augmented shock impact matrix
-        self.C_aug = None  # Augmented measurement matrix
-        self.H = None      # Selection matrix for observable variables
-        
-        # Build the augmented state space
-        self._build_augmented_state_space()
-    
-    def _build_augmented_state_space(self):
-        """Build the augmented state space with trend components"""
-        # Get base model dimensions
-        n_states = len(self.base_solver.state_names)
-        n_controls = len(self.base_solver.control_names)
-        n_vars = n_states + n_controls
-        n_shocks = len(self.base_solver.shock_names)
-        
-        # Create the base model state transition matrix A
-        A = np.zeros((n_vars, n_vars))
-        
-        # Fill the upper-left block with P (state transition)
-        A[:n_states, :n_states] = self.base_solver.p
-        
-        # Fill the lower-left block with F (control policy)
-        A[n_states:, :n_states] = self.base_solver.f
-        
-        # Create the base model shock impact matrix B
-        B = np.zeros((n_vars, n_shocks))
-        
-        # If we have an H matrix, use it for shock impacts
-        if self.base_solver.h is not None:
-            B[:n_states, :] = self.base_solver.h
-        elif self.base_solver.R is not None:
-            # Use R to map shocks to exogenous states
-            n_endo_states = len(self.base_solver.endo_states)
-            n_exo_states = n_states - n_endo_states
-            
-            if n_exo_states > 0 and self.base_solver.R.shape[0] == n_exo_states:
-                B[n_endo_states:n_states, :] = self.base_solver.R
-        
-        # Create the measurement matrix C (identity for now)
-        C = np.eye(n_vars)
-        
-        # Count trend components needed
-        n_trend_states = 0
-        n_trend_shocks = 0
-        
-        # Track which variables have which trend types
-        rw_vars = []   # Random walk
-        sd_vars = []   # Second difference
-        sd_g_vars = [] # Second difference growth components
-        
-        # Count number of states needed for each type of trend
+        trend_blocks = []
+        shock_blocks = []
+        trend_labels = []
+        trend_shock_labels = []
         for var, trend_type in self.trend_specs.items():
-            if var in self.base_solver.var_names:
-                if trend_type == 'rw':  # Random walk
-                    n_trend_states += 1
-                    n_trend_shocks += 1
-                    rw_vars.append(var)
-                elif trend_type == 'sd':  # Second difference
-                    n_trend_states += 2  # Level and growth
-                    n_trend_shocks += 2  # Level and growth shocks
-                    sd_vars.append(var)
-                    sd_g_vars.append(f"{var}_growth")
-                # 'cm' (constant mean) doesn't need additional states
+            if trend_type == 'rw':
+                A_i = np.array([[1.0]])
+                B_i = np.array([[1.0]])
+                trend_blocks.append(A_i)
+                shock_blocks.append(B_i)
+                trend_labels.append(f"{var}_trend")
+                trend_shock_labels.append(f"{var}_trend_shock")
+            elif trend_type == 'sd':
+                A_i = np.array([[1.0, 1.0],
+                                [0.0, 1.0]])
+                B_i = np.eye(2)
+                trend_blocks.append(A_i)
+                shock_blocks.append(B_i)
+                trend_labels.extend([f"{var}_level", f"{var}_growth"])
+                trend_shock_labels.extend([f"{var}_level_shock", f"{var}_growth_shock"])
+            elif trend_type == 'dt':
+                A_i = np.array([[1.0]])
+                B_i = np.zeros((1, 1))
+                trend_blocks.append(A_i)
+                shock_blocks.append(B_i)
+                trend_labels.append(f"{var}_trend")
+                trend_shock_labels.append(f"{var}_trend_shock")
+            elif trend_type == 'cm':
+                # Constant mean option: state persists; no shock impact.
+                A_i = np.array([[1.0]])
+                B_i = np.zeros((1, 1))
+                trend_blocks.append(A_i)
+                shock_blocks.append(B_i)
+                trend_labels.append(f"{var}_trend")
+                trend_shock_labels.append(f"{var}_trend_shock")
+            elif trend_type is None:
+                continue
+            else:
+                raise ValueError(f"Unknown trend type '{trend_type}' for variable '{var}'")
+        if trend_blocks:
+            A_trend = la.block_diag(*trend_blocks)
+            B_trend = la.block_diag(*shock_blocks)
+        else:
+            A_trend = np.empty((0, 0))
+            B_trend = np.empty((0, 0))
+        return A_trend, B_trend, trend_labels, trend_shock_labels
+
+    def _build_augmented_state_space(self):
+        """
+        Build the augmented state space.
+        The augmented system is:
+          x_aug(t+1) = A_aug x_aug(t) + B_aug ε(t)
+          y(t)       = C_aug x_aug(t)
+        where:
+          A_aug = block_diag(T_base, A_trend)
+          B_aug = block_diag(R_base, B_trend)
+        and the augmented state vector is [ base states (states+controls); trend states ].
+        The observation matrix C_aug maps these augmented states as specified.
+        """
+        # Build trend matrices.
+        A_trend, B_trend, trend_labels, trend_shock_labels = self._build_trend_matrices()
+        n_trend_states = A_trend.shape[0]
         
-        # Create the augmented state transition matrix A_aug
-        n_aug_states = n_vars + n_trend_states
-        A_aug = np.zeros((n_aug_states, n_aug_states))
+        # Build augmented matrices.
+        self.A_aug = la.block_diag(self.T_base, A_trend)
+        self.B_aug = la.block_diag(self.R_base, B_trend)
         
-        # Fill the upper-left block with A (base model)
-        A_aug[:n_vars, :n_vars] = A
+        # Augmented state labels.
+        self.aug_state_labels = self.base_state_labels + trend_labels
+        self.aug_shock_labels = self.base_shock_labels + trend_shock_labels
         
-        # Fill the trend block (lower-right)
-        trend_start = n_vars
-        for var in rw_vars:
-            # Random walk: trend_{t} = trend_{t-1} + eps_level
-            A_aug[trend_start, trend_start] = 1.0
-            trend_start += 1
-            
-        for i in range(len(sd_vars)):
-            # Second difference:
-            # trend_{t} = trend_{t-1} + g_{t-1} + eps_level
-            # g_{t} = g_{t-1} + eps_growth
-            A_aug[trend_start, trend_start] = 1.0      # trend depends on past trend
-            A_aug[trend_start, trend_start+1] = 1.0    # trend depends on past growth
-            A_aug[trend_start+1, trend_start+1] = 1.0  # growth depends on past growth
-            trend_start += 2
-        
-        # Create the augmented shock impact matrix B_aug
-        n_aug_shocks = n_shocks + n_trend_shocks
-        B_aug = np.zeros((n_aug_states, n_aug_shocks))
-        
-        # Fill the upper-left block with B (base model)
-        B_aug[:n_vars, :n_shocks] = B
-        
-        # Fill the trend shock impacts
-        trend_start = n_vars
-        shock_start = n_shocks
-        
-        for var in rw_vars:
-            # Random walk: trend shock impacts level
-            B_aug[trend_start, shock_start] = 1.0
-            trend_start += 1
-            shock_start += 1
-            
-        for i in range(len(sd_vars)):
-            # Second difference: level and growth shocks
-            B_aug[trend_start, shock_start] = 1.0      # Level shock
-            B_aug[trend_start+1, shock_start+1] = 1.0  # Growth shock
-            trend_start += 2
-            shock_start += 2
-        
-        # Create the augmented measurement matrix C_aug
-        n_observables = len(self.observable_vars)
-        C_aug = np.zeros((n_vars, n_aug_states))
-        
-        # Fill the base model part (cycle components)
-        C_aug[:, :n_vars] = C
-        
-        # Add trend components to observed variables
-        for i, var in enumerate(self.base_solver.var_names):
-            if var in self.trend_specs:
-                trend_type = self.trend_specs[var]
-                
-                if trend_type == 'rw':
-                    # Find position of this trend in the state vector
-                    trend_pos = n_vars + rw_vars.index(var)
-                    C_aug[i, trend_pos] = 1.0
-                    
+        # Build augmented observation matrix C_aug.
+        # For each observable in obs_mapping, load its base and trend parts based on "model_var".
+        n_aug_states = len(self.aug_state_labels)
+        n_obs = len(self.observable_vars)
+        C_aug = np.zeros((n_obs, n_aug_states))
+        for i, obs in enumerate(self.observable_vars):
+            spec = self.obs_mapping.get(obs, {})
+            model_var = spec.get("model_var", obs)
+            # Base loading: look in the base state labels.
+            if model_var in self.base_state_labels:
+                idx = self.base_state_labels.index(model_var)
+                C_aug[i, idx] = 1.0
+            else:
+                print(f"Warning: {model_var} not found in base_state_labels.")
+            # Trend loading: if a trend is specified, map to the trend state.
+            trend_type = spec.get("trend", None)
+            if trend_type is not None:
+                if trend_type in ['rw', 'dt', 'cm']:
+                    trend_label = f"{model_var}_trend"
+                    if trend_label in self.aug_state_labels:
+                        trend_idx = self.aug_state_labels.index(trend_label)
+                        C_aug[i, trend_idx] = 1.0
                 elif trend_type == 'sd':
-                    # Find position of this trend in the state vector
-                    trend_pos = n_vars + len(rw_vars) + 2 * sd_vars.index(var)
-                    C_aug[i, trend_pos] = 1.0
-        
-        # Create selection matrix H for observable variables
-        H = np.zeros((n_observables, n_vars))
-        
-        for i, var in enumerate(self.observable_vars):
-            if var in self.base_solver.var_names:
-                var_idx = self.base_solver.var_names.index(var)
-                H[i, var_idx] = 1.0
-        
-        # Store augmented matrices
-        self.A_aug = A_aug
-        self.B_aug = B_aug
+                    # For the mixed specification, load both components.
+                    for suffix in ["_level", "_growth"]:
+                        label = f"{model_var}{suffix}"
+                        if label in self.aug_state_labels:
+                            trend_idx = self.aug_state_labels.index(label)
+                            C_aug[i, trend_idx] = 1.0
+                else:
+                    raise ValueError(f"Trend type {trend_type} not implemented.")
         self.C_aug = C_aug
-        self.H = H
         
-        # Calculate final observation matrix
-        self.obs_matrix = H @ C_aug
-        
-        print(f"Augmented state space created:")
-        print(f"  - Base states+controls: {n_vars}")
+        print("Augmented state space created:")
+        print(f"  - Base states: {len(self.base_state_labels)}")
         print(f"  - Trend states: {n_trend_states}")
-        print(f"  - Base shocks: {n_shocks}")
-        print(f"  - Trend shocks: {n_trend_shocks}")
-        print(f"  - Observable variables: {n_observables}")
-    
-    def compute_irf(self, shock_index, periods=40, include_trend=True):
+        print(f"  - Total states: {n_aug_states}")
+        print(f"  - Total shocks: {self.B_aug.shape[1]}")
+        print(f"  - Observables: {n_obs}")
+
+    def compute_irf(self, shock_index, periods=40):
         """
-        Compute impulse response functions for the augmented model
+        Compute impulse response functions for the augmented model.
+        The state evolves as:
+             x_aug(t+1) = A_aug x_aug(t) + B_aug ε(t)
+        and the observables are computed as:
+             y(t) = C_aug x_aug(t)
         
-        Parameters:
-        -----------
-        shock_index : int
-            Index of the shock to analyze (base model shocks come first)
-        periods : int, optional
-            Number of periods to simulate (default: 40)
-        include_trend : bool, optional
-            Whether to include trend components in the IRF (default: True)
-            
+        We simulate x_aug and then compute y_irf = C_aug * x_aug.
+        A combined IRF matrix is then constructed by concatenating x_aug and y_irf
+        so that both the full augmented states and the observables can be selected by name.
+        
         Returns:
-        --------
-        irf_all : 2D array
-            IRF data for observable variables (periods+1 x n_observables)
-        obs_vars : list
-            Names of observable variables
+           combined_irf : np.ndarray of shape (periods+1, n_aug_states + n_obs)
+           combined_labels : list of labels for the columns (first the augmented state labels,
+                             then the observable variable names)
         """
-        # Get dimensions
-        n_base_shocks = len(self.base_solver.shock_names)
-        n_aug_shocks = self.B_aug.shape[1]
-        n_states = self.A_aug.shape[0]
-        n_obs = self.H.shape[0]
+        n_aug_states = self.A_aug.shape[0]
+        n_shocks = self.B_aug.shape[1]
+        if shock_index >= n_shocks:
+            raise ValueError(f"Shock index {shock_index} out of range (0 to {n_shocks-1}).")
         
-        if shock_index >= n_aug_shocks:
-            raise ValueError(f"Shock index {shock_index} out of range (0-{n_aug_shocks-1})")
+        # Create a unit shock vector.
+        shock_vec = np.zeros(n_shocks)
+        shock_vec[shock_index] = 1.0
         
-        # Determine shock name
-        if shock_index < n_base_shocks:
-            shock_name = self.base_solver.shock_names[shock_index]
-        else:
-            # This is a trend shock
-            trend_shock_idx = shock_index - n_base_shocks
-            trend_var_idx = 0
-            remaining = trend_shock_idx
-            
-            # Find which trend variable this shock corresponds to
-            for var, trend_type in self.trend_specs.items():
-                if trend_type == 'rw':
-                    if remaining == 0:
-                        shock_name = f"{var}_level_shock"
-                        break
-                    remaining -= 1
-                elif trend_type == 'sd':
-                    if remaining == 0:
-                        shock_name = f"{var}_level_shock"
-                        break
-                    elif remaining == 1:
-                        shock_name = f"{var}_growth_shock"
-                        break
-                    remaining -= 2
-        
-        # Create shock vector (unit shock)
-        shock = np.zeros(n_aug_shocks)
-        shock[shock_index] = 1.0
-        
-        # Initialize IRF arrays
-        irf_states = np.zeros((periods + 1, n_states))
-        
-        # Compute initial state impact
-        irf_states[0, :] = self.B_aug @ shock
-        
-        # Compute IRF dynamics using the augmented state space
+        # Simulate state trajectory for x_aug.
+        x_aug = np.zeros((periods + 1, n_aug_states))
+        x_aug[0, :] = self.B_aug @ shock_vec
         for t in range(periods):
-            # State transition: x_{t+1} = A_aug * x_t
-            irf_states[t+1, :] = self.A_aug @ irf_states[t, :]
+            x_aug[t+1, :] = self.A_aug @ x_aug[t, :]
         
-        # Compute observed variables: y_t = H * C_aug * x_t
-        irf_obs = np.zeros((periods + 1, n_obs))
+        # Compute observable IRF: y_irf = C_aug * x_aug.
+        y_irf = (self.C_aug @ x_aug.T).T   # shape: (periods+1, n_obs)
         
-        for t in range(periods + 1):
-            irf_obs[t, :] = self.obs_matrix @ irf_states[t, :]
+        # Combine the full state and observable responses.
+        combined_irf = np.hstack((x_aug, y_irf))
+        combined_labels = self.aug_state_labels + self.observable_vars
         
-        print(f"Augmented IRF computed for shock: {shock_name}")
-        return irf_obs, self.observable_vars
-    
-    def plot_irf(self, shock_index, variables_to_plot=None, periods=40, include_trend=True):
-        """Plot impulse response functions for the augmented model"""
-        irf_data, obs_vars = self.compute_irf(shock_index, periods, include_trend)
+        return combined_irf, combined_labels
+
+    def plot_irf(self, shock_index, variables_to_plot=None, periods=40):
+        """
+        Plot impulse response functions for the augmented model.
         
-        # Get shock name
-        n_base_shocks = len(self.base_solver.shock_names)
-        if shock_index < n_base_shocks:
-            shock_name = self.base_solver.shock_names[shock_index]
+        The IRF output is a combined matrix that has both:
+          - the full augmented states (base states + trend states)
+          - the observables computed as y = C_aug * x_aug
+        
+        Users can select by name the variables to plot from the combined labels.
+        If variables_to_plot is not provided, all variables are plotted.
+        """
+        combined_irf, combined_labels = self.compute_irf(shock_index, periods)
+        
+        # If variables_to_plot is specified, filter the combined_labels.
+        if variables_to_plot is not None:
+            plot_labels = [var for var in variables_to_plot if var in combined_labels]
+            if not plot_labels:
+                print("None of the selected variables are available; plotting all variables.")
+                plot_labels = combined_labels
         else:
-            shock_name = f"Trend Shock {shock_index - n_base_shocks + 1}"
+            plot_labels = combined_labels
         
-        # If variables_to_plot not specified, use all observable variables
-        if variables_to_plot is None:
-            variables_to_plot = self.observable_vars
-        elif isinstance(variables_to_plot, str):
-            variables_to_plot = [variables_to_plot]
-            
-        # Filter to only include variables that exist
-        variables_to_plot = [v for v in variables_to_plot if v in obs_vars]
-        
-        # Create time axis
+        # Get indices corresponding to these labels.
+        indices = [combined_labels.index(var) for var in plot_labels]
         time = np.arange(periods + 1)
         
-        # Calculate number of subplots needed
-        n_plots = len(variables_to_plot)
-        n_rows = int(np.ceil(n_plots / 3))
-        n_cols = min(3, n_plots)
-        
-        # Create plot
-        plt.figure(figsize=(15, 10))
-        
-        # Create subplots
-        for i, var in enumerate(variables_to_plot):
-            if var in obs_vars:
-                plt.subplot(n_rows, n_cols, i+1)
-                var_idx = obs_vars.index(var)
-                plt.plot(time, irf_data[:, var_idx])
-                plt.title(var)
-                plt.grid(True)
-                if i >= n_plots - n_cols:  # Bottom row
-                    plt.xlabel("Periods")
-                if i % n_cols == 0:  # First column
-                    plt.ylabel("Deviation from SS")
-        
-        trend_str = " with Trend Components" if include_trend else " (Cycle Components Only)"
-        plt.suptitle(f"Augmented Model IRF to {shock_name} Shock{trend_str}", fontsize=16)
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        
-        # Save plot
-        trend_suffix = "with_trend" if include_trend else "cycle_only"
-        plt.savefig(f"aug_irf_{shock_name}_{trend_suffix}.png")
-        plt.show()
-        
-        # Also create a single plot with all variables for comparison
         plt.figure(figsize=(12, 8))
-        for var in variables_to_plot:
-            if var in obs_vars:
-                var_idx = obs_vars.index(var)
-                plt.plot(time, irf_data[:, var_idx], label=var)
-        
-        plt.title(f"Augmented Model IRF to {shock_name} Shock{trend_str}")
+        for idx in indices:
+            plt.plot(time, combined_irf[:, idx], label=combined_labels[idx])
+        plt.title(f"Augmented Model IRF (Shock index {shock_index})")
         plt.xlabel("Periods")
-        plt.ylabel("Deviation from Steady State")
+        plt.ylabel("Response")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        
-        # Save combined plot
-        plt.savefig(f"aug_irf_{shock_name}_combined_{trend_suffix}.png")
         plt.show()
-    
-    def compare_with_base_model(self, shock_index, variables_to_plot=None, periods=40):
-        """
-        Compare IRFs between base model and augmented model
-        for the same economic shock (excluding trend shocks)
-        
-        Parameters:
-        -----------
-        shock_index : int
-            Index of the base model shock to analyze
-        variables_to_plot : list or str, optional
-            Variable(s) to plot (default: all observable variables)
-        periods : int, optional
-            Number of periods to simulate (default: 40)
-        """
-        # Check that this is a base model shock
-        n_base_shocks = len(self.base_solver.shock_names)
-        if shock_index >= n_base_shocks:
-            raise ValueError(f"Only base model shocks (0-{n_base_shocks-1}) can be compared")
-        
-        # Get shock name
-        shock_name = self.base_solver.shock_names[shock_index]
-        
-        # Compute IRFs for both models
-        base_irf, base_vars = self.base_solver.compute_irf(shock_index, periods)
-        aug_irf, aug_vars = self.compute_irf(shock_index, periods, include_trend=False)
-        
-        # If variables_to_plot not specified, use intersection of observable variables
-        if variables_to_plot is None:
-            variables_to_plot = [v for v in aug_vars if v in base_vars]
-        elif isinstance(variables_to_plot, str):
-            if variables_to_plot in base_vars and variables_to_plot in aug_vars:
-                variables_to_plot = [variables_to_plot]
-            else:
-                print(f"Warning: Variable {variables_to_plot} not found in both models")
-                variables_to_plot = [v for v in aug_vars if v in base_vars][:5]  # Show first 5 common variables
-        
-        # Create time axis
-        time = np.arange(periods + 1)
-        
-        # Create plots (one per variable)
-        for var in variables_to_plot:
-            if var in base_vars and var in aug_vars:
-                plt.figure(figsize=(10, 6))
-                
-                # Get indices
-                base_idx = base_vars.index(var)
-                aug_idx = aug_vars.index(var)
-                
-                # Plot both IRFs
-                plt.plot(time, base_irf[:, base_idx], 'b-', label='Base Model')
-                plt.plot(time, aug_irf[:, aug_idx], 'r--', label='Augmented Model (cycle only)')
-                
-                plt.title(f"Comparison of IRF for {var} to {shock_name} Shock")
-                plt.xlabel("Periods")
-                plt.ylabel("Deviation from Steady State")
-                plt.legend()
-                plt.grid(True)
-                plt.tight_layout()
-                
-                # Save plot
-                plt.savefig(f"compare_irf_{var}_{shock_name}.png")
-                plt.show()
-        
-        # Create a combined plot with all variables
-        plt.figure(figsize=(15, 10))
-        
-        # Calculate number of subplots needed
-        n_plots = len(variables_to_plot)
-        n_rows = int(np.ceil(n_plots / 3))
-        n_cols = min(3, n_plots)
-        
-        for i, var in enumerate(variables_to_plot):
-            if var in base_vars and var in aug_vars:
-                plt.subplot(n_rows, n_cols, i+1)
-                
-                # Get indices
-                base_idx = base_vars.index(var)
-                aug_idx = aug_vars.index(var)
-                
-                # Plot both IRFs
-                plt.plot(time, base_irf[:, base_idx], 'b-', label='Base')
-                plt.plot(time, aug_irf[:, aug_idx], 'r--', label='Aug')
-                
-                plt.title(var)
-                plt.grid(True)
-                if i >= n_plots - n_cols:  # Bottom row
-                    plt.xlabel("Periods")
-                if i % n_cols == 0:  # First column
-                    plt.ylabel("Deviation from SS")
-                if i == 0:  # Only add legend to first subplot
-                    plt.legend()
-        
-        plt.suptitle(f"Comparison of Base and Augmented Model IRFs to {shock_name} Shock", fontsize=16)
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        
-        # Save plot
-        plt.savefig(f"compare_irf_all_{shock_name}.png")
