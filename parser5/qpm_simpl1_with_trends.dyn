@@ -63,23 +63,29 @@ SHK_RS_TREND,
 SHK_RR_TREND
 ;
 
-trends_vars 
+trends_vars
     L_GDP_TREND,
     PI_TREND,
     RS_TREND,
     RR_TREND,
-    G_TREND,
+    G_TREND
 ;
 
-trend_model
+trend_model;
     L_GDP_TREND = L_GDP_TREND(-1) + G_TREND(-1) + SHK_L_GDP_TREND;
     G_TREND(-1)  = G_TREND(-1) + SHK_G_TREND;
     PI_TREND = PI_TREND(-1) + SHP_PI_TREND;
     RS_TREND = RR_TREND + PI_TREND; 
     RR_TREND = RR_TREND(-1) + SHK_RR_TREND;  
-;
+end;
 
-measument_equations
+varobs 
+L_GDP_OBS
+DLA_CPI_OBS
+PI_TREND_OBS
+RS_OBS 
+;
+measument_equations;
     L_GDP_OBS = L_GDP_TREND + L_GDP_GAP;
     DLA_CPI_OBS  = DLA_CPI + PI_TREND;
     PI_TREND_OBS =  PI_TREND;
@@ -109,9 +115,5 @@ trend_shocks;
 end;
 
 
-// Specify the shocks
-shocks;
-    var SHK_RS; stderr 1;
-end;
 
 stoch_simul(order=1, irf=40);

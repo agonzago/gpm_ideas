@@ -33,7 +33,6 @@ parameters b1, b4, a1, a2, g1, g2, g3, rho_DLA_CPI, rho_L_GDP_GAP, rho_rs, rho_r
     rho_DLA_CPI   =0.75;
     rho_rs      =0.75;
     rho_rs2      =0.01;
-
 model;
     // Aggregate demand
     L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
@@ -54,39 +53,6 @@ model;
 
 end;
 
-
-varexo_trends
-SHK_L_GDP_TREND,
-SHK_G_TREND,
-SHP_PI_TREND,
-SHK_RS_TREND,
-SHK_RR_TREND
-;
-
-trends_vars 
-    L_GDP_TREND,
-    PI_TREND,
-    RS_TREND,
-    RR_TREND,
-    G_TREND,
-;
-
-trend_model
-    L_GDP_TREND = L_GDP_TREND(-1) + G_TREND(-1) + SHK_L_GDP_TREND;
-    G_TREND(-1)  = G_TREND(-1) + SHK_G_TREND;
-    PI_TREND = PI_TREND(-1) + SHP_PI_TREND;
-    RS_TREND = RR_TREND + PI_TREND; 
-    RR_TREND = RR_TREND(-1) + SHK_RR_TREND;  
-;
-
-measument_equations
-    L_GDP_OBS = L_GDP_TREND + L_GDP_GAP;
-    DLA_CPI_OBS  = DLA_CPI + PI_TREND;
-    PI_TREND_OBS =  PI_TREND;
-    RS_OBS = RS_TREND + RS;  
-end;
-
-
 initval;
     L_GDP_GAP = 0;
     DLA_CPI = 0;
@@ -100,18 +66,9 @@ end;
 steady;
 check;
 
-trend_shocks;
-    var SHK_L_GDP_TREND; stderr 1;    
-    var SHK_G_TREND; stderr 1;
-    var SHP_PI_TREND; stderr 0;
-    var SHK_RS_TREND; stderr 1;
-    var SHK_RR_TREND; stderr 1;
-end;
-
-
 // Specify the shocks
 shocks;
-    var SHK_RS; stderr 1;
+    var SHK_RS = 1;
 end;
 
 stoch_simul(order=1, irf=40);
