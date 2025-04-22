@@ -684,7 +684,7 @@ class DynareParser:
             
         return model_json
     
-    def generate_jacobian_matrices(self, out_folder):
+    def generate_jacobian_matrices_klein(self, out_folder):
         """Generate Jacobian matrices A, B, C using symbolic differentiation for the CORE model."""
         # 1) Build symbols
         param_symbols = {p: sp.Symbol(p) for p in self.parameters}
@@ -707,7 +707,7 @@ class DynareParser:
             eqstr = next(iter(eq_dict.values()))
             # parse into symbolic
             sym = parse_expr(eqstr, local_dict=all_symbols,
-                              transformations=transformers)
+                            transformations=transformers)
             symbolic_eqs.append(sym)
         F = sp.Matrix(symbolic_eqs)
 
@@ -766,6 +766,136 @@ class DynareParser:
         with open(os.path.join(out_folder, "jacobian_matrices.py"), 'w') as f:
             f.write("\n".join(code_lines))
 
+        return True
+
+
+    def generate_jacobian_matrices(self, out_folder):
+        """
+        1) auto‐build var lists:
+           variables_current = [v for v in var_names if not v.endswith('_lag...')]
+           variables_p       = [v+'_p'   for v in variables_current]
+           variables_lag     = [v+'_lag' for v in variables_current]
+        2) symbolically compute A,B,C,D
+        3) write out a NumPy evaluator:
+           import numpy as np
+           def evaluate_jacobians(theta):
+               b1 = theta[0]
+               ...
+               A = np.zeros((n_eq,n_p))
+               A[0,10] = 1 - b1
+               ...
+               return A, B, C, D
+        """
+        import os
+        import re
+        import sympy as sp
+        from sympy.parsing.sympy_parser import (
+            parse_expr, standard_transformations, implicit_multiplication_application
+        )
+        import numpy as _np
+
+        # 1) build the three lists from self.var_names
+        variables_current = [
+            v for v in self.var_names
+            if not re.search(r'_lag\d*$', v)
+        ]
+        variables_p   = [v + "_p"   for v in variables_current]
+        variables_lag = [v + "_lag" for v in variables_current]
+
+        # 2) declare symbols for parsing
+        param_syms = {p: sp.Symbol(p)       for p in self.parameters}
+        cur_syms   = {v: sp.Symbol(v)       for v in variables_current}
+        p_syms     = {v: sp.Symbol(v)       for v in variables_p}
+        lag_syms   = {v: sp.Symbol(v)       for v in variables_lag}
+        eps_syms   = {s: sp.Symbol(s)       for s in self.varexo_list}
+
+        local_dict = {}
+        local_dict.update(param_syms)
+        local_dict.update(cur_syms)
+        local_dict.update(p_syms)
+        local_dict.update(lag_syms)
+        local_dict.update(eps_syms)
+
+        # 3) parse final_equations into F
+        trans = standard_transformations + (implicit_multiplication_application,)
+        F_exprs = []
+        for eq in self.final_equations:
+            if "=" in eq:
+                L,R = [s.strip() for s in eq.split("=",1)]
+                fstr = R + "-(" + L + ")"
+            else:
+                fstr = eq
+            F_exprs.append(parse_expr(fstr,
+                                      local_dict=local_dict,
+                                      transformations=trans))
+        F = sp.Matrix(F_exprs)
+
+        # 4) form symbolic Jacobians
+        A =  F.jacobian([ p_syms[v]   for v in variables_p ])
+        B = -F.jacobian([ cur_syms[v] for v in variables_current ])
+        C = -F.jacobian([ lag_syms[v] for v in variables_lag ])
+        D = -F.jacobian([ eps_syms[s] for s in self.varexo_list ])
+
+        # 5) emit a pure‐NumPy evaluator
+        os.makedirs(out_folder, exist_ok=True)
+        fn = os.path.join(out_folder, "jacobian_matrices.py")
+        lines = []
+        lines.append("import numpy as np")
+        lines.append("")
+        lines.append("def evaluate_jacobians(theta):")
+        lines.append("    \"\"\"Compute A,B,C,D given parameter vector theta\"\"\"")
+        # unpack parameters
+        for i,p in enumerate(self.parameters):
+            lines.append(f"    {p} = theta[{i}]")
+        lines.append("")
+        # allocate A,B,C,D
+        lines.append(f"    A = np.zeros(({A.rows},{A.cols}))")
+        lines.append(f"    B = np.zeros(({B.rows},{B.cols}))")
+        lines.append(f"    C = np.zeros(({C.rows},{C.cols}))")
+        lines.append(f"    D = np.zeros(({D.rows},{D.cols}))")
+        lines.append("")
+
+        # Fill A
+        lines.append("    # Fill A = ∂F/∂x_p")
+        for i in range(A.rows):
+            for j in range(A.cols):
+                v = A[i,j]
+                if v != 0:
+                    expr = str(v).replace("exp","np.exp")
+                    lines.append(f"    A[{i},{j}] = {expr}")
+        lines.append("")
+        # Fill B
+        lines.append("    # Fill B = -∂F/∂x")
+        for i in range(B.rows):
+            for j in range(B.cols):
+                v = B[i,j]
+                if v != 0:
+                    expr = str(v).replace("exp","np.exp")
+                    lines.append(f"    B[{i},{j}] = {expr}")
+        lines.append("")
+        # Fill C
+        lines.append("    # Fill C = -∂F/∂x_lag")
+        for i in range(C.rows):
+            for j in range(C.cols):
+                v = C[i,j]
+                if v != 0:
+                    expr = str(v).replace("exp","np.exp")
+                    lines.append(f"    C[{i},{j}] = {expr}")
+        lines.append("")
+        # Fill D
+        lines.append("    # Fill D = -∂F/∂eps")
+        for i in range(D.rows):
+            for j in range(D.cols):
+                v = D[i,j]
+                if v != 0:
+                    expr = str(v).replace("exp","np.exp")
+                    lines.append(f"    D[{i},{j}] = {expr}")
+        lines.append("")
+        lines.append("    return A, B, C, D")
+        with open(fn, "w") as f:
+            f.write("\n".join(lines))
+
+        print(f"Wrote jacobian evaluator to {fn}")
         return True
     
     def generate_model_structure(self, out_folder):

@@ -142,6 +142,69 @@ def klein(a=None,b=None,c=None,phi=None,n_states=None,eigenvalue_warnings=True):
 
     return f,n,p,l,stab,eig
 
+import os
+import re
+import json
+import numpy as np
+import sympy as sp
+from sympy.parsing.sympy_parser import (
+    parse_expr, standard_transformations, implicit_multiplication_application
+)
+import scipy.linalg as la
+
+# ──────────────── SPD Helpers ─────────────────
+
+import numpy as np
+
+def spd_step_full(D, E):
+    n2 = D.shape[0]
+    k  = n2 // 2
+    # partition blocks
+    D11, D12 = D[:k,:k], D[:k,k:]
+    D21, D22 = D[k:,:k], D[k:,k:]
+    E11, E12 = E[:k,:k], E[:k,k:]
+    E21, E22 = E[k:,:k], E[k:,k:]
+    I  = np.eye(D22.shape[0])
+    M  = I - E22 @ D21
+    N  = I - D21 @ E22
+    Minv = np.linalg.inv(M)
+    Ninv = np.linalg.inv(N)
+    # update
+    D11n = D11 + E12 @ Minv @ D21
+    D12n = D12 @ Ninv @ D22 + E12 @ Minv @ E22
+    D21n = D21 + D22 @ Ninv @ D21
+    D22n = D22 @ Ninv @ E22
+    E11n = E11 + E12 @ Minv @ E21
+    E12n = E12 @ Ninv @ E11 + E11 @ Minv @ E12
+    E21n = E21 + E22 @ Ninv @ E21
+    E22n = E22 @ Ninv @ D22
+    Dn = np.vstack([ np.hstack([D11n, D12n]),
+                    np.hstack([D21n, D22n]) ])
+    En = np.vstack([ np.hstack([E11n, E12n]),
+                    np.hstack([E21n, E22n]) ])
+    return Dn, En
+
+def solve_full_spd(A, B, C, n_states, max_iter=25):
+    ns = n_states
+    nc = A.shape[0] - ns
+    # build companion D,E:
+    B11 = B[:ns,:ns]; B12 = B[:ns,ns:]
+    A11 = A[:ns,:ns]; A12 = A[:ns,ns:]
+    I   = np.eye(ns)
+    Zc  = np.zeros((nc,nc))
+    D = np.vstack([ np.hstack([B11,B12]),
+                    np.hstack([I,  Zc ]) ])
+    E = np.vstack([ np.hstack([A11,A12]),
+                    np.hstack([Zc, np.eye(nc)]) ])
+    # doubling
+    Dk, Ek = D, E
+    for i in range(max_iter):
+        Dk, Ek = spd_step_full(Dk, Ek)
+    # extract blocks
+    P = Dk[ns: , :ns] @ np.linalg.inv(Ek[ns: , :ns])  # actually D21 E21⁻¹
+    # but following SF1: P = D21·inv(E21)
+    return P, i+1, np.linalg.norm(A@P@P + B@P + C, np.inf)
+
 
 class SimpleModelSolver:
     """
@@ -194,20 +257,63 @@ class SimpleModelSolver:
         except Exception as e:
             raise RuntimeError(f"Error loading module from {file_path}: {e}")
     
+    # def compute_jacobians(self):
+    #     """Compute the Jacobian matrices A, B, C"""
+    #     # Get parameters from the model data
+    #     param_names = self.model_data.get('parameters', [])
+    #     param_values = self.model_data.get('param_values', {})
+        
+    #     # Create parameter vector in the correct order
+    #     theta = np.array([param_values.get(param, 0.0) for param in param_names])
+        
+    #     # Compute the Jacobians using the jacobian_evaluator module
+    #     A, B, C = self.jacobian_module.evaluate_jacobians(theta)
+        
+    #     return A, B, C
+
     def compute_jacobians(self):
-        """Compute the Jacobian matrices A, B, C"""
-        # Get parameters from the model data
-        param_names = self.model_data.get('parameters', [])
-        param_values = self.model_data.get('param_values', {})
-        
-        # Create parameter vector in the correct order
-        theta = np.array([param_values.get(param, 0.0) for param in param_names])
-        
-        # Compute the Jacobians using the jacobian_evaluator module
-        A, B, C = self.jacobian_module.evaluate_jacobians(theta)
-        
-        return A, B, C
-    
+        """
+        Calls our generated jacobian_matrices.py which now returns
+        (A_lead, B_curr, C_lag, D_shock).
+        We pull the parameter list out of the JSON model_data.
+        """
+        param_names  = self.model_data.get("parameters", [])
+        param_values = self.model_data.get("param_values", {})
+        # build theta in the same order
+        theta = np.array([param_values.get(p, 0.0) for p in param_names], dtype=float)
+
+        # call the lambdified function
+        A, B, C_lag, D = self.jacobian_module.evaluate_jacobians(theta)
+        return A, B, C_lag, D
+
+    def solve_model(self, method="klein"):
+        A, B, C_lag, D = self.compute_jacobians()
+        ns = len(self.state_names)
+
+        if method == "klein":
+            print("→ Solving with Klein/QZ …")
+            # Klein expects a=A_lead, b=B_curr, c=D_shock
+            f, n, p, l, stab, eig = klein(
+                a=A, b=B, c=D, phi=None, n_states=ns
+            )
+            self.f_klein, self.p_klein = np.real(f), np.real(p)
+            return {"f":f, "p":p, "n":n, "l":l, "stab":stab}
+
+        elif method == "spd":
+            print("→ Solving with full‐pencil SPD …")
+            # Solve A P² + B P + C_lag = 0
+            #from your_spd_helpers import solve_full_spd  # wherever you put it
+            P, iters, res = solve_full_spd(A, B, C_lag, ns, max_iter=50)
+            p_spd = P[:ns, :ns]
+            f_spd = P[ns:, :ns]
+            # shock‐impact mapping
+            Q_spd = -np.linalg.solve(A @ P + B, D)
+            self.f_spd, self.p_spd, self.Q_spd = f_spd, p_spd, Q_spd
+            return {"f":f_spd, "p":p_spd, "Q":Q_spd, "iters":iters, "res":res}
+
+        else:
+            raise ValueError("Unknown method, use 'klein' or 'spd'")
+            
     def solve_klein(self, A, B, C=None, n_states=None):
         """
         Solve the model using the klein function
@@ -274,25 +380,49 @@ class SimpleModelSolver:
             print(f"Error in klein solver: {str(e)}")
             self.is_solved = False
             return None, None
-    
-    def solve_model(self):
-        """Solve the model using Klein's method"""
-        # Compute Jacobians
-        print("Computing Jacobians...")
-        A, B, C = self.compute_jacobians()
-        print(f"Jacobian A shape: {A.shape}, B shape: {B.shape}, C shape: {C.shape}")
+
+
+    def solve_spd(self, A, B, C):
+        """Full‐pencil SPD, works for any (n_states≠n_controls)."""
+        ns = len(self.state_names)
+        P, iters, res = solve_full_spd(A, B, C, ns, max_iter=50)
+        print(f"SPD: converged in {iters} iters, residual ∥AP²+B P+ C∥_∞={res:.2e}")
+
+        # split out p = P[:ns,:ns],  f = P[ns: , :ns]
+        p = P[:ns, :ns]
+        f = P[ns:, :ns]
+
+        # shock‐response Q solves (A P + B) Q = −C
+        M = A @ P + B
+        Q = -np.linalg.solve(M, C)
+
+        # store
+        self.f_spd = f
+        self.p_spd = p
+        self.q_spd = Q
+        self.is_solved_spd = True
+        return f, p, Q
+
+
+
+    # def solve_model(self):
+    #     """Solve the model using Klein's method"""
+    #     # Compute Jacobians
+    #     print("Computing Jacobians...")
+    #     A, B, C = self.compute_jacobians()
+    #     print(f"Jacobian A shape: {A.shape}, B shape: {B.shape}, C shape: {C.shape}")
         
-        # Solve the model using Klein's method
-        print("Solving model using Klein's method...")
-        n_states = len(self.state_names)
-        f, p = self.solve_klein(A, B, C, n_states)
+    #     # Solve the model using Klein's method
+    #     print("Solving model using Klein's method...")
+    #     n_states = len(self.state_names)
+    #     f, p = self.solve_klein(A, B, C, n_states)
         
-        if f is None or p is None:
-            print("Model could not be solved!")
-            return None, None
+    #     if f is None or p is None:
+    #         print("Model could not be solved!")
+    #         return None, None
         
-        print("Model solved!")
-        return f, p
+    #     print("Model solved!")
+    #     return f, p
     
     def compute_irf(self, shock_name, shock_size: float = 1.0, periods=40):
         """Compute impulse response functions for a specific shock"""
