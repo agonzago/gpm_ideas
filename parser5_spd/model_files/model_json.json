@@ -40,32 +40,32 @@
     "RES_RS",
     "RES_L_GDP_GAP",
     "DLA_CPI_lag",
+    "RES_RS_lag",
     "RS_lag",
-    "L_GDP_GAP_lag",
-    "RES_RS_lag"
+    "L_GDP_GAP_lag"
   ],
   "controls": [
-    "RS",
-    "DLA_CPI_lead1",
-    "DLA_CPI_lead2",
     "RR_GAP",
+    "DLA_CPI_lead2",
+    "DLA_CPI_lead1",
+    "DLA_CPI",
     "L_GDP_GAP",
-    "DLA_CPI"
+    "RS"
   ],
   "all_variables": [
     "RES_DLA_CPI",
     "RES_RS",
     "RES_L_GDP_GAP",
     "DLA_CPI_lag",
+    "RES_RS_lag",
     "RS_lag",
     "L_GDP_GAP_lag",
-    "RES_RS_lag",
-    "RS",
-    "DLA_CPI_lead1",
-    "DLA_CPI_lead2",
     "RR_GAP",
+    "DLA_CPI_lead2",
+    "DLA_CPI_lead1",
+    "DLA_CPI",
     "L_GDP_GAP",
-    "DLA_CPI"
+    "RS"
   ],
   "shocks": [
     "SHK_L_GDP_GAP",

@@ -142,68 +142,150 @@ def klein(a=None,b=None,c=None,phi=None,n_states=None,eigenvalue_warnings=True):
 
     return f,n,p,l,stab,eig
 
-import os
-import re
-import json
 import numpy as np
-import sympy as sp
-from sympy.parsing.sympy_parser import (
-    parse_expr, standard_transformations, implicit_multiplication_application
-)
-import scipy.linalg as la
+from numpy.linalg import inv, norm
 
-# ──────────────── SPD Helpers ─────────────────
+def solve_spd_sf2(A, B, C, max_iter=100, tol=1e-12):
+    """
+    Solves A*P^2 + B*P + C = 0 using Structure Preserving Doubling
+    Algorithm SF2 (Algorithm 2 in Huber et al., 2023).
 
-import numpy as np
+    Args:
+        A (np.ndarray): Coefficient matrix for P^2.
+        B (np.ndarray): Coefficient matrix for P.
+        C (np.ndarray): Constant matrix.
+        max_iter (int): Maximum number of iterations.
+        tol (float): Convergence tolerance.
 
-def spd_step_full(D, E):
-    n2 = D.shape[0]
-    k  = n2 // 2
-    # partition blocks
-    D11, D12 = D[:k,:k], D[:k,k:]
-    D21, D22 = D[k:,:k], D[k:,k:]
-    E11, E12 = E[:k,:k], E[:k,k:]
-    E21, E22 = E[k:,:k], E[k:,k:]
-    I  = np.eye(D22.shape[0])
-    M  = I - E22 @ D21
-    N  = I - D21 @ E22
-    Minv = np.linalg.inv(M)
-    Ninv = np.linalg.inv(N)
-    # update
-    D11n = D11 + E12 @ Minv @ D21
-    D12n = D12 @ Ninv @ D22 + E12 @ Minv @ E22
-    D21n = D21 + D22 @ Ninv @ D21
-    D22n = D22 @ Ninv @ E22
-    E11n = E11 + E12 @ Minv @ E21
-    E12n = E12 @ Ninv @ E11 + E11 @ Minv @ E12
-    E21n = E21 + E22 @ Ninv @ E21
-    E22n = E22 @ Ninv @ D22
-    Dn = np.vstack([ np.hstack([D11n, D12n]),
-                    np.hstack([D21n, D22n]) ])
-    En = np.vstack([ np.hstack([E11n, E12n]),
-                    np.hstack([E21n, E22n]) ])
-    return Dn, En
+    Returns:
+        tuple: (P, iters, success)
+               P (np.ndarray): The stable solution matrix.
+               iters (int): Number of iterations performed.
+               success (bool): True if converged, False otherwise.
+    """
+    n = A.shape[0]
+    if not (A.shape == (n, n) and B.shape == (n, n) and C.shape == (n, n)):
+        raise ValueError("Input matrices must be square and of the same size.")
 
-def solve_full_spd(A, B, C, n_states, max_iter=25):
-    ns = n_states
-    nc = A.shape[0] - ns
-    # build companion D,E:
-    B11 = B[:ns,:ns]; B12 = B[:ns,ns:]
-    A11 = A[:ns,:ns]; A12 = A[:ns,ns:]
-    I   = np.eye(ns)
-    Zc  = np.zeros((nc,nc))
-    D = np.vstack([ np.hstack([B11,B12]),
-                    np.hstack([I,  Zc ]) ])
-    E = np.vstack([ np.hstack([A11,A12]),
-                    np.hstack([Zc, np.eye(nc)]) ])
-    # doubling
-    Dk, Ek = D, E
-    for i in range(max_iter):
-        Dk, Ek = spd_step_full(Dk, Ek)
-    # extract blocks
-    P = Dk[ns: , :ns] @ np.linalg.inv(Ek[ns: , :ns])  # actually D21 E21⁻¹
-    # but following SF1: P = D21·inv(E21)
-    return P, i+1, np.linalg.norm(A@P@P + B@P + C, np.inf)
+    # Initialization (Algorithm 2)
+    Xk = np.zeros((n, n))  # X0† = 0
+    Yk = -B               # Y0† = -B
+    Ek = -C               # E0† = -C
+    Fk = -A               # F0† = -A
+
+    print(f"SPD-SF2 Init: Xk norm = {norm(Xk):.2e}, Yk norm = {norm(Yk):.2e}, Ek norm = {norm(Ek):.2e}, Fk norm = {norm(Fk):.2e}")
+
+    for k in range(max_iter):
+        Xk_old = Xk.copy()
+
+        try:
+            # Calculate common term inv(Xk - Yk)
+            inv_Xk_minus_Yk = inv(Xk - Yk)
+        except np.linalg.LinAlgError:
+            print(f"ERROR: Matrix (Xk - Yk) became singular at iteration {k+1}.")
+            return None, k + 1, False
+
+        # Update formulas from Algorithm 2 (Eqs 42, 43, simplified)
+        # Note: The paper uses † notation, we use standard vars here.
+        Ek_inv_Xk_minus_Yk = Ek @ inv_Xk_minus_Yk
+        Fk_inv_Xk_minus_Yk = Fk @ inv_Xk_minus_Yk
+
+        Ek_next = Ek_inv_Xk_minus_Yk @ Ek
+        Fk_next = Fk_inv_Xk_minus_Yk @ Fk
+        Xk_next = Xk - Fk_inv_Xk_minus_Yk @ Ek
+        Yk_next = Yk + Ek_inv_Xk_minus_Yk @ Fk
+
+        Ek, Fk, Xk, Yk = Ek_next, Fk_next, Xk_next, Yk_next
+
+        # Convergence Check
+        diff = norm(Xk - Xk_old)
+        # Alternative check on Ek or Fk norms (should go to zero)
+        # diff = norm(Ek) # or norm(Fk)
+        print(f"SPD-SF2 Iter {k+1}: Change norm = {diff:.2e}, Ek norm = {norm(Ek):.2e}, Fk norm = {norm(Fk):.2e}")
+
+
+        if diff < tol:
+            print(f"SPD-SF2 converged after {k+1} iterations.")
+            # --- Recover P ---
+            # P ≈ -(Xk† + B)⁻¹ C  (using original B, C and final Xk)
+            try:
+                P = -inv(Xk + B) @ C
+                return P, k + 1, True
+            except np.linalg.LinAlgError:
+                 print(f"ERROR: Matrix (Xk + B) became singular during final P recovery.")
+                 return None, k + 1, False # Converged in iterations, but failed recovery
+
+    print(f"ERROR: SPD-SF2 did not converge within {max_iter} iterations.")
+    return None, max_iter, False
+
+def solve_spd_sf1(A, B, C, max_iter=100, tol=1e-12):
+    """
+    Solves A*P^2 + B*P + C = 0 using Structure Preserving Doubling
+    Algorithm SF1 (Algorithm 1 in Huber et al., 2023).
+
+    Args:
+        A (np.ndarray): Coefficient matrix for P^2.
+        B (np.ndarray): Coefficient matrix for P.
+        C (np.ndarray): Constant matrix.
+        max_iter (int): Maximum number of iterations.
+        tol (float): Convergence tolerance.
+
+    Returns:
+        tuple: (P, iters, success)
+               P (np.ndarray): The stable solution matrix.
+               iters (int): Number of iterations performed.
+               success (bool): True if converged, False otherwise.
+    """
+    n = A.shape[0]
+    # Initialization (Algorithm 1)
+    try:
+        invB = inv(B)
+    except np.linalg.LinAlgError:
+        print("ERROR: Matrix B is singular. SF1 requires B to be invertible for standard initialization.")
+        print("Consider using SF2 or SF1 with an initial guess (Algorithm 5).")
+        return None, 0, False
+
+    Xk = -invB @ C  # X0
+    Yk = -invB @ A  # Y0
+    Ek = Xk.copy()  # E0 = X0
+    Fk = Yk.copy()  # F0 = Y0
+
+    print(f"SPD-SF1 Init: Xk norm = {norm(Xk):.2e}, Yk norm = {norm(Yk):.2e}, Ek norm = {norm(Ek):.2e}, Fk norm = {norm(Fk):.2e}")
+
+
+    I = np.eye(n)
+    for k in range(max_iter):
+        Xk_old = Xk.copy()
+
+        try:
+            inv_I_minus_YkXk = inv(I - Yk @ Xk)
+            inv_I_minus_XkYk = inv(I - Xk @ Yk)
+        except np.linalg.LinAlgError:
+            print(f"ERROR: Matrix inversion failed at iteration {k+1} (I-YX or I-XY singular).")
+            return None, k + 1, False
+
+        # Update formulas from Algorithm 1
+        Ek_next = Ek @ inv_I_minus_YkXk @ Ek
+        Fk_next = Fk @ inv_I_minus_XkYk @ Fk
+        Xk_next = Xk + Fk @ inv_I_minus_XkYk @ Xk @ Ek
+        Yk_next = Yk + Ek @ inv_I_minus_YkXk @ Yk @ Fk
+
+        Ek, Fk, Xk, Yk = Ek_next, Fk_next, Xk_next, Yk_next
+
+        # Convergence Check
+        diff = norm(Xk - Xk_old)
+        print(f"SPD-SF1 Iter {k+1}: Change norm = {diff:.2e}, Ek norm = {norm(Ek):.2e}, Fk norm = {norm(Fk):.2e}")
+
+
+        if diff < tol:
+            print(f"SPD-SF1 converged after {k+1} iterations.")
+            # Xk directly converges to P in SF1
+            return Xk, k + 1, True
+
+    print(f"ERROR: SPD-SF1 did not converge within {max_iter} iterations.")
+    return None, max_iter, False
+
+ # Add 'spd-sf1' option to SimpleModelSolver.solve_model
 
 
 class SimpleModelSolver:
@@ -300,19 +382,28 @@ class SimpleModelSolver:
             return {"f":f, "p":p, "n":n, "l":l, "stab":stab}
 
         elif method == "spd":
-            print("→ Solving with full‐pencil SPD …")
-            # Solve A P² + B P + C_lag = 0
-            #from your_spd_helpers import solve_full_spd  # wherever you put it
-            P, iters, res = solve_full_spd(A, B, C_lag, ns, max_iter=50)
-            p_spd = P[:ns, :ns]
-            f_spd = P[ns:, :ns]
-            # shock‐impact mapping
-            Q_spd = -np.linalg.solve(A @ P + B, D)
-            self.f_spd, self.p_spd, self.Q_spd = f_spd, p_spd, Q_spd
-            return {"f":f_spd, "p":p_spd, "Q":Q_spd, "iters":iters, "res":res}
+            print("→ Solving with SPD-SF2 Algorithm...")
+            # Ensure you use the correct C matrix for AP^2 + BP + C = 0
+            # # In many DSGE setups, this is C_lag
+            # A = selA
+            # B = self.B
+            # C = self.C_lag # Make sure this is the correct one!
 
+            P_sol, iters, success = solve_spd_sf2(A, B, C_lag, max_iter=50, tol=1e-10)
+
+            if success:
+                print(f"SPD-SF2 solution found in {iters} iterations.")
+                # Store or use P_sol
+                # You might need to calculate Q = -(AP+B)^-1 D for the full solution
+                # Q = -inv(A @ P_sol + B) @ self.D # self.D is jacobian_eps
+                self.P = P_sol
+                # self.Q = Q
+                return P_sol # Or return full solution dictionary
+            else:
+                print("SPD-SF2 failed to converge.")
+                return None
         else:
-            raise ValueError("Unknown method, use 'klein' or 'spd'")
+            raise ValueError(f"Unknown solution method: {method}")
             
     def solve_klein(self, A, B, C=None, n_states=None):
         """
