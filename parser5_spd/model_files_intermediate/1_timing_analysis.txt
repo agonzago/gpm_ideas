@@ -1,8 +1,0 @@
-Variable Timing Analysis Results:
-- RS: Current=True, MaxLead=0, MinLag=-1
-- RES_L_GDP_GAP: Current=True, MaxLead=0, MinLag=-1
-- RR_GAP: Current=True, MaxLead=1, MinLag=0
-- RES_RS: Current=True, MaxLead=0, MinLag=-2
-- RES_DLA_CPI: Current=True, MaxLead=0, MinLag=-1
-- L_GDP_GAP: Current=True, MaxLead=1, MinLag=-1
-- DLA_CPI: Current=True, MaxLead=3, MinLag=-1

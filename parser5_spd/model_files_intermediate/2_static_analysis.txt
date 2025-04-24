@@ -1,4 +1,0 @@
-Static Variable Identification and Solution:
-Potential static candidates: []
-Static variables solved: []
-Remaining equations: 7

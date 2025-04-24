@@ -1,7 +1,0 @@
-Final Equation System Build:
-Building final equations:
-- Added LAG identity: Eq(LAG_RES_RS_m1 - RES_RS_m1, 0)
-
-Checking counts: N_States = 10, N_Equations = 10
-State and equation counts match.
-Final equations (10):
