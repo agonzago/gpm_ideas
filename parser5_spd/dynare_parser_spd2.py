@@ -754,7 +754,7 @@ class DynareParser:
     # process_model (Corrected Arguments and Internal Calls)
     # ===========================================
     def process_model(self, param_dict_values_or_list, output_dir_intermediate=None,
-                      output_dir_final=None, generate_function=True):
+                    output_dir_final=None, generate_function=True):
         """
         Runs the full parsing and matrix generation pipeline. Correctly returns results.
         Uses standard Python formatting. Internal calls don't handle file paths.
@@ -829,6 +829,9 @@ class DynareParser:
 
             self._build_final_equations()
             self._save_intermediate_file(fpaths_inter[5], ["Stage 6 Output..."], self.final_equations_for_jacobian, "Final Equation System")
+
+            #Order final equations and classify final variables as forward-looking, mixed, or backward-looking (exogenous states), 
+            #Order equations with exogenous states last (to get block diagonal structure)
 
             # Save final equations before calculating Jacobians for debugging
             if output_dir_intermediate:

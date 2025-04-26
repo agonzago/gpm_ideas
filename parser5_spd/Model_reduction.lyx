@@ -141,88 +141,16 @@ RES_RS = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
 \end_layout
 
 \begin_layout Section
-Identification of equations/variables
-\end_layout
-
-\begin_layout Enumerate
-Dynamic:
- A variable that contains leads and lags of its own variable.
- 
-\end_layout
-
-\begin_layout Enumerate
-Static:
- Equations/variables that at time t are defined purely by other variables at time t,
- or the expected value of other variables.
- The variable itself does not appear with a lead or lag in its own definition.
-\end_layout
-
-\begin_layout Paragraph
-identification 
-\end_layout
-
-\begin_layout Verbatim
-
-L_GDP_GAP -> Dynamic (depends on L_GDP_GAP(+1) and L_GDP_GAP(-1));
-\end_layout
-
-\begin_layout Verbatim
-
-DLA_CPI -> Dynamic (depends on DLA_CPI(-1),
- DLA_CPI(+1));
-\end_layout
-
-\begin_layout Verbatim
-
-RS -> (Depends on  RS(-1) and DLA_CPI(+1),
- DLA_CPI(+3));
-\end_layout
-
-\begin_layout Verbatim
-
-RR_GAP -> Static (at time t depends on RS and the expected value of DLA_CPI,
- that are known at time t)
-\end_layout
-
-\begin_layout Verbatim
-
-RES_L_GDP_GAP(+1) ->  dynamic (exogenous state),
- depends on RES_L_GDP_GAP and SHK_L_GDP_GAP;
-\end_layout
-
-\begin_layout Verbatim
-
-RES_DLA_CPI(+1) ->  dynamic (exogenous state),
- depends on RES_DLA_CPI and SHK_L_GDP_GAP;
-\end_layout
-
-\begin_layout Verbatim
-
-RES_RS(+1) ->  dynamic (exogenous state),
- depends on RES_RS(-1) and SHK_L_GDP_GAP;
+Clean Equations
 \end_layout
 
 \begin_layout Verbatim
 
 \end_layout
 
-\begin_layout Section
-Eliminate Static Equations
-\end_layout
-
 \begin_layout Verbatim
 
-// Aggregate demand
-\end_layout
-
-\begin_layout Verbatim
-
-L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RS(+1) - DLA_CPI(+2)) + RES_L_GDP_GAP;
-\end_layout
-
-\begin_layout Verbatim
-
-// Core Inflation
+L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RR_GAP(+1)) + RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
@@ -232,7 +160,7 @@ DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
 
 \begin_layout Verbatim
 
-// Monetary policy reaction function
+RR_GAP = RS - DLA_CPI(+1)  
 \end_layout
 
 \begin_layout Verbatim
@@ -297,7 +225,7 @@ RES_L_GDP_GAP:
 \begin_layout Verbatim
 
 RES_DLA_CPI:
- enters in t+1,
+ enters in t,
  t-1
 \end_layout
 
@@ -376,7 +304,7 @@ Rewrite the system of equations in terms of the auxiliary variables
 
 \begin_layout Verbatim
 
-L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RS(+1) - aux_DLA_CPI_lead2(t)) + RES_L_GDP_GAP;
+L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RR_GAP(+1)) + RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
@@ -386,7 +314,12 @@ DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
 
 \begin_layout Verbatim
 
-RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*aux_DLA_CPI_lead3(t) + g3*L_GDP_GAP) + RES_RS;
+RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*aux_DLA_CPI_lead(+1) + g3*L_GDP_GAP) + RES_RS;
+\end_layout
+
+\begin_layout Verbatim
+
+RR_GAP = RS - DLA_CPI(+1);
 \end_layout
 
 \begin_layout Verbatim
@@ -406,17 +339,12 @@ RES_RS = rho_rs*RES_RS(-1) + rho_rs2*aux_RES_RS_lag(-1) + SHK_RS;
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead(t) = DLA_CPI(t+1)
+aux_DLA_CPI_lead = DLA_CPI(+1)
 \end_layout
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead2(t) = aux_DLA_CPI_lead(t+1)
-\end_layout
-
-\begin_layout Verbatim
-
-aux_DLA_CPI_lead3(t) = aux_DLA_CPI_lead(t+1)
+aux_DLA_CPI_lead2 = aux_DLA_CPI_lead(+1)
 \end_layout
 
 \begin_layout Verbatim
@@ -429,7 +357,7 @@ aux_RES_RS_lag = RES_RS(-1)
 \end_layout
 
 \begin_layout Section
-Reduce the system again.
+Replace by _mk and pk.
 \end_layout
 
 \begin_layout Verbatim
@@ -438,47 +366,52 @@ Reduce the system again.
 
 \begin_layout Verbatim
 
-L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RS(+1) - aux_DLA_CPI_lead(t+1)) + RES_L_GDP_GAP;
+L_GDP_GAP = (1-b1)*L_GDP_GAP_p1 + b1*L_GDP_GAP_m1 - b4*(RR_GAP_p1) + RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
 
-DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
+DLA_CPI = a1*DLA_CPI_m1 + (1-a1)*DLA_CPI_p1 + a2*L_GDP_GAP + RES_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
 
-RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*aux_DLA_CPI_lead2(t+1) + g3*L_GDP_GAP) + RES_RS;
+RS = g1*RS_m1 + (1-g1)*(DLA_CPI_p1 + g2*aux_DLA_CPI_lead_p1 + g3*L_GDP_GAP) + RES_RS;
 \end_layout
 
 \begin_layout Verbatim
 
-RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
+RR_GAP = RS - DLA_CPI_p1;
 \end_layout
 
 \begin_layout Verbatim
 
-RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
+RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
 
-RES_RS  = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
+RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead(t) = DLA_CPI(t+1)
+RES_RS = rho_rs*RES_RS_m1 + rho_rs2*aux_RES_RS_lag_m1 + SHK_RS;
 \end_layout
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead2(t) = aux_DLA_CPI_lead(t+1)
+aux_DLA_CPI_lead = DLA_CPI_p1
 \end_layout
 
 \begin_layout Verbatim
 
-aux_RES_RS_lag = RES_RS(-1)
+aux_DLA_CPI_lead2 = aux_DLA_CPI_lead_p1
+\end_layout
+
+\begin_layout Verbatim
+
+aux_RES_RS_lag = RES_RS_m1
 \end_layout
 
 \begin_layout Verbatim
@@ -516,6 +449,11 @@ RS
 
 \begin_layout Verbatim
 
+RR_GAP
+\end_layout
+
+\begin_layout Verbatim
+
 RES_L_GDP_GAP
 \end_layout
 
@@ -541,7 +479,74 @@ aux_DLA_CPI_lead2
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead3
+aux_RES_RS_lag
+\end_layout
+
+\begin_layout Verbatim
+
+\end_layout
+
+\begin_layout Verbatim
+
+The order of the variables should be
+\end_layout
+
+\begin_layout Verbatim
+
+forward_looking = 
+\end_layout
+
+\begin_layout Verbatim
+
+L_GDP_GA
+\end_layout
+
+\begin_layout Verbatim
+
+DLA_CPI
+\end_layout
+
+\begin_layout Verbatim
+
+RS
+\end_layout
+
+\begin_layout Verbatim
+
+aux_DLA_CPI_lead
+\end_layout
+
+\begin_layout Verbatim
+
+aux_DLA_CPI_lead2
+\end_layout
+
+\begin_layout Verbatim
+
+\end_layout
+
+\begin_layout Verbatim
+
+\end_layout
+
+\begin_layout Verbatim
+
+backward_looking_list
+\end_layout
+
+\begin_layout Verbatim
+
+RES_L_GDP_GAP
+\end_layout
+
+\begin_layout Verbatim
+
+RES_DLA_CPI
+\end_layout
+
+\begin_layout Verbatim
+
+RES_RS
 \end_layout
 
 \begin_layout Verbatim
@@ -555,155 +560,112 @@ aux_RES_RS_lag
 
 \begin_layout Verbatim
 
-List of lagged variables 
+exo_var_list 
 \end_layout
 
 \begin_layout Verbatim
 
-L_GDP_GAP_m1
+SHK_L_GDP_GAP
 \end_layout
 
 \begin_layout Verbatim
 
-DLA_CPI_m1
+SHK_DLA_CPI
 \end_layout
 
 \begin_layout Verbatim
 
-RS_m1
-\end_layout
-
-\begin_layout Verbatim
-
-RES_L_GDP_GAP_m1
-\end_layout
-
-\begin_layout Verbatim
-
-RES_DLA_CPI_m1
-\end_layout
-
-\begin_layout Verbatim
-
-RES_RS_m1
-\end_layout
-
-\begin_layout Verbatim
-
-aux_DLA_CPI_lead_m1
-\end_layout
-
-\begin_layout Verbatim
-
-aux_DLA_CPI_lead2_m1
-\end_layout
-
-\begin_layout Verbatim
-
-aux_DLA_CPI_lead3_m1
-\end_layout
-
-\begin_layout Verbatim
-
-aux_RES_RS_lag_m1
+SHK_RS 
 \end_layout
 
 \begin_layout Verbatim
 
 \end_layout
 
-\begin_layout Verbatim
+\begin_layout Section
 
-List of forward variables 
+How to clasify variables 
 \end_layout
 
 \begin_layout Verbatim
 
-L_GDP_GAP_p1
+Variable by variable:
+ 
 \end_layout
 
 \begin_layout Verbatim
 
-DLA_CPI_p1
+backward_looking:
+ Don't apper with leads anywhere 
 \end_layout
 
 \begin_layout Verbatim
 
-RS_p1
+RES_RS,
+ RES_L_GDP_GAP,
+ RES_DLA_CPI
 \end_layout
 
 \begin_layout Verbatim
 
-RES_L_GDP_GAP_p1
+RS:
+ Appear only with lags but 
 \end_layout
 
 \begin_layout Verbatim
 
-RES_DLA_CPI_p1
+RR_GAP appers RR_GAP(+1) and RR_GAP is function of RS;
+ <- This is the tricky part.
 \end_layout
 
 \begin_layout Verbatim
 
-RES_RS_p1
+The other distintive feature of RES variables is that thier equations are identified with exogenous variables 
 \end_layout
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead_p1
+and this equations do not depend on any other variables in the system 
 \end_layout
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead2_p1
+	
 \end_layout
 
 \begin_layout Verbatim
 
-aux_DLA_CPI_lead3_p1
+0 = (1-b1)*L_GDP_GAP_p1 + b1*L_GDP_GAP_m1 - b4*(RR_GAP_p1) + RES_L_GDP_GAP - L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
 
-aux_RES_RS_lag_p1
+0 = a1*DLA_CPI_m1 + (1-a1)*DLA_CPI_p1 + a2*L_GDP_GAP + RES_DLA_CPI - DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
 
+0 = g1*RS_m1 + (1-g1)*(DLA_CPI_p1 + g2*aux_DLA_CPI_lead_p1 + g3*L_GDP_GAP) + RES_RS - RS;
 \end_layout
 
 \begin_layout Verbatim
 
-Final set of equations:
+0 = RS - DLA_CPI_p1 - RR_GAP;
 \end_layout
 
 \begin_layout Verbatim
 
-0 = (1-b1)*L_GDP_GAP_p1 + b1*L_GDP_GAP_m1 - b4*(RS_p1 - aux_DLA_CPI_lead2) + RES_L_GDP_GAP -L_GDP_GAP;
+0 = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP -RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
 
-0 = a1*DLA_CPI_m1 + (1-a1)*DLA_CPI_p1 + a2*L_GDP_GAP + RES_DLA_CPI -DLA_CPI;
+0 = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI-RES_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
 
-0 = g1*RS_m1 + (1-g1)*(DLA_CPI_p1 + g2*aux_DLA_CPI_lead3 + g3*L_GDP_GAP) + RES_RS -RS ;
-\end_layout
-
-\begin_layout Verbatim
-
-0 = RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
-\end_layout
-
-\begin_layout Verbatim
-
-0 = rho_DLA_CPI*RES_DLA_CPI_m1 + SHK_DLA_CPI - RES_DLA_CPI;
-\end_layout
-
-\begin_layout Verbatim
-
-0 = rho_rs*RES_RS_m1 + rho_rs2*aux_RES_RS_lag_m1 + SHK_RS - RES_RS;
+0 = rho_rs*RES_RS_m1 + rho_rs2*aux_RES_RS_lag_m1 + SHK_RS -RES_RS;
 \end_layout
 
 \begin_layout Verbatim
@@ -718,15 +680,66 @@ Final set of equations:
 
 \begin_layout Verbatim
 
-0 = aux_DLA_CPI_lead2_p1 - aux_DLA_CPI_lead3
+0 = RES_RS_m1 - aux_RES_RS_lag
 \end_layout
 
-\begin_layout Verbatim
+\begin_layout Section
 
-0 = RES_RS_m1 - aux_RES_RS_lag 
+Jacoobians of the ordered equations and variables
 \end_layout
 
-\begin_layout Verbatim
+\begin_layout Standard
+\begin_inset Formula $x_{t}=\left(mix_{t},back_{t}\right)$
+\end_inset
+
+,
+\begin_inset Formula $eps_{t}$
+\end_inset
+
+=exo_var_list
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+A=\frac{\partial F}{\partial x_{t+1}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+B=\frac{\partial F}{\partial x_{t}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+C=\frac{\partial F}{\partial x_{t-1}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+D=\frac{\partial F}{\partial\epsilon_{t}}
+\]
+
+\end_inset
+
 
 \end_layout
 
