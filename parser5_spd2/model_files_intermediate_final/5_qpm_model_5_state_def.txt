@@ -1,0 +1,15 @@
+--- 5_qpm_model_5_state_def.txt ---
+# Generated: 2025-04-27 17:20:35
+
+Stage 5: State Vector Definition
+ Ordered State Vector (10):
+  0: RES_DLA_CPI
+  1: RES_RS
+  2: RS
+  3: aux_L_GDP_GAP_lag1
+  4: aux_RES_RS_lag1
+  5: DLA_CPI
+  6: L_GDP_GAP
+  7: RR_GAP
+  8: aux_DLA_CPI_lead1
+  9: aux_DLA_CPI_lead2

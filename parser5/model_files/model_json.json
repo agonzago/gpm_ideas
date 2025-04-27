@@ -36,36 +36,36 @@
     "stderr_SHK_RR_TREND": 1.0
   },
   "states": [
-    "RES_DLA_CPI",
     "RES_RS",
+    "RES_DLA_CPI",
     "RES_L_GDP_GAP",
-    "DLA_CPI_lag",
+    "L_GDP_GAP_lag",
     "RS_lag",
     "RES_RS_lag",
-    "L_GDP_GAP_lag"
+    "DLA_CPI_lag"
   ],
   "controls": [
-    "DLA_CPI_lead1",
-    "DLA_CPI",
-    "RS",
     "RR_GAP",
+    "DLA_CPI_lead1",
     "L_GDP_GAP",
-    "DLA_CPI_lead2"
+    "DLA_CPI",
+    "DLA_CPI_lead2",
+    "RS"
   ],
   "all_variables": [
-    "RES_DLA_CPI",
     "RES_RS",
+    "RES_DLA_CPI",
     "RES_L_GDP_GAP",
-    "DLA_CPI_lag",
+    "L_GDP_GAP_lag",
     "RS_lag",
     "RES_RS_lag",
-    "L_GDP_GAP_lag",
-    "DLA_CPI_lead1",
-    "DLA_CPI",
-    "RS",
+    "DLA_CPI_lag",
     "RR_GAP",
+    "DLA_CPI_lead1",
     "L_GDP_GAP",
-    "DLA_CPI_lead2"
+    "DLA_CPI",
+    "DLA_CPI_lead2",
+    "RS"
   ],
   "shocks": [
     "SHK_L_GDP_GAP",

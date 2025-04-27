@@ -1206,12 +1206,20 @@ class DynareParser:
             self._build_final_equations()
             self._save_intermediate_file(fpaths_inter.get("final_eqs"), ["Stage 6: Final Equation System"], self.final_equations_for_jacobian, "Final Equations for Jacobian")
 
+
+            
             # Stage 5 (was 6): Define State Vector (Classification & Ordering) NEXT
             # This now uses the correctly populated self.final_equations_for_jacobian via _build_dependency_info
             self._define_state_vector()
+            print(f"Final dynamic variables: {self.final_dynamic_var_names}")
+            print(self.final_dynamic_var_names)
+            print(f"state_var_orderd: {self.state_vars_ordered}")
+            print(f"final_equations_for_jacobian: {self.final_equations_for_jacobian}")
+            
+
+
             state_lines = ["Stage 5: State Vector Definition (Ordered)", f"Ordered State Vector ({len(self.state_vars_ordered)}): {[s.name for s in self.state_vars_ordered]}"]
             self._save_intermediate_file(fpaths_inter.get("state_def_ordered"), state_lines)
-            # --- ** END CORRECTED ORDER ** ---
 
 
             # Stage 7: Calculate Numerical Matrices

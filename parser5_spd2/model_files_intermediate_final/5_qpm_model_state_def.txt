@@ -1,0 +1,4 @@
+--- 5_qpm_model_state_def.txt ---
+
+Stage 5 Output:
+State Vector: ['L_GDP_GAP', 'DLA_CPI', 'RS', 'RES_L_GDP_GAP', 'RES_DLA_CPI', 'RES_RS', 'aux_RES_RS_lag1', 'aux_DLA_CPI_lead1', 'aux_DLA_CPI_lead2']

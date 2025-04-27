@@ -1,0 +1,13 @@
+--- 0_qpm_model_0_original_eqs.txt ---
+# Generated: 2025-04-27 17:20:35
+
+Stage 0: Original Parsed Equations
+
+--- Original Sympy Equations (7) ---
+  Eq 1: L_GDP_GAP - L_GDP_GAP_m1*b1 - L_GDP_GAP_p1*(1 - b1) - RES_L_GDP_GAP + RR_GAP_p1*b4 = 0
+  Eq 2: DLA_CPI - DLA_CPI_m1*a1 - DLA_CPI_p1*(1 - a1) - L_GDP_GAP*a2 - RES_DLA_CPI = 0
+  Eq 3: -RES_RS + RS - RS_m1*g1 - (1 - g1)*(DLA_CPI_p1 + DLA_CPI_p3*g2 + L_GDP_GAP*g3) = 0
+  Eq 4: DLA_CPI_p1 + RR_GAP - RS = 0
+  Eq 5: RES_L_GDP_GAP - RES_L_GDP_GAP_m1*rho_L_GDP_GAP - SHK_L_GDP_GAP = 0
+  Eq 6: RES_DLA_CPI - RES_DLA_CPI_m1*rho_DLA_CPI - SHK_DLA_CPI = 0
+  Eq 7: RES_RS - RES_RS_m1*rho_rs - RES_RS_m2*rho_rs2 - SHK_RS = 0

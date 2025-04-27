@@ -12,6 +12,9 @@ import pickle
 import collections
 import importlib.util
 import datetime 
+import matplotlib.pyplot as plt
+import importlib.util
+
 
 def time_shift_expression(expr, shift, parser_symbols, var_names_set):
     """
@@ -79,6 +82,535 @@ def time_shift_expression(expr, shift, parser_symbols, var_names_set):
             subs_dict[atom] = parser_symbols[new_name]
 
     return expr.xreplace(subs_dict)
+
+# --- Helper Function for Time Shifting Expressions ---
+def time_shift_expression(expr, shift, parser_symbols, var_names_set):
+    """
+    Shifts the time index of variables within a Sympy expression. Handles base,
+    lead (_p), lag (_m), aux_lead, and aux_lag vars based on parser_symbols.
+    """
+    if shift == 0:
+        return expr
+
+    subs_dict = {}
+    atoms = expr.free_symbols
+
+    for atom in atoms:
+        atom_name = atom.name
+        base_name = None
+        current_k = 0
+        is_var_type = False # Includes base vars, aux_lead, aux_lag
+
+        # Prioritize matching aux first, then base lead/lag, then base
+        match_aux_lead = re.match(r"(aux_\w+_lead)(\d+)$", atom_name, re.IGNORECASE)
+        match_aux_lag  = re.match(r"(aux_\w+_lag)(\d+)$", atom_name, re.IGNORECASE)
+        match_lead = re.match(r"(\w+)_p(\d+)$", atom_name)
+        match_lag  = re.match(r"(\w+)_m(\d+)$", atom_name)
+
+        if match_aux_lead:
+            base_name = match_aux_lead.group(1) # e.g., "aux_DLA_CPI_lead"
+            current_k = int(match_aux_lead.group(2))
+            is_var_type = True
+        elif match_aux_lag:
+            base_name = match_aux_lag.group(1) # e.g., "aux_RES_RS_lag"
+            current_k = -int(match_aux_lag.group(2))
+            is_var_type = True
+        elif match_lead:
+            base_name_cand = match_lead.group(1)
+            # Avoid interpreting aux_..._p as base_p
+            if not base_name_cand.lower().startswith("aux_") and base_name_cand in var_names_set:
+                 base_name = base_name_cand
+                 current_k = int(match_lead.group(2))
+                 is_var_type = True
+            else:
+                 base_name = None # Not a variable lead/lag
+        elif match_lag:
+             base_name_cand = match_lag.group(1)
+             if not base_name_cand.lower().startswith("aux_") and base_name_cand in var_names_set:
+                 base_name = base_name_cand
+                 current_k = -int(match_lag.group(2))
+                 is_var_type = True
+             else:
+                 base_name = None
+        elif atom_name in var_names_set: # Base variable name
+            base_name = atom_name
+            current_k = 0
+            is_var_type = True
+
+        if is_var_type:
+            new_k = current_k + shift
+            if new_k == 0:
+                # Need the actual base name (strip aux_, _lead, _lag)
+                clean_base_match = re.match(r"aux_(\w+)_(?:lead|lag)", base_name, re.IGNORECASE)
+                if clean_base_match:
+                    clean_base = clean_base_match.group(1)
+                else:
+                    clean_base = base_name # Assumes base_name was correct if not aux
+
+                if clean_base in var_names_set:
+                    new_sym_name = clean_base
+                else:
+                     # Fallback if base name was something like 'aux_VAR_lead' (no number)
+                     # This shouldn't happen if base_name derived correctly from numbered aux vars
+                     print(f"Warning: Could not find base var for '{atom_name}' during shift to t=0. Using original base '{base_name}'.")
+                     if base_name in parser_symbols:
+                         new_sym_name = base_name
+                     else:
+                         continue # Cannot determine target symbol
+
+            elif new_k > 0:
+                # Construct lead name using _p suffix
+                clean_base_match = re.match(r"aux_(\w+)_(?:lead|lag)", base_name, re.IGNORECASE)
+                if clean_base_match: clean_base = clean_base_match.group(1)
+                else: clean_base = base_name
+                prefix = "aux_" if base_name.lower().startswith("aux_") else ""
+                new_sym_name = f"{prefix}{clean_base}_p{new_k}" # Standard _p suffix
+            else: # new_k < 0
+                # Construct lag name using _m suffix
+                clean_base_match = re.match(r"aux_(\w+)_(?:lead|lag)", base_name, re.IGNORECASE)
+                if clean_base_match: clean_base = clean_base_match.group(1)
+                else: clean_base = base_name
+                prefix = "aux_" if base_name.lower().startswith("aux_") else ""
+                new_sym_name = f"{prefix}{clean_base}_m{abs(new_k)}" # Standard _m suffix
+
+            # Ensure the new symbol exists
+            if new_sym_name not in parser_symbols:
+                parser_symbols[new_sym_name] = sympy.Symbol(new_sym_name)
+            subs_dict[atom] = parser_symbols[new_sym_name]
+        # else: atom is a parameter or shock, leave unchanged
+
+    try:
+        # Use xreplace for potentially more robust substitution of symbols
+        shifted_expr = expr.xreplace(subs_dict)
+    except Exception as e:
+        print(f"Warning: xreplace failed during time_shift_expression for expr: {expr}. Trying subs. Error: {e}")
+        try:
+            shifted_expr = expr.subs(subs_dict) # Fallback to subs
+        except Exception as e2:
+            print(f"Error: Fallback subs also failed in time_shift_expression. Error: {e2}")
+            shifted_expr = expr # Return original on error
+    return shifted_expr
+
+def irf_new(P, Q, shock_index, horizon=40):
+    """
+    Compute impulse responses for y_t = P y_{t-1} + Q e_t,
+    for a specific shock index.
+
+    Parameters
+    ----------
+    P : ndarray (n x n)
+        Transition matrix.
+    Q : ndarray (n x n_shock)
+        Shock impact matrix.
+    shock_index : int
+        Index of the shock to simulate (0, 1, or 2).
+    horizon : int, optional
+        Number of periods for the IRF. The default is 40.
+
+    Returns
+    -------
+    ndarray
+        Array of shape (horizon, n) with responses over time.
+    """
+    n = P.shape[0]
+    n_shock = Q.shape[1]
+    if shock_index < 0 or shock_index >= n_shock:
+        raise ValueError(f"shock_index must be between 0 and {n_shock-1}")
+
+    y_resp = np.zeros((horizon, n))
+    # Initial impulse: only one shock is non-zero at t=0
+    e0 = np.zeros((n_shock, 1))
+    e0[shock_index] = 1.0
+
+    # y_0 = P * y_{-1} + Q * e_0. Assume y_{-1} = 0.
+    y_current = Q @ e0
+
+    y_resp[0, :] = y_current.flatten()
+
+    # Subsequent periods: e_t = 0 for t > 0
+    et = np.zeros((n_shock, 1))
+    for t in range(1, horizon):
+        y_current = P @ y_current # + Q @ et (which is zero)
+        y_resp[t, :] = y_current.flatten()
+
+    return y_resp
+
+import numpy as np
+from numpy.linalg import norm
+from scipy.linalg import lu_factor, lu_solve
+
+def solve_quadratic_matrix_equation(A, B, C, initial_guess=None, tol=1e-14, max_iter=100, verbose=False):
+    """
+    A Python version of a structure-preserving doubling method analogous to the Julia code snippet.
+    Solves the quadratic matrix equation:
+        0 = A X^2 + B X + C
+    for the "stable" solution X using a doubling-type iteration. This assumes
+    B + A @ initial_guess (if provided) can be factorized (i.e., is invertible) at the start.
+
+    Parameters
+    ----------
+    A, B, C : 2D numpy arrays of shape (n, n), dtype float
+    initial_guess : 2D numpy array of shape (n, n), optional
+        If None, starts at zeros_like(A).
+    tol : float
+        Convergence tolerance.
+    max_iter : int
+        Maximum number of doubling iterations.
+    verbose : bool
+        If True, print iteration details.
+
+    Returns
+    -------
+    X : 2D numpy array
+        The computed stable solution matrix.
+    iter_count : int
+        Number of iterations performed.
+    residual_ratio : float
+        A measure of how well the final X solves the equation, based on
+        ||A X^2 + B X + C|| / ||A X^2||.
+    """
+
+    n = A.shape[0]
+    if initial_guess is None or initial_guess.size == 0:
+        guess_provided = False
+        initial_guess = np.zeros_like(A)
+    else:
+        guess_provided = True
+
+    # Copy matrices
+    E = C.copy()
+    F = A.copy()
+    Bbar = B.copy()
+
+    # Emulate "Bbar = Bbar + A @ initial_guess"
+    Bbar += A @ initial_guess
+
+    try:
+        lu_Bbar = lu_factor(Bbar)
+    except ValueError:
+        # Factorization failed
+        return A.copy(), 0, 1.0
+
+    # Solve E = Bbar \ C, F = Bbar \ A
+    E = lu_solve(lu_Bbar, E)
+    F = lu_solve(lu_Bbar, F)
+
+    # Initialize X, Y
+    X = -E - initial_guess
+    Y = -F
+
+    # Allocate space for new iterates
+    X_new = np.zeros_like(X)
+    Y_new = np.zeros_like(Y)
+    E_new = np.zeros_like(E)
+    F_new = np.zeros_like(F)
+
+    I = np.eye(n, dtype=A.dtype)
+    solved = False
+    iter_count = max_iter
+
+    for i in range(1, max_iter + 1):
+        # EI = I - Y*X
+        temp1 = Y @ X
+        EI = I - temp1
+
+        # Factor EI
+        try:
+            lu_EI = lu_factor(EI)
+        except ValueError:
+            # If factorization fails, return something
+            return A.copy(), i, 1.0
+
+        # E_new = E * (EI^-1) * E
+        #   We do E_new = E @ (lu_solve(lu_EI, E))
+        temp1 = lu_solve(lu_EI, E)
+        E_new = E @ temp1
+
+        # FI = I - X*Y
+        temp2 = X @ Y
+        FI = I - temp2
+
+        # Factor FI
+        try:
+            lu_FI = lu_factor(FI)
+        except ValueError:
+            return A.copy(), i, 1.0
+
+        # F_new = F * (FI^-1) * F
+        temp2 = lu_solve(lu_FI, F)
+        F_new = F @ temp2
+
+        # X_new = X + F * (FI^-1) * (X * E)
+        temp3 = X @ E
+        temp3 = lu_solve(lu_FI, temp3)
+        X_new = F @ temp3
+        X_new += X
+
+        # Possibly check norm for X_new
+        if i > 5 or guess_provided:
+            Xtol = norm(X_new, ord='fro')
+        else:
+            Xtol = 1.0
+
+        # Y_new = Y + E * (EI^-1) * (Y * F)
+        temp1 = Y @ F
+        temp1 = lu_solve(lu_EI, temp1)
+        Y_new = E @ temp1
+        Y_new += Y
+
+        if verbose:
+            print(f"Iteration {i}: Xtol={Xtol:e}")
+
+        # Check convergence
+        if Xtol < tol:
+            solved = True
+            iter_count = i
+            break
+
+        # Update the iterates
+        X[:] = X_new
+        Y[:] = Y_new
+        E[:] = E_new
+        F[:] = F_new
+
+    # Incorporate initial_guess: X_new += initial_guess
+    X_new += initial_guess
+    X = X_new
+
+    # Final check: compute residual = A X^2 + B X + C
+    AX2 = A @ (X @ X)
+    AX2_norm = norm(AX2, ord='fro')
+    residual = AX2 + B @ X + C
+    if AX2_norm == 0.0:
+        residual_ratio = norm(residual, ord='fro')
+    else:
+        residual_ratio = norm(residual, ord='fro') / AX2_norm
+
+    return X, iter_count, residual_ratio
+
+def compute_Q(A, B, D, P):
+    """
+    Once P satisfies A P^2 + B P + C=0, we can solve for Q in
+
+    (A P + B)*Q + D = 0   =>   (A P + B)*Q = -D   =>   Q = -(A P + B)^{-1} D.
+
+    This Q is such that  y_t = P y_{t-1} + Q e_t .
+    For dimension n=2, D is typically 2x1 if there's 1 shock.
+    """
+    APB = A @ P + B
+    try:
+        invAPB = np.linalg.inv(APB)
+    except np.linalg.LinAlgError:
+        print("Cannot invert (A P + B). Possibly singular.")
+        return None
+    Q = - invAPB @ D
+    return Q
+
+def solve_and_plot_from_generated_function(
+    theta,
+    generated_module_path,
+    shock_index_to_plot,
+    horizon=40,
+    vars_to_plot=None,
+    solver_options=None,
+    plot_options=None
+):
+    """
+    Loads a generated Jacobian function, computes matrices for given parameters,
+    solves the model, computes IRFs, and plots them.
+
+    Args:
+        theta (list or np.ndarray): Ordered vector of parameter values expected
+            by the generated jacobian_matrices function.
+        generated_module_path (str): Full path to the generated Python file
+            (e.g., 'model_files_numerical/qpm_model_jacobian_matrices.py').
+        shock_index_to_plot (int): Index of the shock for which to compute IRFs
+            (e.g., 0 for the first shock in varexo).
+        horizon (int, optional): Number of periods for the IRF. Defaults to 40.
+        vars_to_plot (list[str], optional): List of variable names (strings)
+            to include in the plot. If None, attempts to plot all main variables
+            (excluding aux_*). Defaults to None.
+        solver_options (dict, optional): Options to pass to
+            solve_quadratic_matrix_equation (e.g., {'tol': 1e-14}). Defaults to {}.
+        plot_options (dict, optional): Options for plotting (e.g.,
+             {'figsize': (12, 8), 'suptitle_prefix': 'Model XYZ'}). Defaults to {}.
+
+    Returns:
+        tuple: (P_sol, Q_sol, irf_vals, state_names, shock_names) on success,
+               or None if any step fails. irf_vals contains the computed IRFs.
+    """
+    print(f"\n--- Solving and Plotting using Generated Function ---")
+    print(f"Module path: {generated_module_path}")
+    print(f"Parameter vector length: {len(theta)}")
+    print(f"Shock index to plot: {shock_index_to_plot}")
+
+    if solver_options is None: solver_options = {}
+    if plot_options is None: plot_options = {}
+
+    # --- 1. Load the generated module dynamically ---
+    if not os.path.isfile(generated_module_path):
+        print(f"Error: Generated module file not found at {generated_module_path}")
+        return None
+
+    module_name = os.path.splitext(os.path.basename(generated_module_path))[0]
+    spec = None
+    mod_matrices = None
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, generated_module_path)
+        if spec is None:
+            print(f"Error: Could not create module spec for {module_name}")
+            return None
+        mod_matrices = importlib.util.module_from_spec(spec)
+        # Crucial: Add to sys.modules BEFORE exec_module if it imports things
+        # sys.modules[module_name] = mod_matrices
+        spec.loader.exec_module(mod_matrices)
+        print(f"Successfully loaded module '{module_name}'")
+    except Exception as e:
+        print(f"Error loading generated module '{module_name}' from {generated_module_path}:")
+        print(e)
+        import traceback
+        traceback.print_exc()
+        return None
+
+    # --- 2. Get matrices using the loaded function ---
+    try:
+        if not hasattr(mod_matrices, 'jacobian_matrices'):
+             print(f"Error: Function 'jacobian_matrices' not found in {generated_module_path}")
+             return None
+
+        # Call the function from the loaded module
+        A, B, C, D, state_names, shock_names = mod_matrices.jacobian_matrices(theta)
+        print("Successfully obtained A, B, C, D matrices from generated function.")
+        print(f"  State variables ({len(state_names)}): {state_names}")
+        print(f"  Shock variables ({len(shock_names)}): {shock_names}")
+        print(f"  Matrix shapes: A:{A.shape}, B:{B.shape}, C:{C.shape}, D:{D.shape}")
+
+        # Validate shock index
+        if shock_index_to_plot < 0 or shock_index_to_plot >= len(shock_names):
+            print(f"Error: shock_index_to_plot ({shock_index_to_plot}) is out of bounds "
+                  f"for available shocks ({len(shock_names)}): {shock_names}")
+            return None
+        current_shock_name = shock_names[shock_index_to_plot]
+
+    except Exception as e:
+        print(f"Error calling 'jacobian_matrices' function with provided theta:")
+        print(e)
+        import traceback
+        traceback.print_exc()
+        return None
+
+    # --- 3. Solve for P using the provided solver ---
+    print("\nSolving the Quadratic Matrix Equation for P...")
+    try:
+        P_sol, iter_count, residual_ratio = solve_quadratic_matrix_equation(
+            A, B, C, **solver_options
+        )
+        print(f"Solver finished in {iter_count} iterations with residual ratio: {residual_ratio:.2e}")
+        if residual_ratio > 1e-6: # Threshold for acceptable residual
+             print(f"Warning: Solver residual ratio ({residual_ratio:.2e}) is high.")
+             # Decide whether to continue or return None based on tolerance
+             # if residual_ratio > solver_options.get('tol', 1e-8) * 100: return None
+
+        # Basic stability check (optional but recommended)
+        eigenvalues = np.linalg.eigvals(P_sol)
+        max_eig = np.max(np.abs(eigenvalues))
+        print(f"Maximum eigenvalue magnitude of P: {max_eig:.4f}")
+        if max_eig >= 1.0 - 1e-9: # Allow for slight numerical inaccuracy
+           print("Warning: Solution P might be unstable or borderline stable (max |eig| >= 1).")
+
+    except Exception as e:
+        print(f"Error during call to solve_quadratic_matrix_equation:")
+        print(e)
+        import traceback
+        traceback.print_exc()
+        return None
+
+    # --- 4. Compute Q ---
+    print("\nComputing the shock impact matrix Q...")
+    try:
+        Q_sol = compute_Q(A, B, D, P_sol)
+        if Q_sol is None:
+            print("Error: Failed to compute Q (maybe A*P+B is singular?).")
+            return None
+        print(f"Computed Q matrix with shape: {Q_sol.shape}")
+    except Exception as e:
+        print(f"Error during call to compute_Q:")
+        print(e)
+        import traceback
+        traceback.print_exc()
+        return None
+
+    # --- 5. Compute IRFs ---
+    print(f"\nComputing Impulse Responses for shock '{current_shock_name}' (index {shock_index_to_plot})...")
+    try:
+        irf_vals = irf_new(P_sol, Q_sol, shock_index=shock_index_to_plot, horizon=horizon)
+        print(f"Computed IRFs with shape: {irf_vals.shape}")
+    except Exception as e:
+        print(f"Error during call to irf_new:")
+        print(e)
+        import traceback
+        traceback.print_exc()
+        return None
+
+    # --- 6. Plotting ---
+    print("\nGenerating IRF plots...")
+
+    # Determine variables to plot
+    if vars_to_plot is None:
+        # Default: plot all non-auxiliary variables
+        vars_to_plot_final = [v for v in state_names if not v.lower().startswith('aux_')]
+        if not vars_to_plot_final: # Fallback if only aux vars exist
+            vars_to_plot_final = state_names
+        print(f"Plotting default variables: {vars_to_plot_final}")
+    else:
+        vars_to_plot_final = vars_to_plot
+        # Validate that requested variables exist
+        missing_vars = [v for v in vars_to_plot_final if v not in state_names]
+        if missing_vars:
+            print(f"Warning: Requested variables not found in state list and will be skipped: {missing_vars}")
+            vars_to_plot_final = [v for v in vars_to_plot_final if v in state_names]
+        if not vars_to_plot_final:
+            print("Error: No valid variables left to plot.")
+            # Return results without plotting, or return None
+            return P_sol, Q_sol, irf_vals, state_names, shock_names
+
+
+    # Create mapping from var name to index
+    var_indices = {name: i for i, name in enumerate(state_names)}
+
+    # Plotting setup
+    num_plots = len(vars_to_plot_final)
+    if num_plots == 0:
+        print("No variables selected for plotting.")
+        return P_sol, Q_sol, irf_vals, state_names, shock_names
+
+    cols = 2 if num_plots > 1 else 1
+    rows = (num_plots + cols - 1) // cols # Calculate rows needed
+
+    fig_size = plot_options.get('figsize', (max(5*cols, 8), 4*rows)) # Dynamic figsize
+    suptitle_prefix = plot_options.get('suptitle_prefix', "")
+    if suptitle_prefix: suptitle_prefix += ": "
+
+    plt.figure(figsize=fig_size)
+    plt.suptitle(f"{suptitle_prefix}Impulse Responses to a Unit '{current_shock_name}' Shock", fontsize=14)
+
+    for i, var_name in enumerate(vars_to_plot_final):
+        idx = var_indices[var_name]
+        plt.subplot(rows, cols, i + 1)
+        plt.plot(range(horizon), irf_vals[:, idx], label=var_name)
+        plt.axhline(0, color='k', linewidth=0.8, linestyle='--')
+        plt.title(f"{var_name}")
+        plt.xlabel("Periods")
+        plt.ylabel("Response")
+        plt.grid(True, alpha=0.5)
+        # plt.legend() # Optional: can make plots crowded
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout for suptitle
+    plt.show()
+    print("Plotting complete.")
+
+    # --- 7. Return results ---
+    return P_sol, Q_sol, irf_vals, state_names, shock_names
 
 class DynareParser:
 
@@ -921,9 +1453,6 @@ class DynareParser:
             print(f"Successfully saved final equations to {filename}")
         except Exception as e: print(f"Error writing final equations file {filename}: {e}")
 
-
-
-
 # ===========================================
 # Example Usage Script (Corrected process_model call)
 # ===========================================
@@ -973,7 +1502,7 @@ if __name__ == "__main__":
 
     # --- Process the model ---
     # Call process_model with the ordered list as the FIRST argument (positional)
-    result = parser.process_model(parameter_theta, # <<< Use positional argument
+    result = parser.process_model(param_dict_values_or_list= parameter_theta, 
                                 output_dir_intermediate=output_dir_inter,
                                 output_dir_final=output_dir_final,
                                 generate_function=True)
@@ -1013,3 +1542,32 @@ if __name__ == "__main__":
             print(f"\nGenerated file not found: {function_file}. Cannot test.")
     else: 
         print("\nModel processing failed.")
+
+
+    # --- Specify plotting options ---
+    shock_to_analyze = 2 # Index for SHK_RS (assuming it's the 3rd shock)
+    periods_horizon = 40
+    variables_for_plot = ["L_GDP_GAP", "DLA_CPI", "RS", "RES_RS"] # Example subset
+
+    # --- Call the new function ---
+    analysis_results = solve_and_plot_from_generated_function(
+        theta=parameter_theta,
+        generated_module_path="parser5_spd2/model_files_numerical_final/qpm_model_jacobian_matrices.py",
+        shock_index_to_plot=shock_to_analyze,
+        horizon=periods_horizon,
+        vars_to_plot=variables_for_plot,
+        solver_options={'tol': 1e-12, 'verbose': False}, # Example solver options
+        plot_options={'figsize': (10, 6)} # Example plot options
+    )
+
+    # # --- Check results ---
+    # if analysis_results:
+    #     P_solution, Q_solution, irf_data, states, shocks = analysis_results
+    #     print("\n--- Analysis Summary ---")
+    #     print(f"Model solved successfully.")
+    #     print(f"Policy matrix P shape: {P_solution.shape}")
+    #     print(f"Shock matrix Q shape: {Q_solution.shape}")
+    #     print(f"IRF data shape: {irf_data.shape}")
+    #     # You can do further analysis with P, Q, irf_data here if needed
+    # else:
+    #     print("\n--- Analysis Failed ---")        
