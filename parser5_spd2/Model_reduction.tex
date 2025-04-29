@@ -3,10 +3,41 @@
 \documentclass[american]{article}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
+\usepackage{amstext}
 \usepackage{babel}
 \begin{document}
 
 \section{Initial model}
+
+var
+
+// Main variables
+
+L\_GDP\_GAP // Output Gap
+
+DLA\_CPI // QoQ Core Inflation
+
+RS // MP Rate
+
+RR\_GAP // Real Interest Rate Gap
+
+RES\_L\_GDP\_GAP // exogenous states
+
+RES\_DLA\_CPI
+
+RES\_RS
+
+;
+
+varexo
+
+SHK\_L\_GDP\_GAP // Output gap shock
+
+SHK\_DLA\_CPI
+
+SHK\_RS // Foreign interest rate shock
+
+;
 \begin{verbatim}
 // Aggregate demand
 L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
@@ -20,33 +51,12 @@ RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
 RES_RS = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
 \end{verbatim}
 
-\section{Identification of equations/variables}
-\begin{enumerate}
-\item Dynamic: A variable that contains leads and lags of its own variable. 
-\item Static: Equations/variables that at time t are defined purely by other
-variables at time t, or the expected value of other variables. The
-variable itself does not appear with a lead or lag in its own definition.
-\end{enumerate}
-
-\paragraph{identification }
+\section{Clean Equations}
 \begin{verbatim}
-L_GDP_GAP -> Dynamic (depends on L_GDP_GAP(+1) and L_GDP_GAP(-1));
-DLA_CPI -> Dynamic (depends on DLA_CPI(-1), DLA_CPI(+1));
-RS -> (Depends on  RS(-1) and DLA_CPI(+1), DLA_CPI(+3));
-RR_GAP -> Static (at time t depends on RS and the expected value of DLA_CPI, that are known at time t)
-RES_L_GDP_GAP(+1) ->  dynamic (exogenous state), depends on RES_L_GDP_GAP and SHK_L_GDP_GAP;
-RES_DLA_CPI(+1) ->  dynamic (exogenous state), depends on RES_DLA_CPI and SHK_L_GDP_GAP;
-RES_RS(+1) ->  dynamic (exogenous state), depends on RES_RS(-1) and SHK_L_GDP_GAP;
 
-\end{verbatim}
-
-\section{Eliminate Static Equations}
-\begin{verbatim}
-// Aggregate demand
-L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RS(+1) - DLA_CPI(+2)) + RES_L_GDP_GAP;
-// Core Inflation
+L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RR_GAP(+1)) + RES_L_GDP_GAP;
 DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
-// Monetary policy reaction function
+RR_GAP = RS - DLA_CPI(+1)  
 RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + RES_RS;
 RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
 RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
@@ -61,7 +71,7 @@ L_GDP_GAP enters in t, t+1, t-1
 DLA_CPI  enters in t, t+1, t+3, t-1
 RS: enters  t, t-1, t+1
 RES_L_GDP_GAP: enters in t, t-1
-RES_DLA_CPI: enters in t+1, t-1
+RES_DLA_CPI: enters in t, t-1
 RES_RS: enters in t,t-1, t-2
 
 The system should be written for variables in t+1, t and t-1. So variables with longer leads and lags should be expressed through auxiliary variables.
@@ -74,37 +84,37 @@ Similar longer lags (longer than (-1)) should also imply auxiliary variables. Th
 RES_RS_lag = RES_RS(-1)
 RES_RS_lag2 = RES_RS_lag(-1)
 
-
 \end{verbatim}
 
 \section{Rewrite the system of equations in terms of the auxiliary variables}
 \begin{verbatim}
 
-L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RS(+1) - aux_DLA_CPI_lead2(t)) + RES_L_GDP_GAP;
+L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RR_GAP(+1)) + RES_L_GDP_GAP;
 DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
-RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*aux_DLA_CPI_lead3(t) + g3*L_GDP_GAP) + RES_RS;
+RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*aux_DLA_CPI_lead(+1) + g3*L_GDP_GAP) + RES_RS;
+RR_GAP = RS - DLA_CPI(+1);
 RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP;
 RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI;
 RES_RS = rho_rs*RES_RS(-1) + rho_rs2*aux_RES_RS_lag(-1) + SHK_RS;
-aux_DLA_CPI_lead(t) = DLA_CPI(t+1)
-aux_DLA_CPI_lead2(t) = aux_DLA_CPI_lead(t+1)
-aux_DLA_CPI_lead3(t) = aux_DLA_CPI_lead(t+1)
+aux_DLA_CPI_lead = DLA_CPI(+1)
+aux_DLA_CPI_lead2 = aux_DLA_CPI_lead(+1)
 aux_RES_RS_lag = RES_RS(-1)
 
 \end{verbatim}
 
-\section{Reduce the system again.}
+\section{Replace by \_mk and pk.}
 \begin{verbatim}
 
-L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RS(+1) - aux_DLA_CPI_lead(t+1)) + RES_L_GDP_GAP;
-DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
-RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*aux_DLA_CPI_lead2(t+1) + g3*L_GDP_GAP) + RES_RS;
-RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
-RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
-RES_RS  = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
-aux_DLA_CPI_lead(t) = DLA_CPI(t+1)
-aux_DLA_CPI_lead2(t) = aux_DLA_CPI_lead(t+1)
-aux_RES_RS_lag = RES_RS(-1)
+L_GDP_GAP = (1-b1)*L_GDP_GAP_p1 + b1*L_GDP_GAP_m1 - b4*(RR_GAP_p1) + RES_L_GDP_GAP;
+DLA_CPI = a1*DLA_CPI_m1 + (1-a1)*DLA_CPI_p1 + a2*L_GDP_GAP + RES_DLA_CPI;
+RS = g1*RS_m1 + (1-g1)*(DLA_CPI_p1 + g2*aux_DLA_CPI_lead_p1 + g3*L_GDP_GAP) + RES_RS;
+RR_GAP = RS - DLA_CPI_p1;
+RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP;
+RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI;
+RES_RS = rho_rs*RES_RS_m1 + rho_rs2*aux_RES_RS_lag_m1 + SHK_RS;
+aux_DLA_CPI_lead = DLA_CPI_p1
+aux_DLA_CPI_lead2 = aux_DLA_CPI_lead_p1
+aux_RES_RS_lag = RES_RS_m1
 
 10 equations on 10 variables
 
@@ -112,49 +122,299 @@ List of contempotaneous variables
 L_GDP_GAP
 DLA_CPI
 RS
+RR_GAP
 RES_L_GDP_GAP
 RES_DLA_CPI
 RES_RS
 aux_DLA_CPI_lead
 aux_DLA_CPI_lead2
-aux_DLA_CPI_lead3
 aux_RES_RS_lag
 
-List of lagged variables 
-L_GDP_GAP_m1
-DLA_CPI_m1
-RS_m1
-RES_L_GDP_GAP_m1
-RES_DLA_CPI_m1
-RES_RS_m1
-aux_DLA_CPI_lead_m1
-aux_DLA_CPI_lead2_m1
-aux_DLA_CPI_lead3_m1
-aux_RES_RS_lag_m1
+The order of the variables should be
+forward_looking = 
+L_GDP_GA
+DLA_CPI
+RS
+aux_DLA_CPI_lead
+aux_DLA_CPI_lead2
 
-List of forward variables 
-L_GDP_GAP_p1
-DLA_CPI_p1
-RS_p1
-RES_L_GDP_GAP_p1
-RES_DLA_CPI_p1
-RES_RS_p1
-aux_DLA_CPI_lead_p1
-aux_DLA_CPI_lead2_p1
-aux_DLA_CPI_lead3_p1
-aux_RES_RS_lag_p1
 
-Final set of equations:
-0 = (1-b1)*L_GDP_GAP_p1 + b1*L_GDP_GAP_m1 - b4*(RS_p1 - aux_DLA_CPI_lead2) + RES_L_GDP_GAP -L_GDP_GAP;
-0 = a1*DLA_CPI_m1 + (1-a1)*DLA_CPI_p1 + a2*L_GDP_GAP + RES_DLA_CPI -DLA_CPI;
-0 = g1*RS_m1 + (1-g1)*(DLA_CPI_p1 + g2*aux_DLA_CPI_lead3 + g3*L_GDP_GAP) + RES_RS -RS ;
-0 = RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
-0 = rho_DLA_CPI*RES_DLA_CPI_m1 + SHK_DLA_CPI - RES_DLA_CPI;
-0 = rho_rs*RES_RS_m1 + rho_rs2*aux_RES_RS_lag_m1 + SHK_RS - RES_RS;
-0 = DLA_CPI_p1 - aux_DLA_CPI_lead
-0 = aux_DLA_CPI_lead_p1 - aux_DLA_CPI_lead2
-0 = aux_DLA_CPI_lead2_p1 - aux_DLA_CPI_lead3
-0 = RES_RS_m1 - aux_RES_RS_lag 
+backward_looking_list
+RES_L_GDP_GAP
+RES_DLA_CPI
+RES_RS
+aux_RES_RS_lag
+
+exo_var_list 
+SHK_L_GDP_GAP
+SHK_DLA_CPI
+SHK_RS 
+
+\end{verbatim}
+
+\section{How to clasify variables }
+
+model;
+
+y = a{*}y(-1) + b{*}y(+2) - c{*}w(+1) + zy;
+
+x = alpha{*}x(+1) + beta{*}y + zx;
+
+w = x(+1) - zw;
+
+zy = rhozy{*}zy(-1) + shk\_zy;
+
+zx = rhozx{*}zx(-1) + shk\_zx;
+
+zw = rhozw{*}zw(-1) + rhozw{*}zw(-2) + shk\_zw;
+
+end;
+
+parsed model
+
+0 = a{*}y\_m1 + b{*}aux\_y\_lead\_p1 - c{*}w\_p1 + zy-y;
+
+0 = alpha{*}x\_1 + beta{*}y + zx -x;
+
+0 = x\_p1 - zw-w;
+
+0 = rhozy{*}zy\_m1 + shk\_zy -zy;
+
+0 = rhozx{*}zx\_m1 + shk\_zx -zx;
+
+0 = rhozw{*}zw\_m1 + rhozw1{*}aux\_zw\_lag\_m1 + shk\_zw-zw;
+
+0 = -aux\_zw\_lag + zw\_m1; 
+
+0 = -aux\_y\_lead + y\_p1; 
+
+Variables initial order y,w, x, zy, zx, zw, aux\_zw\_lag, aux\_y\_lead,
+
+\[
+A=\left[\begin{array}{cccccccc}
+b & -c & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & \alpha & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 1 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+1 & 0 & 0 & 0 & 0 & 0 & 0 & 0
+\end{array}\right];B=\left[\begin{array}{cccccccc}
+-1 & 0 & 0 & 1 & 0 & 0 & 0 & 0\\
+\beta & -1 & 0 & 0 & 1 & 0 & 0 & 0\\
+0 & -1 & 0 & 0 & 0 & -1 & 0 & 0\\
+0 & 0 & 0 & -1 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & -1 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & -1 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & -1 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & -1
+\end{array}\right];C=\left[\begin{array}{cccccccc}
+a & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & \rho_{zy} & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & \rho_{zx} & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & \rho_{zw} & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 1 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0
+\end{array}\right];
+\]
+
+\[
+D=\left[\begin{array}{ccc}
+0 & 0 & 0\\
+0 & 0 & 0\\
+0 & 0 & 0\\
+1 & 0 & 0\\
+0 & 1 & 0\\
+0 & 0 & 1\\
+0 & 0 & 0\\
+0 & 0 & 0
+\end{array}\right]
+\]
+
+How to order the variables: 
+
+\textbf{Backward looking exogenous variables:}
+
+All columns in A for these variables are zero, and
+
+All columns of other variables on these variables are zero in B and
+C. 
+
+\textbf{Backward looking endogenous variables:}
+
+All columns in A for those variables are zero.
+
+\textbf{Forward looking variables:}
+
+All columns in C for those variables are zero.
+
+\textbf{Static variables: }
+
+All columns in A, B for those variables are zero.
+
+The idea is then 
+
+1 ) Eliminate static variables by substituting out them: 
+
+2) On the remaining variables order them as: backward looking exogenous
+states zy, zx, zw follow by forward/backward endogenous variables
+y,w, x.
+
+3) Order equations for the backward exogenous variables first. In
+this case, we don;t have the other equations variables in any way.
+Just move the equations for the exogenous variables first. 
+
+\section{Jacoobians of the ordered equations and variables}
+
+$x_{t}=\left(mix_{t},back_{t}\right)$,$eps_{t}$=exo\_var\_list
+
+\[
+A=\frac{\partial F}{\partial x_{t+1}}
+\]
+
+\[
+B=\frac{\partial F}{\partial x_{t}}
+\]
+
+\[
+C=\frac{\partial F}{\partial x_{t-1}}
+\]
+
+\[
+D=\frac{\partial F}{\partial\epsilon_{t}}
+\]
+
+
+\section{Build the complete state space }
+
+\subsection{elements}
+
+The dyn files has sections
+\begin{verbatim}
+varexo_trends
+SHK_L_GDP_TREND,
+SHK_G_TREND,
+SHP_PI_TREND,
+SHK_RS_TREND,
+SHK_RR_TREND
+;
+trends_vars
+L_GDP_TREND,
+PI_TREND,
+RS_TREND,
+RR_TREND,
+G_TREND
+;
+trend_model;
+L_GDP_TREND = L_GDP_TREND(-1) + G_TREND(-1) + SHK_L_GDP_TREND;
+G_TREND = G_TREND(-1) + SHK_G_TREND;
+PI_TREND = PI_TREND(-1) + SHP_PI_TREND;
+RS_TREND = RR_TREND + PI_TREND;
+RR_TREND = RR_TREND(-1) + SHK_RR_TREND;
+end;
+varobs
+L_GDP_OBS
+DLA_CPI_OBS
+PI_TREND_OBS
+RS_OBS
+;
+measument_equations;
+L_GDP_OBS = L_GDP_TREND + L_GDP_GAP;
+DLA_CPI_OBS = DLA_CPI + PI_TREND;
+PI_TREND_OBS = PI_TREND;
+RS_OBS = RS_TREND + RS;
+end;
+\end{verbatim}
+In this section you have defined: The list of trends in trends\_vars,
+the trend\_model, and the varexo\_trends that are the list of shocks
+to the stochastic trends. You also have varobs with the list of observable
+variables and measument\_equations; end; that links how observable
+variables are related with the statee vector. 
+
+\subsection{Building the state space}
+
+The SPD algorithm gives you the solution 
+
+\[
+y_{t}=Py_{t-1}+Q\epsilon_{t}
+\]
+
+\[
+\epsilon_{t}\sim N(0,\Sigma)
+\]
+this soluction should be augmented to include the trends and the link
+with the observable variables. 
+
+Let's define an augmented state vector $y_{t}^{a}=$$\left(y_{t},trends_{t}\right).$
+The the augmented state-space would be
+
+\[
+y_{t}^{a}=\left[\begin{array}{cc}
+P & 0\\
+0 & P_{trends}
+\end{array}\right]y_{t-1}^{a}+\left[\begin{array}{cc}
+Q & 0\\
+0 & Q_{trends}
+\end{array}\right]\epsilon_{t}^{a}
+\]
+shocks $\epsilon_{t}^{a}$ include shocks to trends. 
+
+The measurement equation would be 
+
+\[
+y_{t}^{obs}=\Omega y_{t}^{a}+H\xi_{t}
+\]
+\[
+\xi_{t}\sim N(0,I)
+\]
+ and H is a diagonal matrix with measurement errors standard errors.
+$\Omega$ is the measurement matrix/observation matrix an relects
+the relationships presented in measument\_equations. 
+
+\subsection{How to build $Q_{trends}$, {\normalsize\textmd{$\Sigma$ and P\_trends,$\Omega$? }}}
+
+If $trend_{t}$is a vector with L\_GDP\_TREND, PI\_TREND,RS\_TREND,RR\_TREND,G\_TREND
+and then the parsed 
+\begin{verbatim}
+L_GDP_TREND = L_GDP_TREND_m1 + G_TREND_m1 + SHK_L_GDP_TREND;
+G_TREND = G_TREND_m1 + SHK_G_TREND;
+PI_TREND = PI_TREND_m1 + SHP_PI_TREND;
+RS_TREND = RR_TREND + PI_TREND;
+RR_TREND = RR_TREND_m1 + SHK_RR_TREND;
+
+the P_trend is the derivarive of the RHS of each equation with respect to _m coefficients
+
+\end{verbatim}
+\[
+trend_{t}=P_{trend}trend_{t-1}=\left[\begin{array}{cccccc}
+1 & 0 & 0 & 0 & 0 & 1\\
+0 & 0 & 0 & 0 & 0 & 1\\
+0 & 0 & 1 & 0 & 0 & 0\\
+0 & 1 & 0 & 0 & 1 & 0\\
+0 & 0 & 0 & 1 & 0 & 0
+\end{array}\right]trend_{t-1}
+\]
+
+\[
+Q_{trends}=\text{diag}\left(\sigma_{trend1},\dots,\sigma_{trendx}\right)
+\]
+
+\[
+\Sigma=\text{diag}\left(\sigma_{sh1},\dots,\sigma_{shx}\right)
+\]
+
+\begin{itemize}
+\item P\_trend: Could depend on parameters also.
+\item The vector of parameters (full) should include sigma's for shocks
+(place holders), parameters for trends.
+\end{itemize}
+SImilarly $\Omega$ is the derivative (jacobbian) of the observation
+measument\_equations with respect to $y_{t}^{obs}$
+\begin{verbatim}
+
 \end{verbatim}
 
 \end{document}
