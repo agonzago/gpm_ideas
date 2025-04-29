@@ -470,42 +470,22 @@ class KalmanFilter:
 
 # --- Simulation Function ---
 
-# Decorator updated with static_argnames
-@jax.jit(static_argnames=('num_steps',))
-def simulate_state_space(
-    P_aug: ArrayLike,      # Transition matrix T
-    R_aug: ArrayLike,      # Shock transformation matrix R (such that R@R.T = Q)
-    Omega: ArrayLike,      # Observation matrix C
-    H_obs: ArrayLike,      # Observation noise covariance H
-    init_x: ArrayLike,     # Initial state mean x0
-    init_P: ArrayLike,     # Initial state covariance P0
+# Define the function WITHOUT the decorator
+def _simulate_state_space_impl( # Use an internal name
+    P_aug: ArrayLike,
+    R_aug: ArrayLike,
+    Omega: ArrayLike,
+    H_obs: ArrayLike,
+    init_x: ArrayLike,
+    init_P: ArrayLike,
     key: jax.random.PRNGKey,
-    num_steps: int # This argument is now static for JIT
+    num_steps: int
 ) -> Tuple[jax.Array, jax.Array]:
     """
-    Simulates data from a linear Gaussian state-space model.
-
-    Model:
-        x_t = P_aug @ x_{t-1} + R_aug @ epsilon_t,  epsilon_t ~ N(0, I)
-        y_t = Omega @ x_t + eta_t,            eta_t ~ N(0, H_obs)
-
-    Args:
-        P_aug: Augmented transition matrix [n_aug, n_aug].
-        R_aug: Augmented shock transformation matrix [n_aug, n_aug_shocks].
-               Assumes R_aug @ R_aug.T is state noise covariance Q.
-        Omega: Observation matrix [n_obs, n_aug].
-        H_obs: Observation noise covariance [n_obs, n_obs].
-        init_x: Initial state mean [n_aug].
-        init_P: Initial state covariance [n_aug, n_aug]. Used to draw x0.
-        key: JAX random key.
-        num_steps: Number of time steps to simulate (T). Treated as static for JIT.
-
-    Returns:
-        A tuple containing:
-            - states: Simulated states [num_steps, n_aug].
-            - observations: Simulated observations [num_steps, n_obs].
+    Simulates data from a linear Gaussian state-space model. (Internal Implementation)
+    ... (rest of docstring) ...
     """
-    # --- The rest of the function body remains the same ---
+    # --- Function body remains exactly the same ---
     P_aug_jax = jnp.asarray(P_aug)
     R_aug_jax = jnp.asarray(R_aug)
     Omega_jax = jnp.asarray(Omega)
@@ -521,48 +501,37 @@ def simulate_state_space(
 
     # --- Initial State Simulation ---
     try:
-        # Add jitter before Cholesky for robustness
         init_P_reg = init_P_jax + _MACHINE_EPSILON * jnp.eye(n_aug)
         L0 = jnp.linalg.cholesky(init_P_reg)
         z0 = random.normal(key_init, (n_aug,))
         x0 = init_x_jax + L0 @ z0
-    except ValueError:
+    except ValueError: # Use appropriate exception for old JAX if needed
         print("Warning: Cholesky failed for init_P in simulation. Using init_x mean.")
-        x0 = init_x_jax # Fallback to mean if P0 not PSD
+        x0 = init_x_jax
 
     # --- Generate Noise ---
-    # State noise epsilon ~ N(0, I)
-    # JIT now knows the concrete value of num_steps here
     state_shocks_std_normal = random.normal(key_state_noise, (num_steps, n_aug_shocks))
-
-    # Observation noise eta ~ N(0, H_obs)
     try:
-        # Add jitter for mvn robustness
         H_obs_reg = H_obs_jax + _MACHINE_EPSILON * jnp.eye(n_obs)
-        # JIT now knows the concrete value of num_steps here
         obs_noise = random.multivariate_normal(
             key_obs_noise, jnp.zeros(n_obs), H_obs_reg, shape=(num_steps,)
         )
-    except Exception as e:
+    except Exception as e: # Use appropriate exception for old JAX if needed
         print(f"Error simulating obs noise with mvn in simulate_state_space: {e}. Using zeros.")
         obs_noise = jnp.zeros((num_steps, n_obs))
 
-
     # --- Simulation Loop (using lax.scan) ---
     def simulation_step(x_prev, noise_t):
-        eps_t, eta_t = noise_t # eps_t are standard normal shocks
-        # State equation: x_t = P @ x_{t-1} + R @ eps_t
+        eps_t, eta_t = noise_t
         x_curr = P_aug_jax @ x_prev + R_aug_jax @ eps_t
-        # Observation equation: y_t = Omega @ x_t + eta_t
         y_curr = Omega_jax @ x_curr + eta_t
         return x_curr, (x_curr, y_curr)
 
-    # Combine noises for scan sequence: ((eps_1, eta_1), (eps_2, eta_2), ...)
     combined_noise = (state_shocks_std_normal, obs_noise)
-    # Run scan
     final_state, (states, observations) = lax.scan(simulation_step, x0, combined_noise)
 
     return states, observations
 
-# --- END OF FILE (related part) ---
+# --- Apply JIT *after* definition, exporting the desired name ---
+simulate_state_space = jax.jit(_simulate_state_space_impl, static_argnames=('num_steps',))
 

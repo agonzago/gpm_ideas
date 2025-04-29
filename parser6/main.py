@@ -1,7 +1,7 @@
 # --- START OF main_script.py ---
 import os
 print("Attempting to force JAX to use CPU...")
-os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['JAX_PLATFORMS'] = 'gpu'
 # Or try: os.environ['JAX_PLATFORM_NAME'] = 'cpu' # Alternate env var name
 print(f"JAX_PLATFORMS set to: {os.environ.get('JAX_PLATFORMS')}")
 
