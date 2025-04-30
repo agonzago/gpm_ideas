@@ -1,10 +1,17 @@
 # --- START OF main_script.py ---
 import os
-print("Attempting to force JAX to use CPU...")
+print("Attempting to force JAX to use CPU...") # You might remove this forcing later
 os.environ['JAX_PLATFORMS'] = 'gpu'
-# Or try: os.environ['JAX_PLATFORM_NAME'] = 'cpu' # Alternate env var name
 print(f"JAX_PLATFORMS set to: {os.environ.get('JAX_PLATFORMS')}")
 
+# --- Add this line ---
+import jax
+jax.config.update("jax_enable_x64", True)
+# --------------------
+
+print(f"JAX version: {jax.__version__}") # Good to keep checking version
+# Verify x64 is enabled (Optional check)
+print(f"JAX float64 enabled: {jax.config.jax_enable_x64}")
 
 import numpy as onp # Use onp for plotting and standard numpy operations
 import matplotlib.pyplot as plt

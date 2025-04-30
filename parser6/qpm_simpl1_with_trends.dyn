@@ -114,6 +114,10 @@ trend_shocks;
     var SHK_RR_TREND; stderr 1;
 end;
 
-
+shocks
+    var SHK_L_GDP_GAP  ; stderr 1;   // Output gap shock
+    SHK_DLA_CPI ; stderr 1; 
+    SHK_RS ; stderr 1;             // Foreign interest rate shock
+;
 
 stoch_simul(order=1, irf=40);

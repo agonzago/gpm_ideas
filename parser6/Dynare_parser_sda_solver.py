@@ -240,22 +240,402 @@ def extract_model_equations(model_string):
 
     return processed_equations
 
+# def parse_lambdify_and_order_model(model_string):
+#     """
+#     Parses the stationary part of the model, handles leads/lags,
+#     orders variables/equations, and returns lambdified matrices.
+#     """
+#     print("--- Parsing Stationary Model Declarations ---")
+#     declared_vars, shock_names, param_names, param_assignments = extract_declarations(model_string)
+
+#     if not declared_vars: raise ValueError("No variables declared in 'var' block.")
+#     if not shock_names: raise ValueError("No shocks declared in 'varexo' block.")
+#     if not param_names: raise ValueError("No parameters declared in 'parameters' block.")
+
+#     print(f"Declared Variables: {declared_vars}")
+#     print(f"Declared Shocks: {shock_names}")
+#     print(f"Declared Parameters: {param_names}")
+#     print(f"Parsed Parameter Assignments: {param_assignments}")
+
+#     print("\n--- Parsing Stationary Model Equations ---")
+#     raw_equations = extract_model_equations(model_string)
+#     print(f"Found {len(raw_equations)} equations in model block.")
+
+#     # --- Handling Leads/Lags & Auxiliaries ---
+#     print("\n--- Handling Leads/Lags & Auxiliaries ---")
+#     endogenous_vars = list(declared_vars)
+#     aux_variables = OrderedDict() # Stores definition string for each aux var
+#     processed_equations = list(raw_equations)
+#     var_time_regex = re.compile(r'\b([a-zA-Z_]\w*)\s*\(\s*([+-]?\d+)\s*\)')
+
+#     eq_idx = 0
+#     while eq_idx < len(processed_equations):
+#         eq = processed_equations[eq_idx]
+#         eq_idx += 1
+#         modified_eq = eq
+#         matches = list(var_time_regex.finditer(eq))
+
+#         # Process matches in reverse order to avoid index issues
+#         for match in reversed(matches):
+#             base_name = match.group(1)
+#             time_shift = int(match.group(2))
+
+#             # Skip if not an endogenous variable or already processed aux
+#             if base_name not in endogenous_vars and base_name not in aux_variables:
+#                 continue
+
+#             # --- Handle Leads > 1 ---
+#             if time_shift > 1:
+#                 aux_needed_defs = []
+#                 for k in range(1, time_shift):
+#                     aux_name = f"aux_{base_name}_lead_p{k}"
+#                     if aux_name not in aux_variables:
+#                         prev_var_for_def = base_name if k == 1 else f"aux_{base_name}_lead_p{k-1}"
+#                         def_eq_str = f"{aux_name} - {prev_var_for_def}(+1)"
+#                         aux_variables[aux_name] = def_eq_str
+#                         aux_needed_defs.append(def_eq_str)
+#                         if aux_name not in endogenous_vars:
+#                             endogenous_vars.append(aux_name)
+
+#                 target_aux = f"aux_{base_name}_lead_p{time_shift-1}"
+#                 replacement = f"{target_aux}(+1)"
+#                 start, end = match.span()
+#                 modified_eq = modified_eq[:start] + replacement + modified_eq[end:]
+
+#                 for def_eq in aux_needed_defs:
+#                     if def_eq not in processed_equations:
+#                         # print(f"  Adding aux lead def: {def_eq} = 0")
+#                         processed_equations.append(def_eq)
+
+#             # --- Handle Lags < -1 ---
+#             elif time_shift < -1:
+#                 aux_needed_defs = []
+#                 for k in range(1, abs(time_shift)):
+#                     aux_name = f"aux_{base_name}_lag_m{k}"
+#                     if aux_name not in aux_variables:
+#                         prev_var_for_def = base_name if k == 1 else f"aux_{base_name}_lag_m{k-1}"
+#                         def_eq_str = f"{aux_name} - {prev_var_for_def}(-1)"
+#                         aux_variables[aux_name] = def_eq_str
+#                         aux_needed_defs.append(def_eq_str)
+#                         if aux_name not in endogenous_vars:
+#                             endogenous_vars.append(aux_name)
+
+#                 target_aux = f"aux_{base_name}_lag_m{abs(time_shift)-1}"
+#                 replacement = f"{target_aux}(-1)"
+#                 start, end = match.span()
+#                 modified_eq = modified_eq[:start] + replacement + modified_eq[end:]
+
+#                 for def_eq in aux_needed_defs:
+#                     if def_eq not in processed_equations:
+#                         # print(f"  Adding aux lag def: {def_eq} = 0")
+#                         processed_equations.append(def_eq)
+
+#         if modified_eq != eq:
+#             processed_equations[eq_idx - 1] = modified_eq
+#             # print(f"  Updated Eq {eq_idx-1}: {modified_eq}")
+
+#     initial_vars_ordered = list(endogenous_vars)
+#     num_vars = len(initial_vars_ordered)
+#     num_eq = len(processed_equations)
+#     num_shocks = len(shock_names)
+
+#     print(f"Total variables after processing leads/lags ({num_vars}): {initial_vars_ordered}")
+#     # print(f"Total equations after processing leads/lags ({num_eq}):")
+#     # for i, eq in enumerate(processed_equations): print(f"  Eq {i}: {eq}")
+
+#     if num_vars != num_eq:
+#         # Provide more context in the error message
+#         print("\nError Details:")
+#         print(f"  Original Declared Vars: {declared_vars}")
+#         print(f"  Auxiliary Vars Added: {list(aux_variables.keys())}")
+#         print(f"  Final Variable List ({num_vars}): {initial_vars_ordered}")
+#         print(f"\n  Original Equations: {raw_equations}")
+#         print(f"  Auxiliary Equations Added: {list(aux_variables.values())}")
+#         print(f"  Final Equation List ({num_eq}): {processed_equations}")
+#         raise ValueError(
+#             f"Stationary model not square after processing leads/lags: {num_vars} vars vs {num_eq} eqs."
+#         )
+#     print("Stationary model is square.")
+
+#     # --- Symbolic Representation ---
+#     print("\n--- Creating Symbolic Representation (Stationary Model) ---")
+#     param_syms = {p: sympy.symbols(p) for p in param_names}
+#     shock_syms = {s: sympy.symbols(s) for s in shock_names}
+#     var_syms = {}
+#     all_syms_for_parsing = set(param_syms.values()) | set(shock_syms.values())
+#     for var in initial_vars_ordered:
+#         sym_m1 = create_timed_symbol(var, -1)
+#         sym_t  = create_timed_symbol(var, 0)
+#         sym_p1 = create_timed_symbol(var, 1)
+#         var_syms[var] = {'m1': sym_m1, 't': sym_t, 'p1': sym_p1}
+#         all_syms_for_parsing.update([sym_m1, sym_t, sym_p1])
+
+#     local_dict = {str(s): s for s in all_syms_for_parsing}
+#     local_dict.update({'log': sympy.log, 'exp': sympy.exp, 'sqrt': sympy.sqrt, 'abs': sympy.Abs})
+
+#     from sympy.parsing.sympy_parser import (parse_expr, standard_transformations,
+#                                           implicit_multiplication_application, rationalize)
+#     transformations = (standard_transformations + (implicit_multiplication_application, rationalize))
+
+#     sym_equations = []
+#     print("Parsing stationary equations into symbolic form...")
+#     for i, eq_str in enumerate(processed_equations):
+#         eq_str_sym = eq_str
+#         def replace_var_time(match):
+#             base_name, time_shift_str = match.groups()
+#             time_shift = int(time_shift_str)
+#             if base_name in shock_names:
+#                 if time_shift == 0: return str(shock_syms[base_name])
+#                 else: raise ValueError(f"Shock {base_name}({time_shift}) invalid.")
+#             elif base_name in var_syms:
+#                 if time_shift == -1: return str(var_syms[base_name]['m1'])
+#                 if time_shift == 0:  return str(var_syms[base_name]['t'])
+#                 if time_shift == 1:  return str(var_syms[base_name]['p1'])
+#                 raise ValueError(f"Unexpected time shift {time_shift} for {base_name} after aux processing.")
+#             elif base_name in param_syms:
+#                 raise ValueError(f"Parameter {base_name}({time_shift}) invalid.")
+#             elif base_name in local_dict: # e.g. log, exp
+#                 return match.group(0)
+#             else: # Unknown symbol - add dynamically if needed, but warn
+#                 # print(f"Warning: Symbol '{base_name}' with time shift {time_shift} in eq {i} ('{eq_str}') is undeclared. Treating symbolically.")
+#                 if base_name not in local_dict: local_dict[base_name] = sympy.symbols(base_name)
+#                 timed_sym_str = str(create_timed_symbol(base_name, time_shift))
+#                 if timed_sym_str not in local_dict: local_dict[timed_sym_str] = sympy.symbols(timed_sym_str)
+#                 return timed_sym_str
+
+#         eq_str_sym = var_time_regex.sub(replace_var_time, eq_str_sym)
+
+#         # Replace remaining base names (implicitly time t)
+#         all_known_base_names = sorted(list(var_syms.keys()) + param_names + shock_names, key=len, reverse=True)
+#         for name in all_known_base_names:
+#             pattern = r'\b' + re.escape(name) + r'\b'
+#             if name in var_syms: replacement = str(var_syms[name]['t'])
+#             elif name in param_syms: replacement = str(param_syms[name])
+#             elif name in shock_names: replacement = str(shock_syms[name])
+#             else: continue
+#             eq_str_sym = re.sub(pattern, replacement, eq_str_sym)
+
+#         try:
+#             # Check for remaining undeclared symbols before parsing
+#             current_symbols = set(re.findall(r'\b([a-zA-Z_]\w*)\b', eq_str_sym))
+#             known_keys = set(local_dict.keys()) | {'log', 'exp', 'sqrt', 'abs'}
+#             unknown_symbols = {s for s in current_symbols if s not in known_keys and not re.fullmatch(r'[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?', s)}
+
+#             if unknown_symbols:
+#                 print(f"Warning: Potential undeclared symbols found in eq {i} ('{eq_str_sym}'): {unknown_symbols}. Adding to local_dict.")
+#                 for sym_str in unknown_symbols:
+#                     if sym_str not in local_dict: local_dict[sym_str] = sympy.symbols(sym_str)
+
+#             sym_eq = parse_expr(eq_str_sym, local_dict=local_dict, transformations=transformations)
+#             sym_equations.append(sym_eq)
+#         except Exception as e:
+#             print(f"\nError parsing stationary equation {i}: '{eq_str}' -> '{eq_str_sym}'")
+#             print(f"Local dict keys: {sorted(local_dict.keys())}")
+#             print(f"Sympy error: {e}")
+#             raise
+
+#     print("Symbolic parsing completed.")
+
+#     # --- Generate Initial Symbolic Matrices A P^2 + B P + C = 0, D for shocks ---
+#     print("\n--- Generating Initial Symbolic Matrices (A, B, C, D) ---")
+#     # Here A coeffs y(t+1), B coeffs y(t), C coeffs y(t-1)
+#     # This matches the convention needed for the `solve_quadratic_matrix_equation`
+#     # Note the definition change: A = dF/dy_{t+1}, B = dF/dy_t, C = dF/dy_{t-1}
+#     sympy_A_quad = sympy.zeros(num_eq, num_vars) # Coeffs of y(t+1)
+#     sympy_B_quad = sympy.zeros(num_eq, num_vars) # Coeffs of y(t)
+#     sympy_C_quad = sympy.zeros(num_eq, num_vars) # Coeffs of y(t-1)
+#     sympy_D_quad = sympy.zeros(num_eq, num_shocks) # Coeffs of e(t) (multiplied by -1 for Q calc)
+
+#     var_p1_syms = [var_syms[v]['p1'] for v in initial_vars_ordered]
+#     var_t_syms  = [var_syms[v]['t']  for v in initial_vars_ordered]
+#     var_m1_syms = [var_syms[v]['m1'] for v in initial_vars_ordered]
+#     shock_t_syms = [shock_syms[s] for s in shock_names]
+
+#     for i, eq in enumerate(sym_equations):
+#         # Use Jacobian calculation for robustness with non-linear terms (though model is linear)
+#         for j, var_p1 in enumerate(var_p1_syms): sympy_A_quad[i, j] = sympy.diff(eq, var_p1)
+#         for j, var_t  in enumerate(var_t_syms):  sympy_B_quad[i, j] = sympy.diff(eq, var_t)
+#         for j, var_m1 in enumerate(var_m1_syms): sympy_C_quad[i, j] = sympy.diff(eq, var_m1)
+#         for k, shk_t in enumerate(shock_t_syms): sympy_D_quad[i, k] = -sympy.diff(eq, shk_t) # Note the minus sign
+
+#     initial_info = {
+#         'A': copy.deepcopy(sympy_C_quad), # Store based on y_t = P y_{t-1} + Q e_t form
+#         'B': copy.deepcopy(sympy_B_quad),
+#         'C': copy.deepcopy(sympy_A_quad),
+#         'D': copy.deepcopy(sympy_D_quad),
+#         'vars': list(initial_vars_ordered),
+#         'eqs': list(processed_equations)
+#     }
+#     print("Symbolic matrices A, B, C, D generated (for quadratic solver).")
+
+#     # --- Classify Variables (Simplified for Ordering) ---
+#     print("\n--- Classifying Variables for Ordering (Stationary Model) ---")
+#     # Heuristic: RES_ and aux_lag are backward, others are forward/both
+#     backward_exo_vars = []
+#     forward_backward_endo_vars = []
+#     static_endo_vars = [] # Variables appearing only at time t
+
+#     potential_backward = [v for v in initial_vars_ordered if v.startswith("RES_") or (v.startswith("aux_") and "_lag_" in v)]
+#     remaining_vars = [v for v in initial_vars_ordered if v not in potential_backward]
+
+#     # Check matrix columns for actual dependencies
+#     for var in potential_backward:
+#         j = initial_vars_ordered.index(var)
+#         # Check if it has a lead dependency (appears in A_quad)
+#         has_lead = not sympy_A_quad.col(j).is_zero_matrix
+#         if has_lead:
+#             # If an RES_ or aux_lag var has a lead, it's not purely backward
+#             # This might indicate a model specification issue or complex aux var interaction
+#             print(f"Warning: Potential backward var '{var}' has lead dependency. Classifying as forward/backward.")
+#             forward_backward_endo_vars.append(var)
+#         else:
+#             backward_exo_vars.append(var)
+
+#     for var in remaining_vars:
+#          j = initial_vars_ordered.index(var)
+#          has_lag = not sympy_C_quad.col(j).is_zero_matrix # Appears with t-1?
+#          has_lead = not sympy_A_quad.col(j).is_zero_matrix # Appears with t+1?
+#          if has_lag or has_lead:
+#              forward_backward_endo_vars.append(var)
+#          else:
+#              # Only appears at time t (in B_quad)
+#              static_endo_vars.append(var)
+
+#     print("\nCategorized Variables:")
+#     print(f"  Backward/Exo Group: {backward_exo_vars}")
+#     print(f"  Forward/Backward Endo: {forward_backward_endo_vars}")
+#     print(f"  Static Endo: {static_endo_vars}")
+
+#     # --- Determine New Variable Order ---
+#     ordered_vars = backward_exo_vars + forward_backward_endo_vars + static_endo_vars
+#     if len(ordered_vars) != len(initial_vars_ordered) or set(ordered_vars) != set(initial_vars_ordered):
+#         raise ValueError("Variable reordering failed.")
+#     var_perm_indices = [initial_vars_ordered.index(v) for v in ordered_vars]
+#     print(f"\nNew Variable Order ({len(ordered_vars)}): {ordered_vars}")
+
+#     # --- Determine New Equation Order (Simple heuristic: match blocks) ---
+#     # Find defining equations for backward vars first
+#     eq_perm_indices = []
+#     used_eq_indices = set()
+#     # Find defining eq for each backward var (heuristic: eq where B[i,j] != 0 and C[i,j] == 0, maybe A[i,j] != 0)
+#     # Simpler: Use aux definitions and RES definitions
+#     aux_def_patterns = {name: re.compile(fr"^\s*{name}\s*-\s*{base_name_from_aux(name)}\s*\(\s*-1\s*\)\s*$") for name in aux_variables if "_lag_" in name}
+#     res_def_patterns = {name: re.compile(fr"^\s*{name}\s*-\s*.*{name}\s*\(\s*-1\s*\).*") for name in initial_vars_ordered if name.startswith("RES_")}
+
+#     assigned_eq_for_var = {}
+
+#     # Assign defining equations for aux lags first
+#     for aux_var in [v for v in backward_exo_vars if v.startswith("aux_")]:
+#         if aux_var in assigned_eq_for_var: continue
+#         pattern = aux_def_patterns.get(aux_var)
+#         if pattern:
+#             found = False
+#             for i, eq_str in enumerate(processed_equations):
+#                 if i not in used_eq_indices and pattern.match(eq_str.replace(" ","")):
+#                     eq_perm_indices.append(i)
+#                     used_eq_indices.add(i)
+#                     assigned_eq_for_var[aux_var] = i
+#                     found = True
+#                     break
+#             # if not found: print(f"Warning: Could not find unique defining eq for aux lag '{aux_var}'")
+
+#     # Assign defining equations for RES vars
+#     for res_var in [v for v in backward_exo_vars if v.startswith("RES_")]:
+#          if res_var in assigned_eq_for_var: continue
+#          pattern = res_def_patterns.get(res_var)
+#          if pattern:
+#             found = False
+#             potential_matches = []
+#             for i, eq_str in enumerate(processed_equations):
+#                  if i not in used_eq_indices and pattern.match(eq_str):
+#                      potential_matches.append(i)
+#             if len(potential_matches) == 1:
+#                  i = potential_matches[0]
+#                  eq_perm_indices.append(i)
+#                  used_eq_indices.add(i)
+#                  assigned_eq_for_var[res_var] = i
+#                  found = True
+#             # elif len(potential_matches) > 1:
+#                  # print(f"Warning: Found multiple potential defining eqs for RES var '{res_var}': {potential_matches}")
+#             # else:
+#                  # print(f"Warning: Could not find defining eq for RES var '{res_var}'")
+
+#     # Assign remaining equations heuristically or just sequentially
+#     remaining_eq_indices = [i for i in range(num_eq) if i not in used_eq_indices]
+#     eq_perm_indices.extend(remaining_eq_indices)
+
+#     if len(eq_perm_indices) != num_eq:
+#         raise ValueError(f"Equation permutation construction failed. Length mismatch: {len(eq_perm_indices)} vs {num_eq}")
+#     if len(set(eq_perm_indices)) != num_eq:
+#          raise ValueError("Equation permutation construction failed. Indices not unique.")
+
+#     print(f"\nEquation permutation indices (new row i <- old row eq_perm_indices[i]): {eq_perm_indices}")
+
+#     # --- Reorder Symbolic Matrices ---
+#     print("\n--- Reordering Symbolic Matrices (Stationary Model) ---")
+#     # Use extract based on permutations derived
+#     sympy_A_ord = sympy_A_quad.extract(eq_perm_indices, var_perm_indices)
+#     sympy_B_ord = sympy_B_quad.extract(eq_perm_indices, var_perm_indices)
+#     sympy_C_ord = sympy_C_quad.extract(eq_perm_indices, var_perm_indices)
+#     sympy_D_ord = sympy_D_quad.extract(eq_perm_indices, list(range(num_shocks))) # Rows reordered
+
+#     symbolic_matrices_ordered = {'A': sympy_A_ord, 'B': sympy_B_ord, 'C': sympy_C_ord, 'D': sympy_D_ord}
+#     print("Symbolic reordering complete.")
+
+#     # --- Lambdify ---
+#     print("\n--- Lambdifying Ordered Matrices (Stationary Model) ---")
+#     param_sym_list = [param_syms[p] for p in param_names] # Ensure consistent order
+
+#     func_A = robust_lambdify(param_sym_list, sympy_A_ord)
+#     func_B = robust_lambdify(param_sym_list, sympy_B_ord)
+#     func_C = robust_lambdify(param_sym_list, sympy_C_ord)
+#     func_D = robust_lambdify(param_sym_list, sympy_D_ord)
+#     print("Lambdification successful.")
+
+#     return (func_A, func_B, func_C, func_D,
+#             ordered_vars, shock_names, param_names, param_assignments,
+#             symbolic_matrices_ordered, initial_info)
+
+
 def parse_lambdify_and_order_model(model_string):
     """
     Parses the stationary part of the model, handles leads/lags,
     orders variables/equations, and returns lambdified matrices.
     """
     print("--- Parsing Stationary Model Declarations ---")
-    declared_vars, shock_names, param_names, param_assignments = extract_declarations(model_string)
+    # Step 1: Basic declarations (vars, varexo, parameters, initial assignments)
+    declared_vars, shock_names, param_names_declared, param_assignments_initial = extract_declarations(model_string)
 
+    # --- Step 1b: Parse stationary shock standard deviations --- ADDED ---
+    # These act as additional default parameter assignments (sigma_SHOCKNAME = value)
+    stat_stderr_params = extract_stationary_shock_stderrs(model_string) # NEW CALL
+
+    # --- Step 1c: Combine parameter information --- MODIFIED ---
+    # Start with explicitly declared parameters
+    param_names = list(param_names_declared) # Use original name for clarity
+    # Add sigma_ parameters from the shocks block if they weren't already declared
+    for p_sigma in stat_stderr_params.keys():
+        if p_sigma not in param_names:
+            print(f"   Adding inferred parameter from 'shocks;' block: {p_sigma}")
+            param_names.append(p_sigma)
+
+    # Combine assignments: initial assignments first, then update with stderr defaults
+    param_assignments = param_assignments_initial.copy()
+    param_assignments.update(stat_stderr_params) # Add/overwrite with stderr values
+
+    # --- Validation (using FINAL param_names) ---
     if not declared_vars: raise ValueError("No variables declared in 'var' block.")
     if not shock_names: raise ValueError("No shocks declared in 'varexo' block.")
-    if not param_names: raise ValueError("No parameters declared in 'parameters' block.")
+    # Allow empty parameter list if all come from assignments/stderr
+    # if not param_names: raise ValueError("No parameters declared or inferred.")
 
+    # --- Updated Print Statements ---
     print(f"Declared Variables: {declared_vars}")
-    print(f"Declared Shocks: {shock_names}")
-    print(f"Declared Parameters: {param_names}")
-    print(f"Parsed Parameter Assignments: {param_assignments}")
+    print(f"Declared Shocks (varexo): {shock_names}")
+    print(f"Declared Parameters (parameters block): {param_names_declared}")
+    print(f"Inferred Parameters (shocks stderr): {list(stat_stderr_params.keys())}")
+    print(f"==> Final Parameter List for Stationary Model: {param_names}")
+    print(f"==> Combined Initial Parameter Assignments (incl. stderr defaults): {param_assignments}")
 
     print("\n--- Parsing Stationary Model Equations ---")
     raw_equations = extract_model_equations(model_string)
@@ -596,8 +976,61 @@ def parse_lambdify_and_order_model(model_string):
             ordered_vars, shock_names, param_names, param_assignments,
             symbolic_matrices_ordered, initial_info)
 
-# --- SDA Solver and Q Computation ---
 
+
+
+def extract_stationary_shock_stderrs(model_string):
+    """
+    Extracts standard errors for stationary shocks from a 'shocks; ... end;' block.
+
+    This block is optional. If present, it allows setting default stderr values
+    for varexo variables, similar to the trend_shocks block.
+
+    Args:
+        model_string: The entire content of the .dyn file.
+
+    Returns:
+        A dictionary mapping 'sigma_SHOCKNAME' to its float stderr value.
+        Returns an empty dictionary if the block is not found or is empty.
+    """
+    stderrs = {}
+    # Pre-process comments
+    processed_content = re.sub(r'/\*.*?\*/', '', model_string, flags=re.DOTALL)
+    lines = processed_content.split('\n')
+    cleaned_lines = [re.sub(r'(//|%).*$', '', line).strip() for line in lines]
+    processed_content = " ".join(cleaned_lines)
+
+    # Find the 'shocks;' block
+    match = re.search(r'(?i)\bshocks\b\s*;(.*?)\bend\b\s*;', processed_content, re.DOTALL | re.IGNORECASE)
+    if not match:
+        # print("Info: 'shocks; ... end;' block not found (optional).") # Optional info
+        return {} # Return empty dict if block is missing
+
+    content = match.group(1)
+    # Regex to find 'var SHOCK_NAME; stderr VALUE;'
+    stderr_matches = re.finditer(r'(?i)\bvar\s+([a-zA-Z_]\w*)\s*;\s*stderr\s+([^;]+);', content)
+
+    parsed_count = 0
+    for m in stderr_matches:
+        shock_name = m.group(1)
+        stderr_val_str = m.group(2).strip()
+        try:
+            stderr_val = float(stderr_val_str)
+            # Define parameter name convention: sigma_SHOCKNAME
+            param_name = f"sigma_{shock_name}"
+            if param_name in stderrs:
+                print(f"Warning: Duplicate stderr definition for stationary shock '{shock_name}' in 'shocks;' block. Using last value: {stderr_val}")
+            stderrs[param_name] = stderr_val
+            parsed_count += 1
+        except ValueError:
+            print(f"Warning: Could not parse stderr value '{stderr_val_str}' for stationary shock '{shock_name}' in 'shocks;' block. Skipping.")
+
+    if parsed_count > 0:
+        print(f"   Parsed {parsed_count} stderr definitions from 'shocks;' block.")
+    return stderrs
+
+
+# --- SDA Solver and Q Computation ---
 def solve_quadratic_matrix_equation(A, B, C, initial_guess=None, tol=1e-12, max_iter=100, verbose=False):
     """Solves A X^2 + B X + C = 0 for X using the SDA algorithm."""
     n = A.shape[0]
