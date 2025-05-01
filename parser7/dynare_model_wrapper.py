@@ -527,21 +527,17 @@ class DynareModel:
             if len(params) != 2: raise ValueError("Normal prior needs 2 params (loc, scale)")
             return dist.Normal(loc=params[0], scale=params[1])
         elif dist_name_lower == "beta":
-            if len(params) != 2: raise ValueError("Beta prior needs 2 params (concentration1, concentration2)")
-            # Convert mean/std dev to alpha/beta if provided that way? For now, assume alpha, beta directly.
-            # alpha = ((1 - mean) / std_dev**2 - 1 / mean) * mean**2
-            # beta = alpha * (1 / mean - 1)
-            return dist.Beta(concentration1=params[0], concentration2=params[1])
+            # Corrected argument name and error message
+            if len(params) != 2: raise ValueError("Beta prior needs 2 params (concentration1, concentration0)")
+            # Numpyro uses concentration1 (alpha) and concentration0 (beta)
+            return dist.Beta(concentration1=params[0], concentration0=params[1]) # <<< CORRECTED LINE
         elif dist_name_lower == "gamma":
             if len(params) != 2: raise ValueError("Gamma prior needs 2 params (concentration, rate)")
-            # Sometimes given as mean/std dev: mean=k/theta, var=k/theta^2 => k=mean^2/var, theta=var/mean
             # Numpyro uses concentration (k, alpha) and rate (theta, beta)
             return dist.Gamma(concentration=params[0], rate=params[1])
         elif dist_name_lower == "inversegamma":
              if len(params) != 2: raise ValueError("InverseGamma prior needs 2 params (concentration, scale)")
              # Numpyro uses concentration (alpha) and scale (beta)
-             # mean = beta / (alpha - 1) for alpha > 1
-             # variance = beta^2 / ((alpha - 1)^2 * (alpha - 2)) for alpha > 2
              return dist.InverseGamma(concentration=params[0], scale=params[1])
         elif dist_name_lower == "uniform":
              if len(params) != 2: raise ValueError("Uniform prior needs 2 params (low, high)")
