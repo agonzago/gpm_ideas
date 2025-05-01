@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from jax import random
 
 # Ensure JAX is configured (can also be done inside the wrapper)
-os.environ['JAX_PLATFORMS'] = 'cpu' # Or 'gpu'
+os.environ['JAX_PLATFORMS'] = 'gpu' # Or 'gpu'
 jax.config.update("jax_enable_x64", True)
 print(f"main_script: JAX float64 enabled: {jax.config.jax_enable_x64}")
 print(f"main_script: JAX version: {jax.__version__}")
