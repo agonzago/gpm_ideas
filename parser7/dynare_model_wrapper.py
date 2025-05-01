@@ -527,24 +527,26 @@ class DynareModel:
             if len(params) != 2: raise ValueError("Normal prior needs 2 params (loc, scale)")
             return dist.Normal(loc=params[0], scale=params[1])
         elif dist_name_lower == "beta":
-            # Corrected argument name and error message
             if len(params) != 2: raise ValueError("Beta prior needs 2 params (concentration1, concentration0)")
-            # Numpyro uses concentration1 (alpha) and concentration0 (beta)
-            return dist.Beta(concentration1=params[0], concentration0=params[1]) # <<< CORRECTED LINE
+            return dist.Beta(concentration1=params[0], concentration0=params[1])
         elif dist_name_lower == "gamma":
             if len(params) != 2: raise ValueError("Gamma prior needs 2 params (concentration, rate)")
-            # Numpyro uses concentration (k, alpha) and rate (theta, beta)
             return dist.Gamma(concentration=params[0], rate=params[1])
         elif dist_name_lower == "inversegamma":
-             if len(params) != 2: raise ValueError("InverseGamma prior needs 2 params (concentration, scale)")
-             # Numpyro uses concentration (alpha) and scale (beta)
-             return dist.InverseGamma(concentration=params[0], scale=params[1])
+             # Corrected argument name and error message
+             if len(params) != 2: raise ValueError("InverseGamma prior needs 2 params (concentration, rate)")
+             # Numpyro uses concentration (alpha, shape) and rate (beta, inverse-scale)
+             return dist.InverseGamma(concentration=params[0], rate=params[1]) # <<< CORRECTED LINE
         elif dist_name_lower == "uniform":
              if len(params) != 2: raise ValueError("Uniform prior needs 2 params (low, high)")
              return dist.Uniform(low=params[0], high=params[1])
-        # Add other distributions as needed (e.g., LogNormal, HalfNormal, etc.)
+        # Add other distributions as needed (e.g., LogNormal, HalfNormal, HalfCauchy for std devs)
+        # Example: HalfCauchy is often preferred for standard deviations
+        # elif dist_name_lower == "halfcauchy":
+        #     if len(params) != 1: raise ValueError("HalfCauchy prior needs 1 param (scale)")
+        #     return dist.HalfCauchy(scale=params[0])
         else:
-            raise ValueError(f"Unsupported prior distribution name: {dist_name}")
+            raise ValueError(f"Unsupported prior distribution name: {dist_name}")    
 
     def _numpyro_model(self, ys: jax.Array, H_obs: jax.Array,
                        init_x_mean: jax.Array, init_P_cov: jax.Array,
@@ -573,7 +575,7 @@ class DynareModel:
             P_aug = solution['P_aug']
             R_aug = solution['R_aug']
             Omega_num = solution['Omega']
-        except (RuntimeError, ValueError, jax.lib.xla_client.XlaRuntimeError, onp.linalg.LinAlgError) as e:
+        except (RuntimeError, ValueError, jax.errors.ConcretizationTypeError, onp.linalg.LinAlgError) as e:
             # Handle cases where parameters lead to solver failure or invalid matrices
             # Option 1: Return very low likelihood
             print(f"Warning: Model solution failed for parameters {sampled_params}. Assigning low likelihood. Error: {e}")
@@ -601,7 +603,7 @@ class DynareModel:
             if not jnp.isfinite(log_likelihood):
                  print(f"Warning: Non-finite log-likelihood ({log_likelihood}) calculated. Assigning low likelihood.")
                  log_likelihood = -jnp.inf # Or large negative penalty
-        except (ValueError, jax.lib.xla_client.XlaRuntimeError, onp.linalg.LinAlgError) as e:
+        except (ValueError, jax.errors.ConcretizationTypeError, onp.linalg.LinAlgError) as e: 
              # Catch potential errors during filtering/likelihood calc (e.g., singular matrices)
              print(f"Warning: Kalman filter/likelihood failed for parameters {sampled_params}. Assigning low likelihood. Error: {e}")
              log_likelihood = -jnp.inf # Or large negative penalty
@@ -718,28 +720,71 @@ class DynareModel:
 
         return mcmc
 
-    def _prepare_params(self, param_dict: Dict[str, float]) -> Tuple[List[float], List[float], Dict[str, float]]:
+    # def _prepare_params(self, param_dict: Dict[str, float]) -> Tuple[List[float], List[float], Dict[str, float]]:
+    #     """
+    #     Validates and prepares parameter lists for evaluation based on the
+    #     structure discovered during __init__.
+
+    #     Args:
+    #         param_dict: Dictionary mapping parameter names to values provided by the user.
+
+    #     Returns:
+    #         A tuple containing:
+    #             - stat_args: Ordered list of float values for stationary functions.
+    #                          Uses self.param_names_stat_combined order.
+    #             - all_args: Ordered list of float values for all functions (stationary + trend + obs).
+    #                         Uses self.all_param_names order.
+    #             - shock_std_devs: Dictionary mapping ALL augmented shock names to their float std dev values.
+
+    #     Raises:
+    #         ValueError: If any required parameters (including sigma_ parameters
+    #                     for all shocks) are missing after merging with defaults.
+    #     """
+    #     eval_params = self.default_param_assignments.copy()
+    #     eval_params.update(param_dict) # User values overwrite defaults
+
+    #     # Check all parameters needed for ANY function are present
+    #     missing_all = [p for p in self.all_param_names if p not in eval_params]
+    #     if missing_all:
+    #         raise ValueError(f"Missing required parameter values for model functions: {missing_all}")
+
+    #     # Create ordered list for stationary functions (using combined list)
+    #     stat_args = []
+    #     for p_name_stat in self.param_names_stat_combined:
+    #         stat_args.append(float(eval_params[p_name_stat]))
+
+    #     # Create ordered list for all functions
+    #     all_args = [float(eval_params[p_name]) for p_name in self.all_param_names]
+
+    #     # Extract shock standard deviations for ALL augmented shocks
+    #     shock_std_devs = {}
+    #     missing_sigmas = []
+    #     for shock_name in self.aug_shocks_structure:
+    #         sigma_param_name = f"sigma_{shock_name}"
+    #         if sigma_param_name in eval_params:
+    #             shock_std_devs[shock_name] = float(eval_params[sigma_param_name])
+    #         else:
+    #             # This check is important: if sigma was needed (in all_param_names) but
+    #             # is still missing, it means no default and no user value provided.
+    #              missing_sigmas.append(sigma_param_name)
+
+    #     if missing_sigmas:
+    #         raise ValueError(
+    #             f"Missing values for required shock standard deviation parameters: {missing_sigmas}. "
+    #             f"Ensure 'sigma_SHOCKNAME' is defined (e.g., in 'shocks;' or 'trend_shocks;' stderr blocks) "
+    #             f"or provided explicitly. All shocks: {self.aug_shocks_structure}"
+    #         )
+
+    #     return stat_args, all_args, shock_std_devs
+
+    def _prepare_params(self, param_dict: Dict[str, float]) -> Tuple[List[Any], List[Any], Dict[str, Any]]: # Return type changed to Any
         """
         Validates and prepares parameter lists for evaluation based on the
-        structure discovered during __init__.
-
-        Args:
-            param_dict: Dictionary mapping parameter names to values provided by the user.
-
-        Returns:
-            A tuple containing:
-                - stat_args: Ordered list of float values for stationary functions.
-                             Uses self.param_names_stat_combined order.
-                - all_args: Ordered list of float values for all functions (stationary + trend + obs).
-                            Uses self.all_param_names order.
-                - shock_std_devs: Dictionary mapping ALL augmented shock names to their float std dev values.
-
-        Raises:
-            ValueError: If any required parameters (including sigma_ parameters
-                        for all shocks) are missing after merging with defaults.
+        structure discovered during __init__. Accepts JAX tracers during estimation.
+        # ... (rest of docstring) ...
         """
         eval_params = self.default_param_assignments.copy()
-        eval_params.update(param_dict) # User values overwrite defaults
+        eval_params.update(param_dict) # User values (potentially tracers) overwrite defaults
 
         # Check all parameters needed for ANY function are present
         missing_all = [p for p in self.all_param_names if p not in eval_params]
@@ -747,31 +792,32 @@ class DynareModel:
             raise ValueError(f"Missing required parameter values for model functions: {missing_all}")
 
         # Create ordered list for stationary functions (using combined list)
+        # NO float() conversion here
         stat_args = []
         for p_name_stat in self.param_names_stat_combined:
-            stat_args.append(float(eval_params[p_name_stat]))
+            stat_args.append(eval_params[p_name_stat]) # Keep as JAX type/tracer
 
         # Create ordered list for all functions
-        all_args = [float(eval_params[p_name]) for p_name in self.all_param_names]
+        # NO float() conversion here
+        all_args = [eval_params[p_name] for p_name in self.all_param_names] # Keep as JAX type/tracer
 
         # Extract shock standard deviations for ALL augmented shocks
+        # NO float() conversion here
         shock_std_devs = {}
         missing_sigmas = []
         for shock_name in self.aug_shocks_structure:
             sigma_param_name = f"sigma_{shock_name}"
             if sigma_param_name in eval_params:
-                shock_std_devs[shock_name] = float(eval_params[sigma_param_name])
+                shock_std_devs[shock_name] = eval_params[sigma_param_name] # Keep as JAX type/tracer
             else:
-                # This check is important: if sigma was needed (in all_param_names) but
-                # is still missing, it means no default and no user value provided.
                  missing_sigmas.append(sigma_param_name)
 
         if missing_sigmas:
-            raise ValueError(
-                f"Missing values for required shock standard deviation parameters: {missing_sigmas}. "
-                f"Ensure 'sigma_SHOCKNAME' is defined (e.g., in 'shocks;' or 'trend_shocks;' stderr blocks) "
-                f"or provided explicitly. All shocks: {self.aug_shocks_structure}"
-            )
+            # This error should ideally be caught earlier if defaults are set correctly
+             raise ValueError(
+                 f"Missing values for required shock standard deviation parameters: {missing_sigmas}. "
+                 f"All shocks: {self.aug_shocks_structure}"
+             )
 
         return stat_args, all_args, shock_std_devs
 
