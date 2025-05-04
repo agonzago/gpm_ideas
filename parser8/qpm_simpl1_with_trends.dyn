@@ -58,8 +58,7 @@ end;
 varexo_trends
 SHK_L_GDP_TREND,
 SHK_G_TREND,
-SHP_PI_TREND,
-SHK_RS_TREND,
+SHK_PI_TREND,
 SHK_RR_TREND
 ;
 
@@ -74,7 +73,7 @@ trends_vars
 trend_model;
     L_GDP_TREND = L_GDP_TREND(-1) + G_TREND(-1) + SHK_L_GDP_TREND;
     G_TREND  = G_TREND(-1) + SHK_G_TREND;
-    PI_TREND = PI_TREND(-1) + SHP_PI_TREND;
+    PI_TREND = PI_TREND(-1) + SHK_PI_TREND;
     RS_TREND = RR_TREND + PI_TREND; 
     RR_TREND = RR_TREND(-1) + SHK_RR_TREND;  
 end;
@@ -107,17 +106,16 @@ steady;
 check;
 
 trend_shocks;
-    var SHK_L_GDP_TREND; stderr 1;    
-    var SHK_G_TREND; stderr 1;
-    var SHP_PI_TREND; stderr 0;
-    var SHK_RS_TREND; stderr 1;
-    var SHK_RR_TREND; stderr 1;
+    var SHK_L_GDP_TREND; stderr 0.001;    
+    var SHK_G_TREND; stderr 0.5;
+    var SHK_PI_TREND; stderr 1e-10;
+    var SHK_RR_TREND; stderr 0.1;
 end;
 
-shocks
+shocks;
     var SHK_L_GDP_GAP  ; stderr 1;   // Output gap shock
-    SHK_DLA_CPI ; stderr 1; 
-    SHK_RS ; stderr 1;             // Foreign interest rate shock
-;
+    var SHK_DLA_CPI ; stderr 1.5; 
+    var SHK_RS ; stderr 0.5;             // Foreign interest rate shock
+end;
 
 stoch_simul(order=1, irf=40);

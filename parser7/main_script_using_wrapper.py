@@ -7,7 +7,16 @@ import matplotlib.pyplot as plt
 from jax import random
 
 
-# --- Numpyro Import ---
+
+# --- Force CPU Execution ---
+print("Attempting to force JAX to use CPU...")
+try:
+    jax.config.update('jax_platforms', 'cpu')
+    # jax.config.update("jax_default_device", jax.devices("cpu")[0]) # Alternative if above fails
+except Exception as e_cpu:
+    print(f"Warning: Could not force CPU platform: {e_cpu}")
+print(f"JAX default platform: {jax.default_backend()}") # Verify change
+
 try:
     import numpyro
     NUMPYRO_AVAILABLE = True
@@ -15,12 +24,13 @@ except ImportError:
     NUMPYRO_AVAILABLE = False
     print("main_script: Warning - numpyro not found. Estimation will not run.")
 
+
 # Ensure JAX is configured (can also be done inside the wrapper)
-os.environ['JAX_PLATFORMS'] = 'cpu' # Or 'gpu'
-jax.config.update("jax_enable_x64", True)
-print(f"main_script: JAX float64 enabled: {jax.config.jax_enable_x64}")
+# os.environ['JAX_PLATFORMS'] = 'gpu' # <<<< COMMENT OUT or REMOVE this line
+jax.config.update("jax_enable_x64", True) # Keep requesting float64
+print(f"main_script: JAX float64 enabled: {jax.config.jax_enable_x64}") # Check if True on CPU
 print(f"main_script: JAX version: {jax.__version__}")
-print(f"main_script: JAX backend: {jax.default_backend()}")
+print(f"main_script: JAX backend: {jax.default_backend()}") # Check again
 
 
 # --- Import the Wrapper ---
@@ -111,15 +121,21 @@ if __name__ == "__main__":
 
         # --- [5] Define Priors for Estimation ---
         # Select a subset of parameters to estimate
+        
+        # --- [5] Define Priors for Estimation ---
         estimation_priors = {
             # Param: (Dist Name, [params])
-            'b1': ('Normal', [0.7, 0.1]),       # Prior mean 0.7, std dev 0.1
-            'a1': ('Beta', [6.0, 2.0]),         # Prior mean = 6/(6+2)=0.75, implies persistence
-            'g1': ('Normal', [0.7, 0.1]),
-            # Standard deviations (must be positive)
-            'sigma_SHK_L_GDP_GAP': ('InverseGamma', [4.0, 0.1]), # Prior mean ~ 0.1/(4-1) = 0.033
-            'sigma_SHK_DLA_CPI': ('InverseGamma', [4.0, 0.1]),
-            'sigma_SHK_RS': ('InverseGamma', [4.0, 0.2]),        # Prior mean ~ 0.2/3 = 0.067
+            # Use Beta for parameters typically between 0 and 1 (like AR coefficients)
+            #  'b1': ('Beta', [14.0, 6.0]),      # Prior mean ~0.7, std ~0.1
+            #'a1': ('Beta', [14.0, 6.0]),      # Prior mean ~0.7, std ~0.1 (adjust if needed)
+            #  'g1': ('Beta', [14.0, 6.0]),      # Prior mean ~0.7, std ~0.1 (Taylor rule smoothing)
+
+            # Standard deviations (must be positive) - InverseGamma or HalfCauchy are common
+            'sigma_SHK_L_GDP_GAP': ('InverseGamma', [4.0, 1]), # Prior mode ~ 0.1/(4+1)=0.02, mean=0.033
+            'sigma_SHK_DLA_CPI': ('InverseGamma', [4.0, 1]),
+            'sigma_SHK_RS': ('InverseGamma', [4.0, 1]),        # Prior mode ~ 0.2/5 = 0.04, mean=0.067
+            # Example using HalfCauchy (often preferred for scale parameters)
+            #'sigma_SHK_L_GDP_GAP': ('HalfCauchy', [0.1]), # Scale 0.1
         }
         # Note: We are NOT estimating trend shock sigmas here, they use defaults.
         # Note: Observation noise H is assumed KNOWN here (H_obs_sim).
@@ -129,9 +145,10 @@ if __name__ == "__main__":
             print("\n--- Running Bayesian Estimation ---")
             est_key = random.PRNGKey(789)
             mcmc_config = {
-                'num_warmup': 500,   # Increase for real runs
+                'num_warmup': 1000,   # Increase for real runs
                 'num_samples': 1000, # Increase for real runs
-                'num_chains': 2,     # Run multiple chains
+                'num_chains': 4,     # Run multiple chains
+                
             }
 
             # Use simulated data (ys), known H, and filter initial conditions
@@ -141,49 +158,49 @@ if __name__ == "__main__":
             init_x_filt = init_x_sim # Use simulation start for simplicity
             init_P_filt = init_P_sim
 
-            try:
-                mcmc_results = model.estimate(
-                    ys=sim_obs_with_nan,       # Data to fit
-                    H_obs=H_obs_filt,          # Assumed known observation noise cov
-                    init_x_mean=init_x_filt,   # Filter initial state mean
-                    init_P_cov=init_P_filt,    # Filter initial state cov
-                    priors=estimation_priors,  # Defined priors
-                    mcmc_params=mcmc_config,   # MCMC settings
-                    rng_key=est_key            # Random key
-                )
+            #try:
+            mcmc_results = model.estimate(
+                ys=sim_obs_with_nan,       # Data to fit
+                H_obs=H_obs_filt,          # Assumed known observation noise cov
+                init_x_mean=init_x_filt,   # Filter initial state mean
+                init_P_cov=init_P_filt,    # Filter initial state cov
+                priors=estimation_priors,  # Defined priors
+                mcmc_params=mcmc_config,   # MCMC settings
+                rng_key=est_key            # Random key
+            )
 
-                # --- [7] Analyze Estimation Results ---
-                print("\n--- Estimation Summary ---")
-                # Summary is printed automatically by estimate method
-                # Access samples
-                posterior_samples = mcmc_results.get_samples()
+            # --- [7] Analyze Estimation Results ---
+            print("\n--- Estimation Summary ---")
+            # Summary is printed automatically by estimate method
+            # Access samples
+            posterior_samples = mcmc_results.get_samples()
 
-                # Plot posterior distributions (example for b1)
-                plt.figure(figsize=(10, 4))
-                plt.hist(onp.array(posterior_samples['b1']), bins=50, density=True, label='Posterior samples')
-                # Plot prior density for comparison
-                prior_b1_mean, prior_b1_std = estimation_priors['b1'][1]
-                x_prior = onp.linspace(prior_b1_mean - 3*prior_b1_std, prior_b1_mean + 3*prior_b1_std, 200)
-                from scipy.stats import norm
-                plt.plot(x_prior, norm.pdf(x_prior, prior_b1_mean, prior_b1_std), 'r-', label='Prior (Normal)')
-                # Plot true value used in simulation
-                plt.axvline(sim_param_values['b1'], color='g', linestyle='--', label=f"True Sim Value ({sim_param_values['b1']:.2f})")
-                plt.title("Posterior Distribution for 'b1'")
-                plt.xlabel("Parameter Value")
-                plt.ylabel("Density")
-                plt.legend()
-                plt.grid(True, alpha=0.5)
-                plt.show()
+            # # Plot posterior distributions (example for b1)
+            # plt.figure(figsize=(10, 4))
+            # plt.hist(onp.array(posterior_samples['b1']), bins=50, density=True, label='Posterior samples')
+            # # Plot prior density for comparison
+            # prior_b1_mean, prior_b1_std = estimation_priors['b1'][1]
+            # x_prior = onp.linspace(prior_b1_mean - 3*prior_b1_std, prior_b1_mean + 3*prior_b1_std, 200)
+            # from scipy.stats import norm
+            # plt.plot(x_prior, norm.pdf(x_prior, prior_b1_mean, prior_b1_std), 'r-', label='Prior (Normal)')
+            # # Plot true value used in simulation
+            # plt.axvline(sim_param_values['b1'], color='g', linestyle='--', label=f"True Sim Value ({sim_param_values['b1']:.2f})")
+            # plt.title("Posterior Distribution for 'b1'")
+            # plt.xlabel("Parameter Value")
+            # plt.ylabel("Density")
+            # plt.legend()
+            # plt.grid(True, alpha=0.5)
+            # plt.show()
 
-                # You can plot other parameters similarly
+            # You can plot other parameters similarly
 
-            except Exception as e_est:
-                 print(f"\nAn error occurred during estimation: {e_est}")
-                 import traceback
-                 traceback.print_exc()
+        # except Exception as e_est:
+        #      print(f"\nAn error occurred during estimation: {e_est}")
+        #      import traceback
+        #      traceback.print_exc()
 
-        else:
-            print("\n--- Skipping Estimation (numpyro not available) ---")
+        #else:
+        #     print("\n--- Skipping Estimation (numpyro not available) ---")
 
 
         # --- [8] Example: Run Filter/Smoother with POSTERIOR MEAN parameters ---

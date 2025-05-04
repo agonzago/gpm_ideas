@@ -25,7 +25,7 @@ from jax import config
 # Assume the parser/solver is in dynare_parser_spd7.py
 import Dynare_parser_sda_solver as dp
 # Assume the Kalman filter is in Kalman_filter_jax.py
-from Kalman_filter_jax import KalmanFilter, simulate_state_space
+from parser7.Kalman_filter_jax_old import KalmanFilter, simulate_state_space
 
 # --- Helper Function for HDR ---
 def calculate_hdr(draws, level):

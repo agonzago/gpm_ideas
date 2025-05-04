@@ -13,11 +13,37 @@ import re
 import sympy
 import numpy as np
 from collections import OrderedDict
+from collections import namedtuple # Make sure this is imported
 import copy
 import os
 from numpy.linalg import norm
 from scipy.linalg import lu_factor, lu_solve, block_diag
 import matplotlib.pyplot as plt
+
+import jax
+import jax.numpy as jnp
+import jax.scipy.linalg
+from jax.typing import ArrayLike
+from typing import Tuple, Optional
+from jax import lax
+
+import numpy as onp # Keep for other functions if needed
+
+_JAX_EPS = jnp.finfo(jnp.float64).eps if jax.config.jax_enable_x64 else jnp.finfo(jnp.float32).eps
+
+# --- Force CPU Execution (Optional) ---
+print("Attempting to force JAX to use CPU...")
+try:
+    jax.config.update("jax_platforms", "cpu")
+    print(f"JAX targeting CPU.")
+except Exception as e_cpu:
+    print(f"Warning: Could not force CPU platform: {e_cpu}")
+print(f"JAX default platform: {jax.default_backend()}")
+
+# Ensure JAX is configured for float64 if enabled
+jax.config.update("jax_enable_x64", True)
+_DEFAULT_DTYPE = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+print(f"Using JAX with dtype: {_DEFAULT_DTYPE}")
 
 # --- Helper Functions ---
 
@@ -83,37 +109,42 @@ def symbolic_jacobian(equations, variables):
             jacobian[i, j] = sympy.diff(eq, var)
     return jacobian
 
-def robust_lambdify(args, expr, modules='numpy'):
+
+def robust_lambdify(args, expr, modules='jax'): # <<< Change default module to 'jax'
     """
     Attempts to lambdify, providing more context on error.
     Handles cases where expr is already numerical (e.g., zero matrix).
+    Specifies JAX as the numerical backend.
     """
+    # Check for already numerical inputs (int, float, numpy array, jax array)
     if isinstance(expr, (int, float)) or \
-       (isinstance(expr, np.ndarray) and np.issubdtype(expr.dtype, np.number)):
-        # If it's already numerical, return a function that ignores args
-        # and returns the constant value.
-        return lambda *a: expr
+       (isinstance(expr, (np.ndarray, jnp.ndarray)) and np.issubdtype(expr.dtype, np.number)): # Check both np and jnp
+        # If numerical, return a function that ignores args and returns the constant value
+        # Ensure the constant value is a JAX array if it came from NumPy
+        return lambda *a: jnp.asarray(expr) # Convert to JAX array
+
     if isinstance(expr, (sympy.Matrix, sympy.ImmutableMatrix)):
         # Check if the matrix contains any symbols
         if not expr.free_symbols:
-            # If no free symbols, convert to numpy array and return lambda
+            # If no free symbols, convert to JAX array and return lambda
             try:
-                numerical_matrix = np.array(expr.tolist(), dtype=float)
+                numerical_matrix = jnp.array(expr.tolist(), dtype=jnp.float64 if jax.config.jax_enable_x64 else jnp.float32) # Use JAX array
                 return lambda *a: numerical_matrix
             except (TypeError, ValueError) as e:
-                 print(f"Warning: Could not convert symbol-free matrix {expr} to NumPy array: {e}")
-                 # Fallback to standard lambdify, which might handle it or fail
-                 pass # Proceed to standard lambdify below
+                 print(f"Warning: Could not convert symbol-free matrix {expr} to JAX array: {e}")
+                 # Fallback to standard lambdify below
 
     try:
-        # Standard lambdify for symbolic expressions
-        return sympy.lambdify(args, expr, modules=modules)
+        # Use 'jax' as the module backend
+        # Provide jax.numpy explicitly for common functions if needed
+        jax_modules = [{'ImmutableDenseMatrix': jnp.array}, 'jax']
+        # Or more explicitly:
+        # jax_modules = [jnp] # Pass the jax.numpy module directly
+        return sympy.lambdify(args, expr, modules=jax_modules) # <<< Pass JAX modules
     except Exception as e:
-        print(f"Error during lambdify. Arguments: {args}")
+        print(f"Error during lambdify (using JAX backend). Arguments: {args}")
         print(f"Expression causing error:\n{expr}")
         raise e
-
-# --- Core Model Parsing and Solving Functions (Adapted from original) ---
 
 def extract_declarations(model_string):
     """
@@ -240,369 +271,12 @@ def extract_model_equations(model_string):
 
     return processed_equations
 
-# def parse_lambdify_and_order_model(model_string):
-#     """
-#     Parses the stationary part of the model, handles leads/lags,
-#     orders variables/equations, and returns lambdified matrices.
-#     """
-#     print("--- Parsing Stationary Model Declarations ---")
-#     declared_vars, shock_names, param_names, param_assignments = extract_declarations(model_string)
-
-#     if not declared_vars: raise ValueError("No variables declared in 'var' block.")
-#     if not shock_names: raise ValueError("No shocks declared in 'varexo' block.")
-#     if not param_names: raise ValueError("No parameters declared in 'parameters' block.")
-
-#     print(f"Declared Variables: {declared_vars}")
-#     print(f"Declared Shocks: {shock_names}")
-#     print(f"Declared Parameters: {param_names}")
-#     print(f"Parsed Parameter Assignments: {param_assignments}")
-
-#     print("\n--- Parsing Stationary Model Equations ---")
-#     raw_equations = extract_model_equations(model_string)
-#     print(f"Found {len(raw_equations)} equations in model block.")
-
-#     # --- Handling Leads/Lags & Auxiliaries ---
-#     print("\n--- Handling Leads/Lags & Auxiliaries ---")
-#     endogenous_vars = list(declared_vars)
-#     aux_variables = OrderedDict() # Stores definition string for each aux var
-#     processed_equations = list(raw_equations)
-#     var_time_regex = re.compile(r'\b([a-zA-Z_]\w*)\s*\(\s*([+-]?\d+)\s*\)')
-
-#     eq_idx = 0
-#     while eq_idx < len(processed_equations):
-#         eq = processed_equations[eq_idx]
-#         eq_idx += 1
-#         modified_eq = eq
-#         matches = list(var_time_regex.finditer(eq))
-
-#         # Process matches in reverse order to avoid index issues
-#         for match in reversed(matches):
-#             base_name = match.group(1)
-#             time_shift = int(match.group(2))
-
-#             # Skip if not an endogenous variable or already processed aux
-#             if base_name not in endogenous_vars and base_name not in aux_variables:
-#                 continue
-
-#             # --- Handle Leads > 1 ---
-#             if time_shift > 1:
-#                 aux_needed_defs = []
-#                 for k in range(1, time_shift):
-#                     aux_name = f"aux_{base_name}_lead_p{k}"
-#                     if aux_name not in aux_variables:
-#                         prev_var_for_def = base_name if k == 1 else f"aux_{base_name}_lead_p{k-1}"
-#                         def_eq_str = f"{aux_name} - {prev_var_for_def}(+1)"
-#                         aux_variables[aux_name] = def_eq_str
-#                         aux_needed_defs.append(def_eq_str)
-#                         if aux_name not in endogenous_vars:
-#                             endogenous_vars.append(aux_name)
-
-#                 target_aux = f"aux_{base_name}_lead_p{time_shift-1}"
-#                 replacement = f"{target_aux}(+1)"
-#                 start, end = match.span()
-#                 modified_eq = modified_eq[:start] + replacement + modified_eq[end:]
-
-#                 for def_eq in aux_needed_defs:
-#                     if def_eq not in processed_equations:
-#                         # print(f"  Adding aux lead def: {def_eq} = 0")
-#                         processed_equations.append(def_eq)
-
-#             # --- Handle Lags < -1 ---
-#             elif time_shift < -1:
-#                 aux_needed_defs = []
-#                 for k in range(1, abs(time_shift)):
-#                     aux_name = f"aux_{base_name}_lag_m{k}"
-#                     if aux_name not in aux_variables:
-#                         prev_var_for_def = base_name if k == 1 else f"aux_{base_name}_lag_m{k-1}"
-#                         def_eq_str = f"{aux_name} - {prev_var_for_def}(-1)"
-#                         aux_variables[aux_name] = def_eq_str
-#                         aux_needed_defs.append(def_eq_str)
-#                         if aux_name not in endogenous_vars:
-#                             endogenous_vars.append(aux_name)
-
-#                 target_aux = f"aux_{base_name}_lag_m{abs(time_shift)-1}"
-#                 replacement = f"{target_aux}(-1)"
-#                 start, end = match.span()
-#                 modified_eq = modified_eq[:start] + replacement + modified_eq[end:]
-
-#                 for def_eq in aux_needed_defs:
-#                     if def_eq not in processed_equations:
-#                         # print(f"  Adding aux lag def: {def_eq} = 0")
-#                         processed_equations.append(def_eq)
-
-#         if modified_eq != eq:
-#             processed_equations[eq_idx - 1] = modified_eq
-#             # print(f"  Updated Eq {eq_idx-1}: {modified_eq}")
-
-#     initial_vars_ordered = list(endogenous_vars)
-#     num_vars = len(initial_vars_ordered)
-#     num_eq = len(processed_equations)
-#     num_shocks = len(shock_names)
-
-#     print(f"Total variables after processing leads/lags ({num_vars}): {initial_vars_ordered}")
-#     # print(f"Total equations after processing leads/lags ({num_eq}):")
-#     # for i, eq in enumerate(processed_equations): print(f"  Eq {i}: {eq}")
-
-#     if num_vars != num_eq:
-#         # Provide more context in the error message
-#         print("\nError Details:")
-#         print(f"  Original Declared Vars: {declared_vars}")
-#         print(f"  Auxiliary Vars Added: {list(aux_variables.keys())}")
-#         print(f"  Final Variable List ({num_vars}): {initial_vars_ordered}")
-#         print(f"\n  Original Equations: {raw_equations}")
-#         print(f"  Auxiliary Equations Added: {list(aux_variables.values())}")
-#         print(f"  Final Equation List ({num_eq}): {processed_equations}")
-#         raise ValueError(
-#             f"Stationary model not square after processing leads/lags: {num_vars} vars vs {num_eq} eqs."
-#         )
-#     print("Stationary model is square.")
-
-#     # --- Symbolic Representation ---
-#     print("\n--- Creating Symbolic Representation (Stationary Model) ---")
-#     param_syms = {p: sympy.symbols(p) for p in param_names}
-#     shock_syms = {s: sympy.symbols(s) for s in shock_names}
-#     var_syms = {}
-#     all_syms_for_parsing = set(param_syms.values()) | set(shock_syms.values())
-#     for var in initial_vars_ordered:
-#         sym_m1 = create_timed_symbol(var, -1)
-#         sym_t  = create_timed_symbol(var, 0)
-#         sym_p1 = create_timed_symbol(var, 1)
-#         var_syms[var] = {'m1': sym_m1, 't': sym_t, 'p1': sym_p1}
-#         all_syms_for_parsing.update([sym_m1, sym_t, sym_p1])
-
-#     local_dict = {str(s): s for s in all_syms_for_parsing}
-#     local_dict.update({'log': sympy.log, 'exp': sympy.exp, 'sqrt': sympy.sqrt, 'abs': sympy.Abs})
-
-#     from sympy.parsing.sympy_parser import (parse_expr, standard_transformations,
-#                                           implicit_multiplication_application, rationalize)
-#     transformations = (standard_transformations + (implicit_multiplication_application, rationalize))
-
-#     sym_equations = []
-#     print("Parsing stationary equations into symbolic form...")
-#     for i, eq_str in enumerate(processed_equations):
-#         eq_str_sym = eq_str
-#         def replace_var_time(match):
-#             base_name, time_shift_str = match.groups()
-#             time_shift = int(time_shift_str)
-#             if base_name in shock_names:
-#                 if time_shift == 0: return str(shock_syms[base_name])
-#                 else: raise ValueError(f"Shock {base_name}({time_shift}) invalid.")
-#             elif base_name in var_syms:
-#                 if time_shift == -1: return str(var_syms[base_name]['m1'])
-#                 if time_shift == 0:  return str(var_syms[base_name]['t'])
-#                 if time_shift == 1:  return str(var_syms[base_name]['p1'])
-#                 raise ValueError(f"Unexpected time shift {time_shift} for {base_name} after aux processing.")
-#             elif base_name in param_syms:
-#                 raise ValueError(f"Parameter {base_name}({time_shift}) invalid.")
-#             elif base_name in local_dict: # e.g. log, exp
-#                 return match.group(0)
-#             else: # Unknown symbol - add dynamically if needed, but warn
-#                 # print(f"Warning: Symbol '{base_name}' with time shift {time_shift} in eq {i} ('{eq_str}') is undeclared. Treating symbolically.")
-#                 if base_name not in local_dict: local_dict[base_name] = sympy.symbols(base_name)
-#                 timed_sym_str = str(create_timed_symbol(base_name, time_shift))
-#                 if timed_sym_str not in local_dict: local_dict[timed_sym_str] = sympy.symbols(timed_sym_str)
-#                 return timed_sym_str
-
-#         eq_str_sym = var_time_regex.sub(replace_var_time, eq_str_sym)
-
-#         # Replace remaining base names (implicitly time t)
-#         all_known_base_names = sorted(list(var_syms.keys()) + param_names + shock_names, key=len, reverse=True)
-#         for name in all_known_base_names:
-#             pattern = r'\b' + re.escape(name) + r'\b'
-#             if name in var_syms: replacement = str(var_syms[name]['t'])
-#             elif name in param_syms: replacement = str(param_syms[name])
-#             elif name in shock_names: replacement = str(shock_syms[name])
-#             else: continue
-#             eq_str_sym = re.sub(pattern, replacement, eq_str_sym)
-
-#         try:
-#             # Check for remaining undeclared symbols before parsing
-#             current_symbols = set(re.findall(r'\b([a-zA-Z_]\w*)\b', eq_str_sym))
-#             known_keys = set(local_dict.keys()) | {'log', 'exp', 'sqrt', 'abs'}
-#             unknown_symbols = {s for s in current_symbols if s not in known_keys and not re.fullmatch(r'[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?', s)}
-
-#             if unknown_symbols:
-#                 print(f"Warning: Potential undeclared symbols found in eq {i} ('{eq_str_sym}'): {unknown_symbols}. Adding to local_dict.")
-#                 for sym_str in unknown_symbols:
-#                     if sym_str not in local_dict: local_dict[sym_str] = sympy.symbols(sym_str)
-
-#             sym_eq = parse_expr(eq_str_sym, local_dict=local_dict, transformations=transformations)
-#             sym_equations.append(sym_eq)
-#         except Exception as e:
-#             print(f"\nError parsing stationary equation {i}: '{eq_str}' -> '{eq_str_sym}'")
-#             print(f"Local dict keys: {sorted(local_dict.keys())}")
-#             print(f"Sympy error: {e}")
-#             raise
-
-#     print("Symbolic parsing completed.")
-
-#     # --- Generate Initial Symbolic Matrices A P^2 + B P + C = 0, D for shocks ---
-#     print("\n--- Generating Initial Symbolic Matrices (A, B, C, D) ---")
-#     # Here A coeffs y(t+1), B coeffs y(t), C coeffs y(t-1)
-#     # This matches the convention needed for the `solve_quadratic_matrix_equation`
-#     # Note the definition change: A = dF/dy_{t+1}, B = dF/dy_t, C = dF/dy_{t-1}
-#     sympy_A_quad = sympy.zeros(num_eq, num_vars) # Coeffs of y(t+1)
-#     sympy_B_quad = sympy.zeros(num_eq, num_vars) # Coeffs of y(t)
-#     sympy_C_quad = sympy.zeros(num_eq, num_vars) # Coeffs of y(t-1)
-#     sympy_D_quad = sympy.zeros(num_eq, num_shocks) # Coeffs of e(t) (multiplied by -1 for Q calc)
-
-#     var_p1_syms = [var_syms[v]['p1'] for v in initial_vars_ordered]
-#     var_t_syms  = [var_syms[v]['t']  for v in initial_vars_ordered]
-#     var_m1_syms = [var_syms[v]['m1'] for v in initial_vars_ordered]
-#     shock_t_syms = [shock_syms[s] for s in shock_names]
-
-#     for i, eq in enumerate(sym_equations):
-#         # Use Jacobian calculation for robustness with non-linear terms (though model is linear)
-#         for j, var_p1 in enumerate(var_p1_syms): sympy_A_quad[i, j] = sympy.diff(eq, var_p1)
-#         for j, var_t  in enumerate(var_t_syms):  sympy_B_quad[i, j] = sympy.diff(eq, var_t)
-#         for j, var_m1 in enumerate(var_m1_syms): sympy_C_quad[i, j] = sympy.diff(eq, var_m1)
-#         for k, shk_t in enumerate(shock_t_syms): sympy_D_quad[i, k] = -sympy.diff(eq, shk_t) # Note the minus sign
-
-#     initial_info = {
-#         'A': copy.deepcopy(sympy_C_quad), # Store based on y_t = P y_{t-1} + Q e_t form
-#         'B': copy.deepcopy(sympy_B_quad),
-#         'C': copy.deepcopy(sympy_A_quad),
-#         'D': copy.deepcopy(sympy_D_quad),
-#         'vars': list(initial_vars_ordered),
-#         'eqs': list(processed_equations)
-#     }
-#     print("Symbolic matrices A, B, C, D generated (for quadratic solver).")
-
-#     # --- Classify Variables (Simplified for Ordering) ---
-#     print("\n--- Classifying Variables for Ordering (Stationary Model) ---")
-#     # Heuristic: RES_ and aux_lag are backward, others are forward/both
-#     backward_exo_vars = []
-#     forward_backward_endo_vars = []
-#     static_endo_vars = [] # Variables appearing only at time t
-
-#     potential_backward = [v for v in initial_vars_ordered if v.startswith("RES_") or (v.startswith("aux_") and "_lag_" in v)]
-#     remaining_vars = [v for v in initial_vars_ordered if v not in potential_backward]
-
-#     # Check matrix columns for actual dependencies
-#     for var in potential_backward:
-#         j = initial_vars_ordered.index(var)
-#         # Check if it has a lead dependency (appears in A_quad)
-#         has_lead = not sympy_A_quad.col(j).is_zero_matrix
-#         if has_lead:
-#             # If an RES_ or aux_lag var has a lead, it's not purely backward
-#             # This might indicate a model specification issue or complex aux var interaction
-#             print(f"Warning: Potential backward var '{var}' has lead dependency. Classifying as forward/backward.")
-#             forward_backward_endo_vars.append(var)
-#         else:
-#             backward_exo_vars.append(var)
-
-#     for var in remaining_vars:
-#          j = initial_vars_ordered.index(var)
-#          has_lag = not sympy_C_quad.col(j).is_zero_matrix # Appears with t-1?
-#          has_lead = not sympy_A_quad.col(j).is_zero_matrix # Appears with t+1?
-#          if has_lag or has_lead:
-#              forward_backward_endo_vars.append(var)
-#          else:
-#              # Only appears at time t (in B_quad)
-#              static_endo_vars.append(var)
-
-#     print("\nCategorized Variables:")
-#     print(f"  Backward/Exo Group: {backward_exo_vars}")
-#     print(f"  Forward/Backward Endo: {forward_backward_endo_vars}")
-#     print(f"  Static Endo: {static_endo_vars}")
-
-#     # --- Determine New Variable Order ---
-#     ordered_vars = backward_exo_vars + forward_backward_endo_vars + static_endo_vars
-#     if len(ordered_vars) != len(initial_vars_ordered) or set(ordered_vars) != set(initial_vars_ordered):
-#         raise ValueError("Variable reordering failed.")
-#     var_perm_indices = [initial_vars_ordered.index(v) for v in ordered_vars]
-#     print(f"\nNew Variable Order ({len(ordered_vars)}): {ordered_vars}")
-
-#     # --- Determine New Equation Order (Simple heuristic: match blocks) ---
-#     # Find defining equations for backward vars first
-#     eq_perm_indices = []
-#     used_eq_indices = set()
-#     # Find defining eq for each backward var (heuristic: eq where B[i,j] != 0 and C[i,j] == 0, maybe A[i,j] != 0)
-#     # Simpler: Use aux definitions and RES definitions
-#     aux_def_patterns = {name: re.compile(fr"^\s*{name}\s*-\s*{base_name_from_aux(name)}\s*\(\s*-1\s*\)\s*$") for name in aux_variables if "_lag_" in name}
-#     res_def_patterns = {name: re.compile(fr"^\s*{name}\s*-\s*.*{name}\s*\(\s*-1\s*\).*") for name in initial_vars_ordered if name.startswith("RES_")}
-
-#     assigned_eq_for_var = {}
-
-#     # Assign defining equations for aux lags first
-#     for aux_var in [v for v in backward_exo_vars if v.startswith("aux_")]:
-#         if aux_var in assigned_eq_for_var: continue
-#         pattern = aux_def_patterns.get(aux_var)
-#         if pattern:
-#             found = False
-#             for i, eq_str in enumerate(processed_equations):
-#                 if i not in used_eq_indices and pattern.match(eq_str.replace(" ","")):
-#                     eq_perm_indices.append(i)
-#                     used_eq_indices.add(i)
-#                     assigned_eq_for_var[aux_var] = i
-#                     found = True
-#                     break
-#             # if not found: print(f"Warning: Could not find unique defining eq for aux lag '{aux_var}'")
-
-#     # Assign defining equations for RES vars
-#     for res_var in [v for v in backward_exo_vars if v.startswith("RES_")]:
-#          if res_var in assigned_eq_for_var: continue
-#          pattern = res_def_patterns.get(res_var)
-#          if pattern:
-#             found = False
-#             potential_matches = []
-#             for i, eq_str in enumerate(processed_equations):
-#                  if i not in used_eq_indices and pattern.match(eq_str):
-#                      potential_matches.append(i)
-#             if len(potential_matches) == 1:
-#                  i = potential_matches[0]
-#                  eq_perm_indices.append(i)
-#                  used_eq_indices.add(i)
-#                  assigned_eq_for_var[res_var] = i
-#                  found = True
-#             # elif len(potential_matches) > 1:
-#                  # print(f"Warning: Found multiple potential defining eqs for RES var '{res_var}': {potential_matches}")
-#             # else:
-#                  # print(f"Warning: Could not find defining eq for RES var '{res_var}'")
-
-#     # Assign remaining equations heuristically or just sequentially
-#     remaining_eq_indices = [i for i in range(num_eq) if i not in used_eq_indices]
-#     eq_perm_indices.extend(remaining_eq_indices)
-
-#     if len(eq_perm_indices) != num_eq:
-#         raise ValueError(f"Equation permutation construction failed. Length mismatch: {len(eq_perm_indices)} vs {num_eq}")
-#     if len(set(eq_perm_indices)) != num_eq:
-#          raise ValueError("Equation permutation construction failed. Indices not unique.")
-
-#     print(f"\nEquation permutation indices (new row i <- old row eq_perm_indices[i]): {eq_perm_indices}")
-
-#     # --- Reorder Symbolic Matrices ---
-#     print("\n--- Reordering Symbolic Matrices (Stationary Model) ---")
-#     # Use extract based on permutations derived
-#     sympy_A_ord = sympy_A_quad.extract(eq_perm_indices, var_perm_indices)
-#     sympy_B_ord = sympy_B_quad.extract(eq_perm_indices, var_perm_indices)
-#     sympy_C_ord = sympy_C_quad.extract(eq_perm_indices, var_perm_indices)
-#     sympy_D_ord = sympy_D_quad.extract(eq_perm_indices, list(range(num_shocks))) # Rows reordered
-
-#     symbolic_matrices_ordered = {'A': sympy_A_ord, 'B': sympy_B_ord, 'C': sympy_C_ord, 'D': sympy_D_ord}
-#     print("Symbolic reordering complete.")
-
-#     # --- Lambdify ---
-#     print("\n--- Lambdifying Ordered Matrices (Stationary Model) ---")
-#     param_sym_list = [param_syms[p] for p in param_names] # Ensure consistent order
-
-#     func_A = robust_lambdify(param_sym_list, sympy_A_ord)
-#     func_B = robust_lambdify(param_sym_list, sympy_B_ord)
-#     func_C = robust_lambdify(param_sym_list, sympy_C_ord)
-#     func_D = robust_lambdify(param_sym_list, sympy_D_ord)
-#     print("Lambdification successful.")
-
-#     return (func_A, func_B, func_C, func_D,
-#             ordered_vars, shock_names, param_names, param_assignments,
-#             symbolic_matrices_ordered, initial_info)
-
-
-def parse_lambdify_and_order_model(model_string):
+def parse_lambdify_and_order_model(model_string, verbose=True):
     """
     Parses the stationary part of the model, handles leads/lags,
     orders variables/equations, and returns lambdified matrices.
     """
-    print("--- Parsing Stationary Model Declarations ---")
+    if verbose:  print("--- Parsing Stationary Model Declarations ---")
     declared_vars, shock_names, param_names_declared, param_assignments_initial = extract_declarations(model_string)
     inferred_sigma_params = [f"sigma_{shk}" for shk in shock_names]
     stat_stderr_values = extract_stationary_shock_stderrs(model_string)
@@ -639,22 +313,23 @@ def parse_lambdify_and_order_model(model_string):
     param_assignments = combined_param_assignments # Use this final dict
 
     # --- Print statements using the FINAL lists ---
-    print(f"Declared Variables: {declared_vars}")
-    print(f"Declared Shocks (varexo): {shock_names}")
-    print(f"Declared Parameters (parameters block): {param_names_declared}")
-    # print(f"Inferred Sigma Parameters (from varexo): {inferred_sigma_params}") # Less important now
-    print(f"==> Final Parameter List for Stationary Model: {param_names}") # Use final list
-    # print(f"Default Stderr Values (from shocks command): {sigma_stderr_assignments}") # Less important
-    # print(f"Explicit Parameter Assignments: {param_assignments_initial}") # Less important
-    print(f"==> Combined Initial Parameter Assignments: {param_assignments}") # Use final dict
+    if verbose:
+        print(f"Declared Variables: {declared_vars}")
+        print(f"Declared Shocks (varexo): {shock_names}")
+        print(f"Declared Parameters (parameters block): {param_names_declared}")
+        # print(f"Inferred Sigma Parameters (from varexo): {inferred_sigma_params}") # Less important now
+        print(f"==> Final Parameter List for Stationary Model: {param_names}") # Use final list
+        # print(f"Default Stderr Values (from shocks command): {sigma_stderr_assignments}") # Less important
+        # print(f"Explicit Parameter Assignments: {param_assignments_initial}") # Less important
+        print(f"==> Combined Initial Parameter Assignments: {param_assignments}") # Use final dict
 
 
-    print("\n--- Parsing Stationary Model Equations ---")
+    if verbose: print("\n--- Parsing Stationary Model Equations ---")
     raw_equations = extract_model_equations(model_string)
-    print(f"Found {len(raw_equations)} equations in model block.")
+    if verbose: print(f"Found {len(raw_equations)} equations in model block.")
 
     # --- Handling Leads/Lags & Auxiliaries ---
-    print("\n--- Handling Leads/Lags & Auxiliaries ---")
+    if verbose:  print("\n--- Handling Leads/Lags & Auxiliaries ---")
     endogenous_vars = list(declared_vars)
     aux_variables = OrderedDict() # Stores definition string for each aux var
     processed_equations = list(raw_equations)
@@ -988,8 +663,6 @@ def parse_lambdify_and_order_model(model_string):
             ordered_vars, shock_names, param_names, param_assignments,
             symbolic_matrices_ordered, initial_info)
 
-
-
 def extract_stationary_shock_stderrs(model_string):
     """
     Extracts standard errors for stationary shocks from a 'shocks; ... end;' block.
@@ -1039,7 +712,6 @@ def extract_stationary_shock_stderrs(model_string):
     if parsed_count > 0:
         print(f"   Parsed {parsed_count} stderr definitions from 'shocks;' block.")
     return stderrs
-
 
 # --- SDA Solver and Q Computation ---
 def solve_quadratic_matrix_equation(A, B, C, initial_guess=None, tol=1e-12, max_iter=100, verbose=False):
@@ -1162,7 +834,498 @@ def compute_Q(A, B, D, P):
 
     return Q
 
-# --- Trend and Measurement Equation Parsing Functions ---
+
+# Add this function potentially to Dynare_parser_sda_solver.py
+# Or keep it separate in a new jax_solvers.py file
+
+
+# # JAX version sda solver 
+# def solve_quadratic_matrix_equation_jax(
+#     A: ArrayLike,
+#     B: ArrayLike,
+#     C: ArrayLike,
+#     initial_guess: Optional[ArrayLike] = None,
+#     tol: float = 1e-12,
+#     max_iter: int = 200, # Increased default max_iter slightly
+#     dtype: jnp.dtype = jnp.float64 # Default to float64 if not specified
+# ) -> Tuple[jax.Array, int, float, bool]:
+#     """
+#     Solves A X^2 + B X + C = 0 for X using the SDA algorithm (JAX implementation).
+
+#     Uses jax.lax.while_loop for iteration.
+
+#     Args:
+#         A: Coefficient matrix for X^2 [n, n].
+#         B: Coefficient matrix for X [n, n].
+#         C: Constant coefficient matrix [n, n].
+#         initial_guess: Optional initial guess for X [n, n]. Defaults to zeros.
+#         tol: Convergence tolerance for the relative change in X (Frobenius norm).
+#         max_iter: Maximum number of iterations.
+#         dtype: JAX dtype for computations.
+
+#     Returns:
+#         A tuple containing:
+#             - X_sol: The solution matrix X [n, n] (JAX array).
+#             - iterations: The number of iterations performed.
+#             - final_diff: The final relative difference achieved.
+#             - success: Boolean flag indicating successful convergence (True) or
+#                        failure due non-convergence or numerical issues (False).
+#     """
+#     A_jax = jnp.asarray(A, dtype=dtype)
+#     B_jax = jnp.asarray(B, dtype=dtype)
+#     C_jax = jnp.asarray(C, dtype=dtype)
+
+#     n = A_jax.shape[0]
+#     if not (A_jax.shape == (n, n) and B_jax.shape == (n, n) and C_jax.shape == (n, n)):
+#         raise ValueError("Input matrices A, B, C must be square and conformable.")
+
+#     if initial_guess is None:
+#         Xg = jnp.zeros_like(A_jax)
+#     else:
+#         Xg = jnp.asarray(initial_guess, dtype=dtype)
+#         if Xg.shape != (n, n):
+#             raise ValueError("Initial guess must match matrix dimensions.")
+
+#     I = jnp.eye(n, dtype=dtype)
+
+#     # --- Initialization ---
+#     Bbar = B_jax + A_jax @ Xg
+#     success_init = jnp.ones((), dtype=jnp.bool_) # Track success
+
+#     try:
+#         # Factorize Bbar = L @ U
+#         lu_Bbar, piv_Bbar = jax.scipy.linalg.lu_factor(Bbar)
+
+#         # Solve for E0 = -(Bbar)^-1 C and F0 = -(Bbar)^-1 A using LU factors
+#         E0 = -jax.scipy.linalg.lu_solve((lu_Bbar, piv_Bbar), C_jax)
+#         F0 = -jax.scipy.linalg.lu_solve((lu_Bbar, piv_Bbar), A_jax)
+
+#         # Simple check for initial solve failure (NaN/Inf)
+#         success_init = success_init & jnp.all(jnp.isfinite(E0)) & jnp.all(jnp.isfinite(F0))
+
+#     except Exception as e:
+#         # Catch potential LinAlgError during initial LU factorization/solve
+#         # Note: JAX might raise different errors or just produce NaNs silently.
+#         # This try/except might not be fully robust in JAX's tracing/compilation.
+#         print(f"JAX SDA Warning: Initial LU factorization/solve failed: {e}")
+#         E0 = jnp.full_like(A_jax, jnp.nan) # Indicate failure with NaN
+#         F0 = jnp.full_like(A_jax, jnp.nan)
+#         success_init = jnp.zeros((), dtype=jnp.bool_)
+
+
+#     # --- Iteration using while_loop ---
+#     # State: (i, Xk, Yk, Ek, Fk, relative_diff, success_flag)
+#     init_state = (0, E0, F0, E0, F0, jnp.inf, success_init)
+
+#     def cond_fun(state):
+#         i, _, _, _, _, relative_diff, success = state
+#         # Continue if iteration count < max_iter AND diff >= tol AND success flag is still True
+#         return (i < max_iter) & (relative_diff >= tol) & success
+
+#     def body_fun(state):
+#         i, Xk, Yk, Ek, Fk, _, success = state
+
+#         # Calculate update factors (add jitter for stability)
+#         M1 = I - Yk @ Xk + _JAX_EPS * I
+#         M2 = I - Xk @ Yk + _JAX_EPS * I
+
+#         new_success = success # Carry success flag forward
+
+#         try:
+#             # Factorize M1, M2
+#             lu_M1, piv_M1 = jax.scipy.linalg.lu_factor(M1)
+#             lu_M2, piv_M2 = jax.scipy.linalg.lu_factor(M2)
+
+#             # Perform solves for updates
+#             temp_E = jax.scipy.linalg.lu_solve((lu_M1, piv_M1), Ek)
+#             E_new = Ek @ temp_E
+
+#             temp_F = jax.scipy.linalg.lu_solve((lu_M2, piv_M2), Fk)
+#             F_new = Fk @ temp_F
+
+#             temp_X = Xk @ Ek
+#             temp_X = jax.scipy.linalg.lu_solve((lu_M2, piv_M2), temp_X)
+#             X_new = Xk + Fk @ temp_X
+
+#             temp_Y = Yk @ Fk
+#             temp_Y = jax.scipy.linalg.lu_solve((lu_M1, piv_M1), temp_Y)
+#             Y_new = Yk + Ek @ temp_Y
+
+#             # Basic check for numerical issues during iteration
+#             iter_finite = (jnp.all(jnp.isfinite(X_new)) &
+#                            jnp.all(jnp.isfinite(Y_new)) &
+#                            jnp.all(jnp.isfinite(E_new)) &
+#                            jnp.all(jnp.isfinite(F_new)))
+#             new_success = new_success & iter_finite
+
+#         except Exception:
+#              # If any linalg error occurs, mark as failed and return NaNs to stop loop condition
+#              print(f"JAX SDA Warning: LU factor/solve failed during iteration {i+1}")
+#              X_new = jnp.full_like(Xk, jnp.nan)
+#              Y_new = jnp.full_like(Yk, jnp.nan)
+#              E_new = jnp.full_like(Ek, jnp.nan)
+#              F_new = jnp.full_like(Fk, jnp.nan)
+#              new_success = jnp.zeros((), dtype=jnp.bool_)
+
+
+#         # Calculate relative difference (handle potential division by zero)
+#         X_diff_norm = jnp.linalg.norm(X_new - Xk, ord='fro')
+#         X_norm = jnp.linalg.norm(X_new, ord='fro')
+#         relative_diff = X_diff_norm / (X_norm + _JAX_EPS) # Add epsilon for stability
+
+#         return (i + 1, X_new, Y_new, E_new, F_new, relative_diff, new_success)
+
+#     # Run the loop
+#     final_state = jax.lax.while_loop(cond_fun, body_fun, init_state)
+
+#     # Unpack final results
+#     final_i, X_final, _, _, _, final_diff, final_success = final_state
+
+#     # Final solution
+#     X_sol = X_final + Xg
+
+#     # Determine overall success: loop completed successfully AND initial step was successful
+#     converged = (final_diff < tol) & final_success
+
+#     return X_sol, final_i, final_diff, converged
+
+# # # JAX version to compute_Q
+# def compute_Q_jax(
+#     A: ArrayLike,
+#     B: ArrayLike,
+#     D: ArrayLike,
+#     P: ArrayLike,
+#     dtype: jnp.dtype = jnp.float64
+# ) -> jax.Array:
+#     """
+#     Computes Q for y_t = P y_{t-1} + Q e_t using JAX.
+#     Solves (A P + B) Q = D.
+#     """
+#     A_jax = jnp.asarray(A, dtype=dtype)
+#     B_jax = jnp.asarray(B, dtype=dtype)
+#     D_jax = jnp.asarray(D, dtype=dtype)
+#     P_jax = jnp.asarray(P, dtype=dtype)
+
+#     n = A_jax.shape[0]
+#     n_shock = D_jax.shape[1] if D_jax.ndim == 2 else 0
+
+#     if n_shock == 0:
+#         return jnp.zeros((n, 0), dtype=dtype)
+
+#     APB = A_jax @ P_jax + B_jax
+
+#     try:
+#         # Use jax.scipy.linalg.solve for potentially better stability/handling
+#         Q = jax.scipy.linalg.solve(APB, D_jax, assume_a='gen') # 'gen' for general matrix
+#         # Basic check for solve failure
+#         if not jnp.all(jnp.isfinite(Q)):
+#              print("JAX compute_Q Warning: Solve resulted in non-finite values. Trying pinv.")
+#              raise jnp.linalg.LinAlgError("Solve failed")
+#     except (jnp.linalg.LinAlgError, ValueError, TypeError): # Catch potential errors
+#         print(f"JAX compute_Q Warning: Standard solve failed. Condition number: {jnp.linalg.cond(APB):.2e}. Using pinv.")
+#         try:
+#             Q = jnp.linalg.pinv(APB) @ D_jax
+#             if not jnp.all(jnp.isfinite(Q)):
+#                  print("JAX compute_Q Error: Pinv also resulted in non-finite values.")
+#                  # Return NaNs or raise error? Let's return NaNs.
+#                  Q = jnp.full_like(D_jax, jnp.nan)
+#         except Exception as e_pinv:
+#              print(f"JAX compute_Q Error: Pinv failed: {e_pinv}")
+#              Q = jnp.full_like(D_jax, jnp.nan) # Return NaNs on pinv failure
+
+#     return Q
+
+# --- In Dynare_parser_sda_solver.py ---
+
+# JAX version to compute_Q
+def compute_Q_jax(
+    A: ArrayLike,
+    B: ArrayLike,
+    D: ArrayLike,
+    P: ArrayLike,
+    dtype: jnp.dtype = jnp.float64 # Or infer from A
+) -> jax.Array:
+    """
+    Computes Q for y_t = P y_{t-1} + Q e_t using JAX.
+    Solves (A P + B) Q = D.
+    Allows NaNs to propagate if the solve fails, to be caught downstream.
+    """
+    # Infer dtype from a primary input like A
+    effective_dtype = A.dtype if hasattr(A, 'dtype') else jnp.dtype(dtype)
+
+    A_jax = jnp.asarray(A, dtype=effective_dtype)
+    B_jax = jnp.asarray(B, dtype=effective_dtype)
+    D_jax = jnp.asarray(D, dtype=effective_dtype)
+    P_jax = jnp.asarray(P, dtype=effective_dtype)
+
+    n = A_jax.shape[0]
+    n_shock = D_jax.shape[1] if D_jax.ndim == 2 else 0
+
+    # Handle the case of no shocks explicitly
+    if n_shock == 0:
+        return jnp.zeros((n, 0), dtype=effective_dtype)
+
+    APB = A_jax @ P_jax + B_jax
+
+    # Directly attempt the solve using jax.scipy.linalg.solve
+    # If APB is singular or ill-conditioned, solve might return NaN/inf.
+    # We *allow* this to happen here. The checks in _numpyro_model will catch it.
+    Q = jax.scipy.linalg.solve(APB, D_jax, assume_a='gen') # 'gen' for general matrix
+
+    # --- REMOVED ---
+    # Removed the try/except jnp.linalg.LinAlgError block.
+    # Removed the `if not jnp.all(jnp.isfinite(Q))` check.
+    # Removed the pinv fallback logic.
+    # --- End REMOVED ---
+
+    return Q
+
+# # Remove SDAState namedtuple as it's not needed for this simpler version state
+# # SDAState = namedtuple("SDAState", ["Xk", "Yk", "Ek", "Fk", "k", "converged", "rel_diff", "is_valid"])
+# _SDA_JITTER = 1e-14
+
+# def solve_quadratic_matrix_equation_jax(A, B, C, initial_guess=None,
+#                                         tol=1e-12, max_iter=500, # Keep max_iter reasonably high
+#                                         verbose=False): # verbose is ineffective
+#     """
+#     Solves A X^2 + B X + C = 0 for X using the SDA algorithm implemented with
+#     jax.lax.scan. RUNS FOR FIXED max_iter iterations without early stopping or internal checks.
+#     Validity/convergence checked only *after* the scan loop.
+#     Designed for maximum robustness within JAX tracing/gradient contexts.
+
+#     Args: ... (same)
+
+#     Returns:
+#         Tuple: (X_sol, iter_count, residual_ratio, converged_flag)
+#                - X_sol: The computed solution (JAX array). NaN if solve failed validity/convergence check.
+#                - iter_count: Always returns max_iter.
+#                - residual_ratio: Relative residual norm of the final state after max_iter.
+#                - converged_flag: Boolean JAX array indicating if the final state is valid
+#                                  AND its residual ratio is below tolerance.
+#     """
+#     dtype = A.dtype
+#     n = A.shape[0]
+#     A_jax = jnp.asarray(A, dtype=dtype)
+#     B_jax = jnp.asarray(B, dtype=dtype)
+#     C_jax = jnp.asarray(C, dtype=dtype)
+
+#     if initial_guess is None: X_guess = jnp.zeros_like(A_jax)
+#     else: X_guess = jnp.asarray(initial_guess, dtype=dtype)
+
+#     # --- Initial Setup ---
+#     E_init = C_jax
+#     F_init = A_jax
+#     Bbar = B_jax + A_jax @ X_guess
+#     I = jnp.eye(n, dtype=dtype)
+#     Bbar_reg = Bbar + _SDA_JITTER * I
+#     E0 = -jax.scipy.linalg.solve(Bbar_reg, E_init, assume_a='gen')
+#     F0 = -jax.scipy.linalg.solve(Bbar_reg, F_init, assume_a='gen')
+
+#     # Define state for scan: (Xk, Yk, Ek, Fk)
+#     init_scan_state = (E0, F0, E0, F0)
+
+#     # --- Scan Body: Unconditional SDA Update ---
+#     def sda_unconditional_step(state_k, _):
+#         """ Performs one UNCONDITIONAL iteration of SDA. """
+#         Xk, Yk, Ek, Fk = state_k
+#         # Add jitter before solve
+#         M1 = I - Yk @ Xk + _SDA_JITTER * I
+#         M2 = I - Xk @ Yk + _SDA_JITTER * I
+
+#         # Perform solves directly. Let NaN/inf propagate.
+#         temp_E = jax.scipy.linalg.solve(M1, Ek, assume_a='gen')
+#         E_new = Ek @ temp_E
+#         temp_F = jax.scipy.linalg.solve(M2, Fk, assume_a='gen')
+#         F_new = Fk @ temp_F
+#         temp_X = Xk @ Ek
+#         temp_X = jax.scipy.linalg.solve(M2, temp_X, assume_a='gen')
+#         X_new = Xk + Fk @ temp_X
+#         temp_Y = Yk @ Fk
+#         temp_Y = jax.scipy.linalg.solve(M1, temp_Y, assume_a='gen')
+#         Y_new = Yk + Ek @ temp_Y
+
+#         next_state = (X_new, Y_new, E_new, F_new)
+#         # Accumulate nothing, just return the next state
+#         return next_state, None
+
+#     # --- Run the Scan for FIXED max_iter iterations ---
+#     final_scan_state, _ = lax.scan(sda_unconditional_step, init_scan_state, xs=None, length=max_iter)
+
+#     # --- Post-Scan Processing ---
+#     # Extract the final state after max_iter iterations
+#     X_final_iter, Y_final_iter, E_final_iter, F_final_iter = final_scan_state
+#     X_sol_scan = X_final_iter + X_guess
+
+#     # --- Check Validity and Convergence AFTER the scan ---
+#     final_is_valid = jnp.all(jnp.isfinite(X_sol_scan))
+
+#     # Calculate residual ratio for the final iterate
+#     residual = A_jax @ (X_sol_scan @ X_sol_scan) + B_jax @ X_sol_scan + C_jax
+#     residual_norm = jnp.linalg.norm(residual, 'fro')
+#     term_norms = (jnp.linalg.norm(A_jax @ X_sol_scan @ X_sol_scan, 'fro') +
+#                   jnp.linalg.norm(B_jax @ X_sol_scan, 'fro') +
+#                   jnp.linalg.norm(C_jax, 'fro'))
+#     residual_ratio = residual_norm / jnp.maximum(term_norms, 1e-15) # Safe division
+
+#     # Declare converged ONLY if the final state is valid AND residual is low
+#     converged_flag = final_is_valid & (residual_ratio < tol)
+
+#     # Return NaN if not converged / invalid
+#     X_sol_final = jnp.where(converged_flag,
+#                             X_sol_scan,
+#                             jnp.full_like(X_sol_scan, jnp.nan))
+
+#     # iter_count is always max_iter in this version
+#     return X_sol_final, max_iter, residual_ratio, converged_flag
+
+
+
+
+# Define a state tuple for clarity in the scan
+# Added is_valid flag to track numerical stability during iteration
+SDAState = namedtuple("SDAState", ["Xk", "Yk", "Ek", "Fk", "k", "converged", "rel_diff", "is_valid"])
+_SDA_JITTER = 1e-14 # Small regularization factor
+
+def solve_quadratic_matrix_equation_jax(A, B, C, initial_guess=None,
+                                        tol=1e-12, max_iter=500,
+                                        verbose=False): # verbose is ineffective in JIT
+    """
+    Solves A X^2 + B X + C = 0 for X using the SDA algorithm implemented with
+    jax.lax.scan. Uses jnp.where for conditional updates after update step.
+    (Attempt 3 from conversation)
+
+    Args:
+        A, B, C: JAX arrays for the quadratic matrix equation coefficients.
+        initial_guess: Optional initial guess for the solution (JAX array).
+        tol: Convergence tolerance for the relative change in X.
+        max_iter: Fixed maximum number of iterations for the scan loop.
+        verbose: (Not effective inside JIT/grad) If True, prints convergence progress.
+
+    Returns:
+        Tuple: (X_sol, iter_count, residual_ratio, converged_flag)
+               - X_sol: The computed solution (JAX array). NaN if solve failed validity/convergence check.
+               - iter_count: The iteration number when convergence was reached (or max_iter).
+               - residual_ratio: Relative residual norm of the final solution.
+               - converged_flag: Boolean JAX array indicating if tolerance was met *within* max_iter AND result is valid.
+    """
+    dtype = A.dtype
+    n = A.shape[0]
+    A_jax = jnp.asarray(A, dtype=dtype)
+    B_jax = jnp.asarray(B, dtype=dtype)
+    C_jax = jnp.asarray(C, dtype=dtype)
+
+    if initial_guess is None:
+        X_guess = jnp.zeros_like(A_jax)
+    else:
+        X_guess = jnp.asarray(initial_guess, dtype=dtype)
+
+    # --- Initial Setup ---
+    E_init = C_jax
+    F_init = A_jax
+    Bbar = B_jax + A_jax @ X_guess
+    I = jnp.eye(n, dtype=dtype)
+    Bbar_reg = Bbar + _SDA_JITTER * I
+    E0 = -jax.scipy.linalg.solve(Bbar_reg, E_init, assume_a='gen')
+    F0 = -jax.scipy.linalg.solve(Bbar_reg, F_init, assume_a='gen')
+
+    # Check if initial solve was valid
+    initial_solve_valid = jnp.all(jnp.isfinite(E0)) & jnp.all(jnp.isfinite(F0))
+
+    # --- Scan Loop Definition ---
+    def sda_scan_body(state, _):
+        """Performs one iteration of the SDA algorithm."""
+        Xk, Yk, Ek, Fk, k, prev_converged, prev_rel_diff, prev_is_valid = state
+
+        # --- Always perform the update step ---
+        # Add jitter to matrices before solve
+        M1 = I - Yk @ Xk + _SDA_JITTER * I
+        M2 = I - Xk @ Yk + _SDA_JITTER * I
+
+        # Perform solves directly. Let NaN/inf propagate on failure.
+        temp_E = jax.scipy.linalg.solve(M1, Ek, assume_a='gen')
+        E_new = Ek @ temp_E
+        temp_F = jax.scipy.linalg.solve(M2, Fk, assume_a='gen')
+        F_new = Fk @ temp_F
+        temp_X = Xk @ Ek
+        temp_X = jax.scipy.linalg.solve(M2, temp_X, assume_a='gen')
+        X_new = Xk + Fk @ temp_X
+        temp_Y = Yk @ Fk
+        temp_Y = jax.scipy.linalg.solve(M1, temp_Y, assume_a='gen')
+        Y_new = Yk + Ek @ temp_Y
+
+        # Calculate relative difference (handle potential division by zero/NaN)
+        X_diff_norm = jnp.linalg.norm(X_new - Xk, ord='fro')
+        X_norm = jnp.linalg.norm(X_new, ord='fro')
+        current_rel_diff = X_diff_norm / jnp.maximum(X_norm, 1e-15)
+
+        # Check if this update step produced valid finite results
+        current_step_valid = jnp.all(jnp.isfinite(X_new)) & \
+                             jnp.all(jnp.isfinite(Y_new)) & \
+                             jnp.all(jnp.isfinite(E_new)) & \
+                             jnp.all(jnp.isfinite(F_new)) & \
+                             jnp.isfinite(current_rel_diff)
+
+        # Determine if convergence is met *in this potentially valid step*
+        converged_this_step = current_step_valid & (current_rel_diff < tol)
+
+        # Overall validity: Must have been valid previously AND current step is valid
+        current_is_valid = prev_is_valid & current_step_valid
+
+        # Update convergence flag: Converged if it was already converged OR converged this valid step
+        current_converged = prev_converged | converged_this_step
+
+        # --- Use jnp.where to choose whether to update the state ---
+        # Condition: Should we keep the NEW state? Only if the system was valid BEFORE this step,
+        #            AND this step is valid, AND we haven't already converged.
+        #            (If prev_converged is True, we want to keep the OLD state).
+        #            (If current_step_valid is False, we want to keep the OLD state and mark invalid).
+        keep_new_state_cond = prev_is_valid & current_step_valid & (~prev_converged)
+
+        X_next = jnp.where(keep_new_state_cond, X_new, Xk)
+        Y_next = jnp.where(keep_new_state_cond, Y_new, Yk)
+        E_next = jnp.where(keep_new_state_cond, E_new, Ek)
+        F_next = jnp.where(keep_new_state_cond, F_new, Fk)
+        next_rel_diff = jnp.where(keep_new_state_cond, current_rel_diff, prev_rel_diff)
+        # Propagate converged status correctly
+        next_converged = jnp.where(keep_new_state_cond, current_converged, prev_converged)
+        # Propagate validity status correctly
+        next_is_valid = current_is_valid # If prev was invalid, this remains invalid. If prev was valid, depends on current.
+
+        next_state = SDAState(X_next, Y_next, E_next, F_next, k + 1,
+                              next_converged, next_rel_diff, next_is_valid)
+        return next_state, None # No per-step output needed
+
+    # Initialize state for the scan
+    init_state = SDAState(Xk=E0, Yk=F0, Ek=E0, Fk=F0, k=0,
+                          converged=jnp.array(False),
+                          rel_diff=jnp.inf,
+                          is_valid=initial_solve_valid) # Initial validity
+
+    # Run the scan for exactly max_iter iterations
+    final_state, _ = lax.scan(sda_scan_body, init_state, xs=None, length=max_iter)
+
+    # --- Post-Scan Processing ---
+    X_sol_scan = final_state.Xk + X_guess
+
+    # Final convergence requires the final state to be valid AND the convergence flag to be true
+    converged_flag = final_state.converged & final_state.is_valid
+
+    iter_final = final_state.k # Will always be max_iter
+
+    # Recalculate residual for the final solution
+    residual = A_jax @ (X_sol_scan @ X_sol_scan) + B_jax @ X_sol_scan + C_jax
+    residual_norm = jnp.linalg.norm(residual, 'fro')
+    term_norms = (jnp.linalg.norm(A_jax @ X_sol_scan @ X_sol_scan, 'fro') +
+                  jnp.linalg.norm(B_jax @ X_sol_scan, 'fro') +
+                  jnp.linalg.norm(C_jax, 'fro'))
+    residual_ratio = residual_norm / jnp.maximum(term_norms, 1e-15)
+
+    # Return NaN if convergence failed or state is invalid
+    X_sol_final = jnp.where(converged_flag,
+                            X_sol_scan,
+                            jnp.full_like(X_sol_scan, jnp.nan))
+
+    return X_sol_final, iter_final, residual_ratio, converged_flag
 
 def extract_trend_declarations(model_string):
     """Extracts trend variables and trend shocks."""
@@ -1321,7 +1484,7 @@ def extract_trend_shock_stderrs(model_string):
 
 # --- State-Space Building Functions ---
 
-def build_trend_matrices(trend_equations, trend_vars, trend_shocks, param_names, param_assignments):
+def build_trend_matrices(trend_equations, trend_vars, trend_shocks, param_names, param_assignments, verbose=True):
     """
     Builds symbolic P_trends and Q_trends matrices.
     Assumes trend model is VAR(1)-like: T(t) = P_trends * T(t-1) + Q_trends * shocks(t).
@@ -1526,7 +1689,7 @@ def build_trend_matrices(trend_equations, trend_vars, trend_shocks, param_names,
 
 def build_observation_matrix(measurement_equations, obs_vars, stationary_vars,
                              trend_state_vars, contemporaneous_trend_defs,
-                             param_names, param_assignments):
+                             param_names, param_assignments, verbose=True):
     """
     Builds the symbolic observation matrix Omega.
     Omega maps the augmented state [stationary_vars(t), trend_state_vars(t)]
@@ -1738,63 +1901,85 @@ def plot_irfs(irf_values, var_names, horizon, title="Impulse Responses"):
     plt.show()
 
 # --- IRF Calculation Functions ---
+# Inside Dynare_parser_sda_solver.py
+
+import jax.numpy as jnp # Make sure this is imported
+# ... other imports ...
 
 def irf(P, Q, shock_index, horizon=40):
     """
     Compute impulse responses for y_t = P y_{t-1} + Q e_t,
     for a specific shock index (unit shock).
     P is (n x n), Q is (n x n_shock).
-    Returns (horizon x n) array of state responses.
+    Returns (horizon x n) array of state responses (JAX Array).
     """
-    n = P.shape[0]
-    n_shock = Q.shape[1]
+    # Ensure inputs are JAX arrays
+    P_jax = jnp.asarray(P)
+    Q_jax = jnp.asarray(Q)
+    n = P_jax.shape[0]
+    n_shock = Q_jax.shape[1]
+    dtype = P_jax.dtype # Get dtype from input
+
     if shock_index < 0 or shock_index >= n_shock:
         raise ValueError(f"shock_index must be between 0 and {n_shock-1}")
 
-    y_resp = np.zeros((horizon, n))
-    e0 = np.zeros((n_shock, 1))
-    e0[shock_index] = 1.0 # Unit shock
+    # Use JAX arrays throughout
+    y_resp = jnp.zeros((horizon, n), dtype=dtype)
+    e0 = jnp.zeros((n_shock, 1), dtype=dtype).at[shock_index].set(1.0) # Unit shock
 
     # y_0 = P*y_{-1} + Q*e_0. Assume y_{-1} = 0.
-    y_current = Q @ e0
-    y_resp[0, :] = y_current.flatten()
+    y_current = Q_jax @ e0
+    y_resp = y_resp.at[0, :].set(y_current.flatten())
 
-    # Subsequent periods: e_t = 0 for t > 0
-    for t in range(1, horizon):
-        y_current = P @ y_current
-        y_resp[t, :] = y_current.flatten()
+    # Use lax.scan for efficient iteration in JAX
+    def step(y_prev, _):
+        y_next = P_jax @ y_prev
+        return y_next, y_next.flatten()
 
-    # Set very small values to zero for cleaner output
-    y_resp[np.abs(y_resp) < 1e-14] = 0.0
-    return y_resp
+    # Initial state for scan is y_0 (already computed)
+    # We need horizon-1 steps after the first one
+    _, y_resp_scan = jax.lax.scan(step, y_current, xs=None, length=horizon - 1)
+
+    # Combine the first step with the scanned results
+    y_resp = y_resp.at[1:, :].set(y_resp_scan)
+
+    # Set very small values to zero using jnp.where (creates a new array)
+
+    y_resp_clean = jnp.where(jnp.abs(y_resp) < 1e-14, 0.0, y_resp)
+
+    return y_resp_clean # Return the modified JAX array
+# Inside Dynare_parser_sda_solver.py
 
 def irf_observables(P_aug, Q_aug, Omega, shock_index, horizon=40):
     """
     Compute impulse responses for observable variables.
     obs(t) = Omega * state_aug(t)
     shock_index refers to the index in the augmented shock vector.
-    Returns (horizon x n_obs) array of observable responses.
+    Returns (horizon x n_obs) array of observable responses (JAX Array).
     """
-    n_aug = P_aug.shape[0]
-    n_aug_shock = Q_aug.shape[1]
-    n_obs = Omega.shape[0]
+    # Ensure inputs are JAX arrays
+    P_aug_jax = jnp.asarray(P_aug)
+    Q_aug_jax = jnp.asarray(Q_aug)
+    Omega_jax = jnp.asarray(Omega)
+    n_aug = P_aug_jax.shape[0]
+    n_aug_shock = Q_aug_jax.shape[1]
+    n_obs = Omega_jax.shape[0]
 
     if shock_index < 0 or shock_index >= n_aug_shock:
          raise ValueError(f"Augmented shock_index must be between 0 and {n_aug_shock-1}")
-    if Omega.shape[1] != n_aug:
-         raise ValueError(f"Omega columns ({Omega.shape[1]}) must match P_aug dimension ({n_aug}).")
+    if Omega_jax.shape[1] != n_aug:
+         raise ValueError(f"Omega columns ({Omega_jax.shape[1]}) must match P_aug dimension ({n_aug}).")
 
-    # 1. Compute IRF for the augmented state vector
-    state_irf = irf(P_aug, Q_aug, shock_index, horizon) # shape (horizon, n_aug)
+    # 1. Compute IRF for the augmented state vector (calls the modified irf function)
+    state_irf = irf(P_aug_jax, Q_aug_jax, shock_index, horizon) # shape (horizon, n_aug) - JAX Array
 
     # 2. Map state responses to observable responses: obs_irf = state_irf @ Omega^T
-    # Need to transpose Omega because state_irf has time on rows, state on columns
-    obs_irf = state_irf @ Omega.T # shape (horizon, n_obs)
+    obs_irf = state_irf @ Omega_jax.T # shape (horizon, n_obs) - JAX Array
 
-     # Set very small values to zero
-    obs_irf[np.abs(obs_irf) < 1e-14] = 0.0
-    return obs_irf
+    # Set very small values to zero using jnp.where
+    obs_irf_clean = jnp.where(jnp.abs(obs_irf) < 1e-14, 0.0, obs_irf)
 
+    return obs_irf_clean # Return the modified JAX array
 
 # --- Main Execution ---
 if __name__ == "__main__":
