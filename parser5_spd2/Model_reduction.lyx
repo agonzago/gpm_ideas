@@ -151,52 +151,42 @@ SHK_RS // Foreign interest rate shock
 \end_layout
 
 \begin_layout Verbatim
-
 // Aggregate demand
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 // Core Inflation
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 // Monetary policy reaction function
 \end_layout
 
 \begin_layout Verbatim
-
 RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + RES_RS;
 \end_layout
 
 \begin_layout Verbatim
-
 RR_GAP = RS - DLA_CPI(+1);
 \end_layout
 
 \begin_layout Verbatim
-
 RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
 \end_layout
 
@@ -209,37 +199,30 @@ Clean Equations
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RR_GAP(+1)) + RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 RR_GAP = RS - DLA_CPI(+1)  
 \end_layout
 
 \begin_layout Verbatim
-
 RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + RES_RS;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS = rho_rs*RES_RS(-1) + rho_rs2*RES_RS + SHK_RS;
 \end_layout
 
@@ -253,14 +236,12 @@ Variables in the system
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_GAP enters in t,
  t+1,
  t-1
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI  enters in t,
  t+1,
  t+3,
@@ -268,7 +249,6 @@ DLA_CPI  enters in t,
 \end_layout
 
 \begin_layout Verbatim
-
 RS:
  enters  t,
  t-1,
@@ -276,21 +256,18 @@ RS:
 \end_layout
 
 \begin_layout Verbatim
-
 RES_L_GDP_GAP:
  enters in t,
  t-1
 \end_layout
 
 \begin_layout Verbatim
-
 RES_DLA_CPI:
  enters in t,
  t-1
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS:
  enters in t,t-1,
  t-2
@@ -301,7 +278,6 @@ RES_RS:
 \end_layout
 
 \begin_layout Verbatim
-
 The system should be written for variables in t+1,
  t and t-1.
  So variables with longer leads and lags should be expressed through auxiliary variables.
@@ -312,17 +288,14 @@ The system should be written for variables in t+1,
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead(t) = DLA_CPI(t+1)
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead2(t) = aux_DLA_CPI_lead(t+1)
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead3(t) = aux_DLA_CPI_lead2(t+1) 
 \end_layout
 
@@ -331,18 +304,15 @@ aux_DLA_CPI_lead3(t) = aux_DLA_CPI_lead2(t+1)
 \end_layout
 
 \begin_layout Verbatim
-
 Similar longer lags (longer than (-1)) should also imply auxiliary variables.
  This will imply 
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS_lag = RES_RS(-1)
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS_lag2 = RES_RS_lag(-1)
 \end_layout
 
@@ -359,52 +329,42 @@ Rewrite the system of equations in terms of the auxiliary variables
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*(RR_GAP(+1)) + RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*aux_DLA_CPI_lead(+1) + g3*L_GDP_GAP) + RES_RS;
 \end_layout
 
 \begin_layout Verbatim
-
 RR_GAP = RS - DLA_CPI(+1);
 \end_layout
 
 \begin_layout Verbatim
-
 RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS = rho_rs*RES_RS(-1) + rho_rs2*aux_RES_RS_lag(-1) + SHK_RS;
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead = DLA_CPI(+1)
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead2 = aux_DLA_CPI_lead(+1)
 \end_layout
 
 \begin_layout Verbatim
-
 aux_RES_RS_lag = RES_RS(-1)
 \end_layout
 
@@ -421,52 +381,42 @@ Replace by _mk and pk.
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_GAP = (1-b1)*L_GDP_GAP_p1 + b1*L_GDP_GAP_m1 - b4*(RR_GAP_p1) + RES_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI = a1*DLA_CPI_m1 + (1-a1)*DLA_CPI_p1 + a2*L_GDP_GAP + RES_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 RS = g1*RS_m1 + (1-g1)*(DLA_CPI_p1 + g2*aux_DLA_CPI_lead_p1 + g3*L_GDP_GAP) + RES_RS;
 \end_layout
 
 \begin_layout Verbatim
-
 RR_GAP = RS - DLA_CPI_p1;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP + SHK_L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI + SHK_DLA_CPI;
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS = rho_rs*RES_RS_m1 + rho_rs2*aux_RES_RS_lag_m1 + SHK_RS;
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead = DLA_CPI_p1
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead2 = aux_DLA_CPI_lead_p1
 \end_layout
 
 \begin_layout Verbatim
-
 aux_RES_RS_lag = RES_RS_m1
 \end_layout
 
@@ -475,7 +425,6 @@ aux_RES_RS_lag = RES_RS_m1
 \end_layout
 
 \begin_layout Verbatim
-
 10 equations on 10 variables
 \end_layout
 
@@ -484,57 +433,46 @@ aux_RES_RS_lag = RES_RS_m1
 \end_layout
 
 \begin_layout Verbatim
-
 List of contempotaneous variables 
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_GAP
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI
 \end_layout
 
 \begin_layout Verbatim
-
 RS
 \end_layout
 
 \begin_layout Verbatim
-
 RR_GAP
 \end_layout
 
 \begin_layout Verbatim
-
 RES_L_GDP_GAP
 \end_layout
 
 \begin_layout Verbatim
-
 RES_DLA_CPI
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead2
 \end_layout
 
 \begin_layout Verbatim
-
 aux_RES_RS_lag
 \end_layout
 
@@ -543,37 +481,30 @@ aux_RES_RS_lag
 \end_layout
 
 \begin_layout Verbatim
-
 The order of the variables should be
 \end_layout
 
 \begin_layout Verbatim
-
 forward_looking = 
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_GA
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI
 \end_layout
 
 \begin_layout Verbatim
-
 RS
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead
 \end_layout
 
 \begin_layout Verbatim
-
 aux_DLA_CPI_lead2
 \end_layout
 
@@ -586,27 +517,22 @@ aux_DLA_CPI_lead2
 \end_layout
 
 \begin_layout Verbatim
-
 backward_looking_list
 \end_layout
 
 \begin_layout Verbatim
-
 RES_L_GDP_GAP
 \end_layout
 
 \begin_layout Verbatim
-
 RES_DLA_CPI
 \end_layout
 
 \begin_layout Verbatim
-
 RES_RS
 \end_layout
 
 \begin_layout Verbatim
-
 aux_RES_RS_lag
 \end_layout
 
@@ -615,22 +541,18 @@ aux_RES_RS_lag
 \end_layout
 
 \begin_layout Verbatim
-
 exo_var_list 
 \end_layout
 
 \begin_layout Verbatim
-
 SHK_L_GDP_GAP
 \end_layout
 
 \begin_layout Verbatim
-
 SHK_DLA_CPI
 \end_layout
 
 \begin_layout Verbatim
-
 SHK_RS 
 \end_layout
 
@@ -743,7 +665,18 @@ b & -c & 0 & 0 & 0 & 0 & 0 & 0\\
 0 & 0 & 0 & 0 & 0 & -1 & 0 & 0\\
 0 & 0 & 0 & 0 & 0 & 0 & -1 & 0\\
 0 & 0 & 0 & 0 & 0 & 0 & 0 & -1
-\end{array}\right];C=\left[\begin{array}{cccccccc}
+\end{array}\right];
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+C=\left[\begin{array}{cccccccc}
 a & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
@@ -752,7 +685,7 @@ a & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
 0 & 0 & 0 & 0 & 0 & \rho_{zw} & 0 & 0\\
 0 & 0 & 0 & 0 & 0 & 1 & 0 & 0\\
 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0
-\end{array}\right];
+\end{array}\right]
 \]
 
 \end_inset
@@ -930,167 +863,134 @@ The dyn files has sections
 \end_layout
 
 \begin_layout Verbatim
-
 varexo_trends
 \end_layout
 
 \begin_layout Verbatim
-
 SHK_L_GDP_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 SHK_G_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 SHP_PI_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 SHK_RS_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 SHK_RR_TREND
 \end_layout
 
 \begin_layout Verbatim
-
 ;
 \end_layout
 
 \begin_layout Verbatim
-
 trends_vars
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 PI_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 RS_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 RR_TREND,
 \end_layout
 
 \begin_layout Verbatim
-
 G_TREND
 \end_layout
 
 \begin_layout Verbatim
-
 ;
 \end_layout
 
 \begin_layout Verbatim
-
 trend_model;
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_TREND = L_GDP_TREND(-1) + G_TREND(-1) + SHK_L_GDP_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 G_TREND = G_TREND(-1) + SHK_G_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 PI_TREND = PI_TREND(-1) + SHP_PI_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 RS_TREND = RR_TREND + PI_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 RR_TREND = RR_TREND(-1) + SHK_RR_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 end;
 \end_layout
 
 \begin_layout Verbatim
-
 varobs
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_OBS
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI_OBS
 \end_layout
 
 \begin_layout Verbatim
-
 PI_TREND_OBS
 \end_layout
 
 \begin_layout Verbatim
-
 RS_OBS
 \end_layout
 
 \begin_layout Verbatim
-
 ;
 \end_layout
 
 \begin_layout Verbatim
-
 measument_equations;
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_OBS = L_GDP_TREND + L_GDP_GAP;
 \end_layout
 
 \begin_layout Verbatim
-
 DLA_CPI_OBS = DLA_CPI + PI_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 PI_TREND_OBS = PI_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 RS_OBS = RS_TREND + RS;
 \end_layout
 
 \begin_layout Verbatim
-
 end;
 \end_layout
 
@@ -1265,32 +1165,26 @@ If
 \end_inset
 
 is a vector with L_GDP_TREND,
- 
-PI_TREND,RS_TREND,RR_TREND,G_TREND and then the parsed 
+ PI_TREND,RS_TREND,RR_TREND,G_TREND and then the parsed 
 \end_layout
 
 \begin_layout Verbatim
-
 L_GDP_TREND = L_GDP_TREND_m1 + G_TREND_m1 + SHK_L_GDP_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 G_TREND = G_TREND_m1 + SHK_G_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 PI_TREND = PI_TREND_m1 + SHP_PI_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 RS_TREND = RR_TREND + PI_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 RR_TREND = RR_TREND_m1 + SHK_RR_TREND;
 \end_layout
 
@@ -1299,7 +1193,6 @@ RR_TREND = RR_TREND_m1 + SHK_RR_TREND;
 \end_layout
 
 \begin_layout Verbatim
-
 the P_trend is the derivarive of the RHS of each equation with respect to _m coefficients
 \end_layout
 
