@@ -274,46 +274,110 @@ class DynareModelWithSympyVJPs:
         if self.verbose: print("--- DynareModel: Symbolic Setup Complete ---")
 
 
+# In class DynareModelWithSympyVJPs in run_estimation.py
+
     def solve(self, param_dict: Dict[str, float]) -> Dict[str, Any]:
         if not self._parsed: self._parse_and_generate_lambdas()
         params_tuple_jax = tuple(jnp.asarray(param_dict[p_name], dtype=_DEFAULT_DTYPE) for p_name in self.all_param_names)
 
         results = {"solution_valid": jnp.array(False)}
+        if self.verbose: print(f"\n--- Solving with params: {param_dict} ---")
+
         try:
-            # Call the VJP-defined standalone functions
+            # --- Step 1: Stationary Matrices ---
+            if self.verbose: print("  Calling build_stationary_matrices_with_vjp...") # Corrected name
+            # CORRECTED CALL: No 'self.' prefix, using the module-level function name
             A_num_stat, B_num_stat, C_num_stat, D_num_stat = build_stationary_matrices_with_vjp(
                 params_tuple_jax,
                 self._symbolic_data['stationary']['lambda_matrices'],
                 self.stat_eq_perm_indices,
                 self.stat_var_perm_indices
             )
+            # ... (debugging prints and checks remain the same) ...
+            if self.verbose:
+                print(f"    A_num_stat shape: {A_num_stat.shape}, isfinite: {jnp.all(jnp.isfinite(A_num_stat))}")
+                # ... other prints ...
+            if not (jnp.all(jnp.isfinite(A_num_stat)) and jnp.all(jnp.isfinite(B_num_stat)) and \
+                    jnp.all(jnp.isfinite(C_num_stat)) and jnp.all(jnp.isfinite(D_num_stat))):
+                if self.verbose: print("  ERROR: NaN/Inf in stationary matrices A,B,C,D from VJP.")
+                # ... (error handling return remains the same) ...
+                results["P_aug"] = jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["R_aug"] = jnp.full((self.n_aug, self.n_aug_shock), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["Omega"] = jnp.full((self.n_obs, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                return results
 
+
+            # --- Step 2: Solve Stationary Model (SDA) ---
+            if self.verbose: print("  Calling solve_quadratic_matrix_equation_jax...")
             P_sol_stat, _, _, converged_stat = solve_quadratic_matrix_equation_jax(
                 A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=500
             )
             valid_stat_solve = converged_stat & jnp.all(jnp.isfinite(P_sol_stat))
+            # ... (debugging prints and checks remain the same) ...
+            if not valid_stat_solve:
+                if self.verbose: print("  ERROR: SDA solver failed or P_sol_stat contains NaN/Inf.")
+                # ... (error handling return remains the same) ...
+                results["P_aug"] = jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["R_aug"] = jnp.full((self.n_aug, self.n_aug_shock), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["Omega"] = jnp.full((self.n_obs, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                return results
 
+            # --- Step 3: Compute Q_stationary ---
+            if self.verbose: print("  Calling compute_Q_jax...")
+            # Ensure D_num_stat has a fallback shape for jnp.full_like if it's problematic
+            fallback_D_shape = (A_num_stat.shape[0], self.n_s_shock if hasattr(self, 'n_s_shock') else 0)
             Q_sol_stat = jnp.where(
                  valid_stat_solve,
                  compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat),
-                 jnp.full((A_num_stat.shape[0], D_num_stat.shape[1] if D_num_stat.ndim == 2 else 0) , jnp.nan, dtype=_DEFAULT_DTYPE) # Correct fallback shape for Q
+                 jnp.full(fallback_D_shape, jnp.nan, dtype=_DEFAULT_DTYPE)
             )
             valid_q_compute = jnp.all(jnp.isfinite(Q_sol_stat))
+            # ... (debugging prints and checks remain the same) ...
+            if not valid_q_compute:
+                if self.verbose: print("  ERROR: Q_sol_stat computation resulted in NaN/Inf.")
+                # ... (error handling return remains the same) ...
+                results["P_aug"] = jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["R_aug"] = jnp.full((self.n_aug, self.n_aug_shock), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["Omega"] = jnp.full((self.n_obs, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                return results
 
+            # --- Step 4: Trend Matrices ---
+            if self.verbose: print("  Calling build_trend_matrices_with_vjp...") # Corrected name
+            # CORRECTED CALL
             P_num_trend, Q_num_trend = build_trend_matrices_with_vjp(
                 params_tuple_jax,
-                self._symbolic_data['trend'] # Pass the whole trend data dict
+                self._symbolic_data['trend']
             )
+            # ... (debugging prints and checks remain the same) ...
+            if not (jnp.all(jnp.isfinite(P_num_trend)) and jnp.all(jnp.isfinite(Q_num_trend))):
+                if self.verbose: print("  ERROR: NaN/Inf in trend matrices P,Q from VJP.")
+                # ... (error handling return remains the same) ...
+                results["P_aug"] = jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["R_aug"] = jnp.full((self.n_aug, self.n_aug_shock), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["Omega"] = jnp.full((self.n_obs, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                return results
 
+            # --- Step 5: Observation Matrix ---
+            if self.verbose: print("  Calling build_observation_matrix_with_vjp...") # Corrected name
+            # CORRECTED CALL
             Omega_num = build_observation_matrix_with_vjp(
                 params_tuple_jax,
-                self._symbolic_data['observation'], # Pass the whole obs data dict
+                self._symbolic_data['observation'],
                 self.n_obs,
                 self.n_aug
             )
-
-            # --- Build R Matrices & Augmented System (Numerical part) ---
-            # ... (This part is the same as the previous version) ...
+            # ... (debugging prints and checks remain the same) ...
+            if not jnp.all(jnp.isfinite(Omega_num)):
+                if self.verbose: print("  ERROR: NaN/Inf in Omega matrix from VJP.")
+                # ... (error handling return remains the same) ...
+                results["P_aug"] = jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["R_aug"] = jnp.full((self.n_aug, self.n_aug_shock), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["Omega"] = jnp.full((self.n_obs, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                return results
+            
+            # ... (Rest of the solve method for R matrix and augmented system construction) ...
+            # ... (This part should be okay if inputs are correct) ...
+            if self.verbose: print("  Building R matrices and augmented system...")
             shock_std_devs = {}
             for shock_name in self.aug_shocks:
                 sigma_param_name = f"sigma_{shock_name}"
@@ -323,27 +387,42 @@ class DynareModelWithSympyVJPs:
             stat_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.stat_shocks], dtype=_DEFAULT_DTYPE) if self.stat_shocks else jnp.array([], dtype=_DEFAULT_DTYPE)
             trend_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.trend_shocks], dtype=_DEFAULT_DTYPE) if self.trend_shocks else jnp.array([], dtype=_DEFAULT_DTYPE)
             R_sol_stat = jnp.zeros((self.n_stat, self.n_s_shock), dtype=_DEFAULT_DTYPE)
-            if self.n_s_shock > 0 and Q_sol_stat.ndim == 2 and Q_sol_stat.shape == (self.n_stat, self.n_s_shock): R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr) # Ensure Q_sol_stat is 2D
+            if self.n_s_shock > 0 and Q_sol_stat.ndim == 2 and Q_sol_stat.shape == (self.n_stat, self.n_s_shock): R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr)
             R_num_trend = jnp.zeros((self.n_trend, self.n_t_shock), dtype=_DEFAULT_DTYPE)
-            if self.n_t_shock > 0 and Q_num_trend.ndim == 2 and Q_num_trend.shape == (self.n_trend, self.n_t_shock): R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr) # Ensure Q_num_trend is 2D
+            if self.n_t_shock > 0 and hasattr(Q_num_trend, 'shape') and Q_num_trend.ndim ==2 and Q_num_trend.shape == (self.n_trend, self.n_t_shock): R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr)
+            
             blocks_P = []
-            if P_sol_stat.size > 0: blocks_P.append(P_sol_stat)
-            if P_num_trend.size > 0: blocks_P.append(P_num_trend)
+            if hasattr(P_sol_stat, 'size') and P_sol_stat.size > 0 and P_sol_stat.shape == (self.n_stat, self.n_stat): blocks_P.append(P_sol_stat)
+            if hasattr(P_num_trend, 'size') and P_num_trend.size > 0 and P_num_trend.shape == (self.n_trend, self.n_trend): blocks_P.append(P_num_trend)
+            
             if not blocks_P: P_aug = jnp.zeros((self.n_aug, self.n_aug), dtype=_DEFAULT_DTYPE)
-            elif len(blocks_P) == 1: P_aug = blocks_P[0] if blocks_P[0].shape == (self.n_aug, self.n_aug) else jnp.zeros((self.n_aug, self.n_aug), dtype=_DEFAULT_DTYPE) # Ensure shape
-            else: P_aug = jax.scipy.linalg.block_diag(*blocks_P)
-            if P_aug.shape != (self.n_aug, self.n_aug) and self.n_aug > 0 :
-                    temp_P_aug = jnp.zeros((self.n_aug, self.n_aug), dtype=_DEFAULT_DTYPE)
-                    current_row, current_col = 0, 0
-                    if P_sol_stat.size > 0 and P_sol_stat.shape[0] > 0 and P_sol_stat.shape[1] > 0: temp_P_aug = temp_P_aug.at[current_row:current_row+P_sol_stat.shape[0], current_col:current_col+P_sol_stat.shape[1]].set(P_sol_stat); current_row += P_sol_stat.shape[0]; current_col += P_sol_stat.shape[1]
-                    if P_num_trend.size > 0 and P_num_trend.shape[0] > 0 and P_num_trend.shape[1] > 0: temp_P_aug = temp_P_aug.at[current_row:current_row+P_num_trend.shape[0], current_col:current_col+P_num_trend.shape[1]].set(P_num_trend)
-                    P_aug = temp_P_aug
+            elif len(blocks_P) == 1 and blocks_P[0].shape == (self.n_aug, self.n_aug) : P_aug = blocks_P[0]
+            elif len(blocks_P) == 2 and (blocks_P[0].shape[0] + blocks_P[1].shape[0] == self.n_aug): P_aug = jax.scipy.linalg.block_diag(*blocks_P)
+            else: 
+                P_aug = jnp.zeros((self.n_aug, self.n_aug), dtype=_DEFAULT_DTYPE)
+                curr_idx = 0
+                if hasattr(P_sol_stat, 'size') and P_sol_stat.size > 0 and P_sol_stat.shape == (self.n_stat, self.n_stat):
+                    P_aug = P_aug.at[:self.n_stat, :self.n_stat].set(P_sol_stat); curr_idx = self.n_stat
+                if hasattr(P_num_trend, 'size') and P_num_trend.size > 0 and P_num_trend.shape == (self.n_trend, self.n_trend) and self.n_trend > 0:
+                    P_aug = P_aug.at[curr_idx:curr_idx+self.n_trend, curr_idx:curr_idx+self.n_trend].set(P_num_trend)
+
+
             R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=_DEFAULT_DTYPE)
             if self.n_stat > 0 and self.n_s_shock > 0 and R_sol_stat.shape == (self.n_stat, self.n_s_shock): R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
             if self.n_trend > 0 and self.n_t_shock > 0 and R_num_trend.shape == (self.n_trend, self.n_t_shock): R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
+
             all_finite = (jnp.all(jnp.isfinite(P_aug)) & jnp.all(jnp.isfinite(R_aug)) & jnp.all(jnp.isfinite(Omega_num)))
             solution_valid_final = valid_stat_solve & valid_q_compute & all_finite
-            # --- Update results dict ---
+            if self.verbose: print(f"  Final solution_valid: {solution_valid_final}, all_finite: {all_finite}")
+
+            if not solution_valid_final:
+                if self.verbose: print("  ERROR: One or more steps in solve failed or produced non-finite results.")
+                results["P_aug"] = jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["R_aug"] = jnp.full((self.n_aug, self.n_aug_shock), jnp.nan, dtype=_DEFAULT_DTYPE)
+                results["Omega"] = jnp.full((self.n_obs, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE)
+                return results
+
+
             results.update({
                 "P_aug": P_aug, "R_aug": R_aug, "Omega": Omega_num,
                 "solution_valid": solution_valid_final,
@@ -356,16 +435,19 @@ class DynareModelWithSympyVJPs:
 
         except Exception as e:
              if self.verbose: print(f"Exception during model solve (VJP standalone): {type(e).__name__}: {e}")
-             # import traceback; traceback.print_exc()
+             import traceback; traceback.print_exc() # Print full traceback for any exception in solve
              results["solution_valid"] = jnp.array(False)
-             # Define fallback shapes robustly
-             n_aug_val = getattr(self, 'n_aug', 1) if getattr(self, 'n_aug', 1) > 0 else 1
-             n_aug_shock_val = getattr(self, 'n_aug_shock', 0) if getattr(self, 'n_aug_shock', 0) >= 0 else 0
-             n_obs_val = getattr(self, 'n_obs', 1) if getattr(self, 'n_obs', 1) > 0 else 1
+             n_aug_val = getattr(self, 'n_aug', 1); n_aug_val = n_aug_val if n_aug_val > 0 else 1
+             n_aug_shock_val = getattr(self, 'n_aug_shock', 0); n_aug_shock_val = n_aug_shock_val if n_aug_shock_val >= 0 else 0
+             n_obs_val = getattr(self, 'n_obs', 1); n_obs_val = n_obs_val if n_obs_val > 0 else 1
              results["P_aug"] = jnp.full((n_aug_val, n_aug_val), jnp.nan, dtype=_DEFAULT_DTYPE)
              results["R_aug"] = jnp.full((n_aug_val, n_aug_shock_val), jnp.nan, dtype=_DEFAULT_DTYPE)
              results["Omega"] = jnp.full((n_obs_val, n_aug_val), jnp.nan, dtype=_DEFAULT_DTYPE)
+        
+        results["solution_valid"] = jnp.asarray(results["solution_valid"], dtype=jnp.bool_)
         return results
+
+# ... (rest of the DynareModelWithSympyVJPs class and the __main__ block) ...
 
     # --- log_likelihood method (remains the same) ---
     def log_likelihood(self, param_dict: Dict[str, float], ys: jax.Array,
@@ -464,7 +546,7 @@ if __name__ == "__main__":
 
     print(f"\n--- [1] Initializing Dynare Model with Symbolic VJPs ({mod_file_path}) ---")
     try:
-        model = DynareModelWithSympyVJPs(mod_file_path, verbose=False)
+        model = DynareModelWithSympyVJPs(mod_file_path, verbose=True)
         print(f"Model initialized. Found {len(model.all_param_names)} parameters total.")
     except Exception as e_init:
         print(f"FATAL: Failed to initialize DynareModelWithSympyVJPs: {e_init}")
@@ -476,11 +558,17 @@ if __name__ == "__main__":
     print("\n--- [3] Simulating Data ---")
     sim_key_master = random.PRNGKey(sim_seed); sim_key_init, sim_key_path = random.split(sim_key_master)
     try:
+        # verbose=True on the model instance will make solve print details
         sim_solution = model.solve(sim_param_values)
         if not sim_solution["solution_valid"]:
-            print("FATAL: Cannot solve model with simulation parameters for VJP model."); exit()
+            print("FATAL: Cannot solve model with simulation parameters for VJP model. Check verbose output from solve().");
+            # If solve failed, sim_solution might be missing keys. Print what we have.
+            print(f"  sim_solution content on failure: {sim_solution}")
+            exit()
+        else:
+            print("  Solve for simulation parameters was successful.")
     except Exception as e_solve_init:
-         print(f"FATAL: Error during initial solve for simulation: {type(e_solve_init).__name__}: {e_solve_init}");
+         print(f"FATAL: Exception during initial solve for simulation: {type(e_solve_init).__name__}: {e_solve_init}");
          import traceback; traceback.print_exc()
          exit()
 
