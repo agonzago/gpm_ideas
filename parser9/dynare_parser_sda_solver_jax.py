@@ -682,7 +682,7 @@ def compute_matrices_jax_ad(
           - For "trend": {'P_trends', 'Q_trends'}
           - For "observation": {'Omega'}
     """
-    print(f"\n--- Computing Matrices via JAX AD for {model_type.upper()} Model ---")
+    #print(f"\n--- Computing Matrices via JAX AD for {model_type.upper()} Model ---")
 
     num_vars = len(var_names)
     num_shocks = len(shock_names)
@@ -700,10 +700,10 @@ def compute_matrices_jax_ad(
         resid_func, var_map, shock_map, param_map,resid_func_code  = _create_jax_resid_function(
             equations, var_names, shock_names, param_names, model_type
         )
-        print("DEBUG")
-        print(f"\n--- Dynamically Generated Code for {model_type.upper()} resid_func ---")
-        print(resid_func_code)
-        print("--- End Generated Code ---")  
+        # print("DEBUG")
+        # print(f"\n--- Dynamically Generated Code for {model_type.upper()} resid_func ---")
+        # print(resid_func_code)
+        # print("--- End Generated Code ---")  
     except Exception as e:
         print(f"Error creating JAX residual function for {model_type}: {e}")
         raise
@@ -772,41 +772,41 @@ def compute_matrices_jax_ad(
         raise ValueError(f"Unknown model_type: {model_type}")
 
     # # --- Validation ---
-    print(f"\nValidating computed matrices for {model_type.upper()}...")
-    for name, mat in matrices.items(): # Iterate through computed matrices ONLY
-        if not jnp.all(jnp.isfinite(mat)):
-            print(f"  WARNING ({model_type}): Matrix '{name}' contains non-finite values (NaN/Inf).")
-            # print(mat) # Optionally print the matrix
+    # print(f"\nValidating computed matrices for {model_type.upper()}...")
+    # for name, mat in matrices.items(): # Iterate through computed matrices ONLY
+    #     # if not jnp.all(jnp.isfinite(mat)):
+    #     #     print(f"  WARNING ({model_type}): Matrix '{name}' contains non-finite values (NaN/Inf).")
+    #         # print(mat) # Optionally print the matrix
 
-        # Define expected shape based on the matrix NAME and context
-        expected_shape = None
-        if name in ['A', 'B', 'C']: # Stationary dynamics matrices
-            expected_shape = (num_eq, num_vars)
-        elif name == 'D': # Stationary shock matrix
-            expected_shape = (num_eq, num_shocks)
-        elif name == 'P_trends': # Trend dynamics matrix
-             # Note: num_eq should equal num_vars for state trends
-            expected_shape = (num_eq, num_vars)
-        elif name == 'Q_trends': # Trend shock matrix
-            expected_shape = (num_eq, num_shocks)
-        elif name == 'Omega': # Observation matrix
-             # Context: num_eq=num_obs, num_shocks=num_states for observation model
-             expected_shape = (num_eq, num_shocks)
+    #     # Define expected shape based on the matrix NAME and context
+    #     expected_shape = None
+    #     if name in ['A', 'B', 'C']: # Stationary dynamics matrices
+    #         expected_shape = (num_eq, num_vars)
+    #     elif name == 'D': # Stationary shock matrix
+    #         expected_shape = (num_eq, num_shocks)
+    #     elif name == 'P_trends': # Trend dynamics matrix
+    #          # Note: num_eq should equal num_vars for state trends
+    #         expected_shape = (num_eq, num_vars)
+    #     elif name == 'Q_trends': # Trend shock matrix
+    #         expected_shape = (num_eq, num_shocks)
+    #     elif name == 'Omega': # Observation matrix
+    #          # Context: num_eq=num_obs, num_shocks=num_states for observation model
+    #          expected_shape = (num_eq, num_shocks)
 
-        # Check the shape if an expected shape was determined
-        if expected_shape is not None:
-            if mat.shape != expected_shape:
-                 print(f"  WARNING ({model_type}): Matrix '{name}' shape mismatch. Got {mat.shape}, expected {expected_shape}")
-            else:
-                 print(f"  Matrix '{name}' shape OK: {mat.shape}")
-        else:
-             # This case should ideally not be reached if names are correct
-             print(f"  Internal Warning: Could not determine expected shape for matrix '{name}' ({model_type}). Shape is {mat.shape}.")
-    print(f"--- Validation for {model_type.upper()} complete ---")
-    # --- End of Updated Validation ---
+    #     # Check the shape if an expected shape was determined
+    #     if expected_shape is not None:
+    #         if mat.shape != expected_shape:
+    #              print(f"  WARNING ({model_type}): Matrix '{name}' shape mismatch. Got {mat.shape}, expected {expected_shape}")
+    #         else:
+    #              print(f"  Matrix '{name}' shape OK: {mat.shape}")
+    #     else:
+    #          # This case should ideally not be reached if names are correct
+    #          print(f"  Internal Warning: Could not determine expected shape for matrix '{name}' ({model_type}). Shape is {mat.shape}.")
+    # print(f"--- Validation for {model_type.upper()} complete ---")
+    # # --- End of Updated Validation ---
 
 
-    print(f"--- JAX AD Matrix Computation for {model_type.upper()} COMPLETE ---")
+    #print(f"--- JAX AD Matrix Computation for {model_type.upper()} COMPLETE ---")
     return matrices, resid_func_code
 
 
@@ -856,8 +856,9 @@ def solve_quadratic_matrix_equation_jax(A, B, C, initial_guess=None,
     # Use jax.scipy.linalg.solve which handles potential singularity better (returns NaN/inf)
     E0 = jax.scipy.linalg.solve(Bbar_reg, -E_init, assume_a='gen') # Solve Bbar * E0 = -E_init
     F0 = jax.scipy.linalg.solve(Bbar_reg, -F_init, assume_a='gen') # Solve Bbar * F0 = -F_init
-    initial_solve_valid = jnp.all(jnp.isfinite(E0)) & jnp.all(jnp.isfinite(F0))
-
+    #initial_solve_valid = jnp.all(jnp.isfinite(E0)) & jnp.all(jnp.isfinite(F0))
+    initial_solve_valid = True
+    
     # Scan Loop Definition
     def sda_scan_body(state, _):
         Xk, Yk, Ek, Fk, k, prev_converged, prev_rel_diff, prev_is_valid = state
@@ -946,7 +947,7 @@ def compute_Q_jax(A: ArrayLike, B: ArrayLike, D: ArrayLike, P: ArrayLike,
 
 
 # --- Main Parsing and Ordering Logic (Modified to use JAX AD) ---
-def parse_and_compute_matrices_jax_ad(model_string, verbose=True):
+def parse_and_compute_matrices_jax_ad(model_string, verbose=False):
     """
     Parses the model, handles leads/lags, orders variables/equations according
     to Dynare convention (Backward -> Mixed -> Forward Aux -> Static),
@@ -1064,7 +1065,7 @@ def parse_and_compute_matrices_jax_ad(model_string, verbose=True):
 
     # --- Compute UNORDERED Matrices using JAX AD ---
     # We compute based on the `initial_vars_ordered` first, then reorder later
-    if verbose: print("\n--- Computing Unordered A, B, C, D via JAX AD ---")
+    #if verbose: print("\n--- Computing Unordered A, B, C, D via JAX AD ---")
     matrices_unordered, stationary_resid_func_code = compute_matrices_jax_ad(
         equations=processed_equations,
         var_names=initial_vars_ordered,
@@ -1082,7 +1083,7 @@ def parse_and_compute_matrices_jax_ad(model_string, verbose=True):
     D_unord = matrices_unordered['D']
 
     # --- Classify Variables & Determine Order (Based on UNORDERED Jacobians & Structure) ---
-    if verbose: print("\n--- Classifying Variables for Ordering (Improved Logic) ---")
+    #if verbose: print("\n--- Classifying Variables for Ordering (Improved Logic) ---")
     # Use the computed numerical Jacobians (A_unord, C_unord) for classification
     pb_vars = [] # Purely backward (state vars defined by lags/shocks)
     mf_vars = [] # Mixed Fwd/Bwd Endogenous (original declared vars unless purely fwd/bwd)
@@ -1362,9 +1363,9 @@ def build_trend_matrices_jax_ad(trend_equations, trend_vars, trend_shocks, param
         dtype=dtype
     )
 
-    print("DEBUG")
-    print("\n--- Trend Model Residual Function Code ---")
-    print(trend_resid_func_code)
+    # print("DEBUG")
+    # print("\n--- Trend Model Residual Function Code ---")
+    # print(trend_resid_func_code)
 
     P_trends = trend_matrices['P_trends']
     Q_trends = trend_matrices['Q_trends']
@@ -1375,7 +1376,7 @@ def build_trend_matrices_jax_ad(trend_equations, trend_vars, trend_shocks, param
 def build_observation_matrix_jax_ad(measurement_equations, obs_vars, stationary_vars,
                                    trend_state_vars, contemporaneous_trend_defs,
                                    param_names, param_assignments, verbose=True, dtype=_DEFAULT_DTYPE):
-    if verbose: print("\n--- Building Observation Matrix (Omega) via JAX AD ---")
+    #if verbose: print("\n--- Building Observation Matrix (Omega) via JAX AD ---")
     num_obs = len(obs_vars)
     num_stationary = len(stationary_vars)
     num_trend_state = len(trend_state_vars)
@@ -1432,9 +1433,9 @@ def build_observation_matrix_jax_ad(measurement_equations, obs_vars, stationary_
         dtype=dtype
     )
 
-    print("DEBUG")
-    print("\n--- Obs Model Residual Function Code ---")
-    print(obs_resid_func_code)
+    # print("DEBUG")
+    # print("\n--- Obs Model Residual Function Code ---")
+    # print(obs_resid_func_code)
     Omega = obs_matrix_dict['Omega']
 
     return Omega, obs_vars # Return computed Omega and the ordered obs vars
@@ -1731,7 +1732,7 @@ if __name__ == "__main__":
         # --- STEP 5: Solve Stationary Model (JAX SDA - using matrices from Step 1) ---
         print("\n--- [5] Solving Stationary Model (JAX SDA) ---")
         P_sol_stat, iter_count, residual_ratio, converged = solve_quadratic_matrix_equation_jax(
-            A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=500)
+            A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=10)
 
         if not converged or not jnp.all(jnp.isfinite(P_sol_stat)):
             raise RuntimeError(f"JAX SDA solver failed! Converged: {converged}, Residual Ratio: {residual_ratio:.2e}")

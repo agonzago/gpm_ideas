@@ -40,13 +40,25 @@ except ImportError:
     NUMPYRO_AVAILABLE = False
     print("Warning: numpyro not found. Estimation disabled.")
 
+# try:
+#     from dynamax.linear_gaussian_ssm import LinearGaussianSSM,  lgssm_filter
+#     DYNAMAX_AVAILABLE = True
+#     print("Dynamax imported successfully.")
+# except ImportError:
+#     DYNAMAX_AVAILABLE = False
+#     print("Warning: dynamax not found. Likelihood calculation will fail.")
+
+# --- Import your custom Kalman Filter ---
 try:
-    from dynamax.linear_gaussian_ssm import LinearGaussianSSM
-    DYNAMAX_AVAILABLE = True
-    print("Dynamax imported successfully.")
+    # Assume Kalman_filter_jax.py is in the same directory or path
+    from Kalman_filter_jax import KalmanFilter
+    KALMAN_FILTER_JAX_AVAILABLE = True
+    print("Custom KalmanFilter imported successfully.")
 except ImportError:
-    DYNAMAX_AVAILABLE = False
-    print("Warning: dynamax not found. Likelihood calculation will fail.")
+    KALMAN_FILTER_JAX_AVAILABLE = False
+    print("Warning: Kalman_filter_jax.py not found. Likelihood calculation will fail.")
+# --- End custom Kalman Filter import ---
+
 
 # --- Import from Parser ---
 # Assume Dynare_parser_sda_solver.py is in the same directory or PYTHONPATH
@@ -194,48 +206,158 @@ class DynareModelWithJAXAD:
         if self.verbose: print("--- Model Structure Parsing Complete ---")
 
 
+    # def solve(self, param_dict: Dict[str, float]) -> Dict[str, Any]:
+    #     """
+    #     Solves the model for given parameters using JAX AD matrices.
+
+    #     Args:
+    #         param_dict: Dictionary mapping parameter names to values.
+
+    #     Returns:
+    #         Dictionary containing:
+    #          - P_aug (jax.Array): Augmented transition matrix.
+    #          - R_aug (jax.Array): Augmented shock impact matrix (scaled by std dev).
+    #          - Omega (jax.Array): Observation matrix.
+    #          - solution_valid (bool): True if solve successful, False otherwise.
+    #          - ordered_trend_state_vars (List[str]): Names of trend state vars.
+    #          - contemp_trend_defs (Dict): Contemporaneous trend definitions.
+    #          - ordered_obs_vars (List[str]): Names of observable vars.
+    #          - aug_state_vars (List[str]): Names of augmented state vars.
+    #          - aug_shocks (List[str]): Names of augmented shocks.
+    #          - n_aug, n_aug_shock, n_obs (int): Dimensions.
+    #     """
+    #     if not self._parsed: self._parse_model()
+
+    #     results = {"solution_valid": False} # Default to invalid
+
+    #     try:
+    #         # --- STEP 1: Compute Stationary Matrices (Unordered) ---
+    #         matrices_unordered, _ = compute_matrices_jax_ad(
+    #             equations=self.processed_equations_stat,
+    #             var_names=self.initial_stat_vars, # Use initial order
+    #             shock_names=self.stat_shocks,
+    #             param_names=self.all_param_names, # Use combined list
+    #             param_values=param_dict,
+    #             model_type="stationary",
+    #             dtype=_DEFAULT_DTYPE
+    #         )
+    #         A_unord = matrices_unordered['A']
+    #         B_unord = matrices_unordered['B']
+    #         C_unord = matrices_unordered['C']
+    #         D_unord = matrices_unordered['D']
+
+    #          # --- STEP 1b: Reorder Stationary Matrices ---
+    #         # Use pre-calculated permutation indices from __init__
+    #         eq_perm_indices_jax = jnp.array(self.eq_perm_indices_stat)
+    #         var_perm_indices_jax = jnp.array(self.var_perm_indices_stat)
+    #         A_num_stat = A_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
+    #         B_num_stat = B_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
+    #         C_num_stat = C_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
+    #         D_num_stat = D_unord[jnp.ix_(eq_perm_indices_jax, jnp.arange(self.n_s_shock))]
+
+
+    #         # --- STEP 2: Solve Stationary Model ---
+    #         P_sol_stat, _, _, converged = solve_quadratic_matrix_equation_jax(
+    #             A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=500
+    #         )
+    #         if not converged or not jnp.all(jnp.isfinite(P_sol_stat)):
+    #             if self.verbose: print("Warning: Stationary SDA solver failed.")
+    #             return results # Return invalid results
+    #         Q_sol_stat = compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat)
+    #         if not jnp.all(jnp.isfinite(Q_sol_stat)):
+    #              if self.verbose: print("Warning: Stationary Q computation failed (likely singular A*P+B).")
+    #              return results
+
+
+    #         # --- STEP 3: Build Trend Matrices ---
+    #         P_num_trend, Q_num_trend, self.ordered_trend_state_vars, self.contemp_trend_defs = build_trend_matrices_jax_ad(
+    #             self.trend_equations, self.trend_vars, self.trend_shocks,
+    #             self.all_param_names, param_dict, verbose=self.verbose)
+    #         self.n_trend = len(self.ordered_trend_state_vars)
+
+
+    #         # --- STEP 4: Build Observation Matrix ---
+    #         Omega_num, self.ordered_obs_vars = build_observation_matrix_jax_ad(
+    #             self.measurement_equations, self.obs_vars, self.ordered_stat_vars,
+    #             self.ordered_trend_state_vars, self.contemp_trend_defs,
+    #             self.all_param_names, param_dict, verbose=self.verbose)
+
+
+    #         # --- STEP 5: Build R Matrices & Augmented System ---
+    #         shock_std_devs = {}
+    #         self.aug_shocks = self.stat_shocks + self.trend_shocks
+    #         for shock_name in self.aug_shocks:
+    #             sigma_param_name = f"sigma_{shock_name}"
+    #             std_dev = param_dict.get(sigma_param_name)
+    #             if std_dev is None:
+    #                 print(f"CRITICAL WARNING: Sigma parameter '{sigma_param_name}' missing in param_dict during solve!")
+    #                 std_dev = 1.0 # Fallback, but indicates an issue
+    #             shock_std_devs[shock_name] = jnp.maximum(std_dev, 1e-9) # Ensure positivity for diag
+
+    #         stat_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.stat_shocks], dtype=_DEFAULT_DTYPE)
+    #         trend_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.trend_shocks], dtype=_DEFAULT_DTYPE)
+
+    #         R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr) if self.n_s_shock > 0 else jnp.zeros((self.n_stat, 0), dtype=_DEFAULT_DTYPE)
+    #         R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr) if self.n_t_shock > 0 else jnp.zeros((self.n_trend, 0), dtype=_DEFAULT_DTYPE)
+
+    #         # Build Augmented P_aug, R_aug
+    #         self.n_aug = self.n_stat + self.n_trend
+    #         self.n_aug_shock = self.n_s_shock + self.n_t_shock
+    #         self.aug_state_vars = self.ordered_stat_vars + self.ordered_trend_state_vars
+
+    #         P_aug = jax.scipy.linalg.block_diag(P_sol_stat, P_num_trend)
+    #         R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=P_aug.dtype)
+    #         if self.n_stat > 0 and self.n_s_shock > 0 and R_sol_stat.shape == (self.n_stat, self.n_s_shock): R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
+    #         if self.n_trend > 0 and self.n_t_shock > 0 and R_num_trend.shape == (self.n_trend, self.n_t_shock): R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
+
+    #         # --- Store results ---
+    #         results["P_aug"] = P_aug
+    #         results["R_aug"] = R_aug # Note: This is R = Q_impact @ diag(std)
+    #         results["Omega"] = Omega_num
+    #         results["solution_valid"] = True
+    #         results["ordered_trend_state_vars"] = self.ordered_trend_state_vars
+    #         results["contemp_trend_defs"] = self.contemp_trend_defs
+    #         results["ordered_obs_vars"] = self.ordered_obs_vars
+    #         results["aug_state_vars"] = self.aug_state_vars
+    #         results["aug_shocks"] = self.aug_shocks
+    #         results["n_aug"] = self.n_aug
+    #         results["n_aug_shock"] = self.n_aug_shock
+    #         results["n_obs"] = self.n_obs
+
+    #         # Final validation
+    #         if not jnp.all(jnp.isfinite(P_aug)) or not jnp.all(jnp.isfinite(R_aug)) or not jnp.all(jnp.isfinite(Omega_num)):
+    #             if self.verbose: print("Warning: NaNs/Infs found in final augmented matrices.")
+    #             results["solution_valid"] = False
+
+
+    #     except Exception as e:
+    #         if self.verbose: print(f"Error during model solve: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+    #         results["solution_valid"] = False # Ensure invalid on error
+
+    #     return results
+
+# Inside DynareModelWithJAXAD class
+
     def solve(self, param_dict: Dict[str, float]) -> Dict[str, Any]:
         """
         Solves the model for given parameters using JAX AD matrices.
-
-        Args:
-            param_dict: Dictionary mapping parameter names to values.
-
-        Returns:
-            Dictionary containing:
-             - P_aug (jax.Array): Augmented transition matrix.
-             - R_aug (jax.Array): Augmented shock impact matrix (scaled by std dev).
-             - Omega (jax.Array): Observation matrix.
-             - solution_valid (bool): True if solve successful, False otherwise.
-             - ordered_trend_state_vars (List[str]): Names of trend state vars.
-             - contemp_trend_defs (Dict): Contemporaneous trend definitions.
-             - ordered_obs_vars (List[str]): Names of observable vars.
-             - aug_state_vars (List[str]): Names of augmented state vars.
-             - aug_shocks (List[str]): Names of augmented shocks.
-             - n_aug, n_aug_shock, n_obs (int): Dimensions.
+        Returns results dictionary including a JAX boolean 'solution_valid'.
         """
         if not self._parsed: self._parse_model()
 
-        results = {"solution_valid": False} # Default to invalid
+        results = {"solution_valid": jnp.array(False)} # Default to invalid (JAX bool)
+        P_aug, R_aug, Omega_num = None, None, None # Initialize
 
         try:
-            # --- STEP 1: Compute Stationary Matrices (Unordered) ---
+            # --- STEP 1: Compute and Reorder Stationary Matrices ---
             matrices_unordered, _ = compute_matrices_jax_ad(
-                equations=self.processed_equations_stat,
-                var_names=self.initial_stat_vars, # Use initial order
-                shock_names=self.stat_shocks,
-                param_names=self.all_param_names, # Use combined list
-                param_values=param_dict,
-                model_type="stationary",
-                dtype=_DEFAULT_DTYPE
+                self.processed_equations_stat, self.initial_stat_vars, self.stat_shocks,
+                self.all_param_names, param_dict, "stationary", _DEFAULT_DTYPE
             )
-            A_unord = matrices_unordered['A']
-            B_unord = matrices_unordered['B']
-            C_unord = matrices_unordered['C']
-            D_unord = matrices_unordered['D']
-
-             # --- STEP 1b: Reorder Stationary Matrices ---
-            # Use pre-calculated permutation indices from __init__
+            A_unord, B_unord, C_unord, D_unord = (matrices_unordered['A'], matrices_unordered['B'],
+                                                matrices_unordered['C'], matrices_unordered['D'])
             eq_perm_indices_jax = jnp.array(self.eq_perm_indices_stat)
             var_perm_indices_jax = jnp.array(self.var_perm_indices_stat)
             A_num_stat = A_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
@@ -243,44 +365,42 @@ class DynareModelWithJAXAD:
             C_num_stat = C_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
             D_num_stat = D_unord[jnp.ix_(eq_perm_indices_jax, jnp.arange(self.n_s_shock))]
 
-
             # --- STEP 2: Solve Stationary Model ---
-            P_sol_stat, _, _, converged = solve_quadratic_matrix_equation_jax(
+            P_sol_stat, _, _, converged_stat = solve_quadratic_matrix_equation_jax(
                 A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=500
             )
-            if not converged or not jnp.all(jnp.isfinite(P_sol_stat)):
-                if self.verbose: print("Warning: Stationary SDA solver failed.")
-                return results # Return invalid results
-            Q_sol_stat = compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat)
-            if not jnp.all(jnp.isfinite(Q_sol_stat)):
-                 if self.verbose: print("Warning: Stationary Q computation failed (likely singular A*P+B).")
-                 return results
+            # Check convergence immediately (converged_stat is a JAX bool)
+            # Also check if P_sol_stat contains NaN (implicitly checked by converged_stat)
+            valid_stat_solve = converged_stat
 
+            # Compute Q only if solve was valid
+            Q_sol_stat = jnp.where(
+                 valid_stat_solve,
+                 compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat),
+                 jnp.full_like(D_num_stat, jnp.nan) # Return NaN Q if P invalid
+            )
+            valid_q_compute = jnp.all(jnp.isfinite(Q_sol_stat)) # Check Q finiteness
 
-            # --- STEP 3: Build Trend Matrices ---
+            # --- STEP 3 & 4: Build Trend & Observation Matrices ---
             P_num_trend, Q_num_trend, self.ordered_trend_state_vars, self.contemp_trend_defs = build_trend_matrices_jax_ad(
                 self.trend_equations, self.trend_vars, self.trend_shocks,
-                self.all_param_names, param_dict, verbose=self.verbose)
+                self.all_param_names, param_dict, verbose=False) # Less verbose solve
             self.n_trend = len(self.ordered_trend_state_vars)
 
-
-            # --- STEP 4: Build Observation Matrix ---
             Omega_num, self.ordered_obs_vars = build_observation_matrix_jax_ad(
                 self.measurement_equations, self.obs_vars, self.ordered_stat_vars,
                 self.ordered_trend_state_vars, self.contemp_trend_defs,
-                self.all_param_names, param_dict, verbose=self.verbose)
-
+                self.all_param_names, param_dict, verbose=False)
 
             # --- STEP 5: Build R Matrices & Augmented System ---
+            # ... (calculate R_sol_stat, R_num_trend using shock_std_devs) ...
             shock_std_devs = {}
             self.aug_shocks = self.stat_shocks + self.trend_shocks
             for shock_name in self.aug_shocks:
                 sigma_param_name = f"sigma_{shock_name}"
-                std_dev = param_dict.get(sigma_param_name)
-                if std_dev is None:
-                    print(f"CRITICAL WARNING: Sigma parameter '{sigma_param_name}' missing in param_dict during solve!")
-                    std_dev = 1.0 # Fallback, but indicates an issue
-                shock_std_devs[shock_name] = jnp.maximum(std_dev, 1e-9) # Ensure positivity for diag
+                std_dev = param_dict.get(sigma_param_name, 1.0) # Default 1 if missing (shouldn't happen)
+                # Ensure positivity and non-zero for diag
+                shock_std_devs[shock_name] = jnp.maximum(jnp.abs(std_dev), 1e-9)
 
             stat_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.stat_shocks], dtype=_DEFAULT_DTYPE)
             trend_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.trend_shocks], dtype=_DEFAULT_DTYPE)
@@ -288,45 +408,135 @@ class DynareModelWithJAXAD:
             R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr) if self.n_s_shock > 0 else jnp.zeros((self.n_stat, 0), dtype=_DEFAULT_DTYPE)
             R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr) if self.n_t_shock > 0 else jnp.zeros((self.n_trend, 0), dtype=_DEFAULT_DTYPE)
 
-            # Build Augmented P_aug, R_aug
             self.n_aug = self.n_stat + self.n_trend
             self.n_aug_shock = self.n_s_shock + self.n_t_shock
             self.aug_state_vars = self.ordered_stat_vars + self.ordered_trend_state_vars
 
             P_aug = jax.scipy.linalg.block_diag(P_sol_stat, P_num_trend)
             R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=P_aug.dtype)
-            if self.n_stat > 0 and self.n_s_shock > 0 and R_sol_stat.shape == (self.n_stat, self.n_s_shock): R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
-            if self.n_trend > 0 and self.n_t_shock > 0 and R_num_trend.shape == (self.n_trend, self.n_t_shock): R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
+            # Use jnp.where to handle potentially NaN R_sol_stat
+            if self.n_stat > 0 and self.n_s_shock > 0: R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
+            if self.n_trend > 0 and self.n_t_shock > 0: R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
 
-            # --- Store results ---
+
+            # --- Final Validity Check (JAX compatible) ---
+            all_finite = (
+                jnp.all(jnp.isfinite(P_aug)) &
+                jnp.all(jnp.isfinite(R_aug)) &
+                jnp.all(jnp.isfinite(Omega_num))
+            )
+            # Solution is valid only if stat solve converged AND Q computation worked AND final matrices finite
+            solution_valid_final = valid_stat_solve & valid_q_compute & all_finite
+
+            # Store results (matrices might contain NaNs if !solution_valid_final)
             results["P_aug"] = P_aug
-            results["R_aug"] = R_aug # Note: This is R = Q_impact @ diag(std)
+            results["R_aug"] = R_aug
             results["Omega"] = Omega_num
-            results["solution_valid"] = True
-            results["ordered_trend_state_vars"] = self.ordered_trend_state_vars
-            results["contemp_trend_defs"] = self.contemp_trend_defs
-            results["ordered_obs_vars"] = self.ordered_obs_vars
-            results["aug_state_vars"] = self.aug_state_vars
-            results["aug_shocks"] = self.aug_shocks
-            results["n_aug"] = self.n_aug
-            results["n_aug_shock"] = self.n_aug_shock
-            results["n_obs"] = self.n_obs
-
-            # Final validation
-            if not jnp.all(jnp.isfinite(P_aug)) or not jnp.all(jnp.isfinite(R_aug)) or not jnp.all(jnp.isfinite(Omega_num)):
-                if self.verbose: print("Warning: NaNs/Infs found in final augmented matrices.")
-                results["solution_valid"] = False
+            results["solution_valid"] = solution_valid_final # Store JAX bool
+            results["ordered_trend_state_vars"] = self.ordered_trend_state_vars # Python list
+            results["contemp_trend_defs"] = self.contemp_trend_defs # Python dict
+            results["ordered_obs_vars"] = self.ordered_obs_vars # Python list
+            results["aug_state_vars"] = self.aug_state_vars # Python list
+            results["aug_shocks"] = self.aug_shocks # Python list
+            results["n_aug"] = self.n_aug # Python int
+            results["n_aug_shock"] = self.n_aug_shock # Python int
+            results["n_obs"] = self.n_obs # Python int
 
 
         except Exception as e:
-            if self.verbose: print(f"Error during model solve: {e}")
-            import traceback
-            traceback.print_exc()
-            results["solution_valid"] = False # Ensure invalid on error
+            if self.verbose: print(f"Exception during model solve: {e}")
+            # Ensure results dict contains default valid=False and potentially None matrices
+            results["solution_valid"] = jnp.array(False) # Ensure JAX bool False on error
+            # Optionally clear potentially partially computed matrices
+            results["P_aug"], results["R_aug"], results["Omega"] = None, None, None
 
         return results
+    
 
-# ---log_likelihood method using the two-step Dynamax pattern ---
+    # def log_likelihood(self,
+    #                 param_dict: Dict[str, float],
+    #                 ys: jax.Array,
+    #                 H_obs: jax.Array, # Observation noise COVARIANCE
+    #                 init_x_mean: jax.Array,
+    #                 init_P_cov: jax.Array) -> float:
+    #     """
+    #     Computes the log-likelihood using Dynamax filter, handling potential
+    #     solver failures gracefully using jax.lax.cond based *only* on the validity flag.
+    #     Relies on solve() returning valid=False or filter failing for bad params.
+    #     """
+    #     # Ensure prerequisites are met before entering JAX-traced logic
+    #     if not DYNAMAX_AVAILABLE:
+    #         # This error is better raised during setup than returning -inf repeatedly
+    #         raise RuntimeError("Dynamax library is required for log_likelihood.")
+    #     if ys is None or H_obs is None or init_x_mean is None or init_P_cov is None:
+    #         raise ValueError("Missing required input (ys, H_obs, init_x_mean, or init_P_cov).")
+
+
+    #     # --- Define functions for jax.lax.cond branches ---
+    #     def _calculate_likelihood(pd): # Accepts the param_dict
+    #         """Calculates likelihood assuming solve was successful."""
+    #         # Re-solve inside the branch to ensure tracing works correctly with cond
+    #         # This might seem redundant but helps with JAX control flow primitives
+    #         solution = self.solve(pd)
+
+    #         # Since this branch is only executed if the initial solve outside cond was valid,
+    #         # we proceed directly, but wrap in try/except for runtime filter/numerical errors.
+    #         try:
+    #             # Extract results - assume they are valid based on the outer cond check
+    #             P_aug = solution["P_aug"]
+    #             R_aug = solution["R_aug"]
+    #             Omega = solution["Omega"]
+    #             n_aug = solution["n_aug"] # Get actual dimension used in solve
+    #             n_obs = solution["n_obs"]
+
+    #             # Calculate Q_dyn and add jitter
+    #             # Use jnp.maximum to prevent issues if std dev param is exactly zero
+    #             # (although priors/transforms should ideally prevent this)
+    #             Q_dyn = R_aug @ R_aug.T
+    #             q_jitter = 1e-8 # Slightly increased jitter for robustness
+    #             Q_dyn = Q_dyn + q_jitter * jnp.eye(n_aug, dtype=Q_dyn.dtype)
+
+    #             # Instantiate and Initialize Dynamax LGSSM
+    #             lgssm = LinearGaussianSSM(n_aug, n_obs, input_dim=0)
+    #             lgssm_params, _ = lgssm.initialize(
+    #                 initial_mean=init_x_mean, initial_covariance=init_P_cov,
+    #                 dynamics_weights=P_aug, dynamics_covariance=Q_dyn,
+    #                 emission_weights=Omega, emission_covariance=H_obs
+    #             )
+
+    #             # Compute Log Likelihood via Filtering
+    #             filtered_results = lgssm_filter(lgssm_params, emissions=ys)
+    #             log_prob = filtered_results.marginal_loglik
+
+    #             # Return likelihood or -inf if filter itself produced non-finite result
+    #             # Ensure dtype matches the default float type for consistency
+    #             return jnp.where(jnp.isfinite(log_prob), log_prob, jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE))
+
+    #         except Exception as e:
+    #              # Catch potential runtime errors *within* this valid branch
+    #              # (e.g., LinAlgError from filter if Q_dyn still numerically bad)
+    #              if self.verbose: print(f"[LogLik Debug] Exception in _calculate_likelihood branch: {type(e).__name__}: {e}")
+    #              return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+
+    #     def _return_invalid_likelihood(pd): # Accepts param_dict (operand)
+    #         """Returns -inf when solve failed."""
+    #         # Match the expected return type (JAX scalar array)
+    #         return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+
+    #     # --- Perform the solve ONCE to get the validity flag ---
+    #     # Crucially, ensure solve() itself does not contain Python `if` on tracers
+    #     try:
+    #          solution_check = self.solve(param_dict)
+    #          # Ensure is_valid is a JAX boolean scalar, default to False if key missing
+    #          is_valid = jnp.asarray(solution_check.get("solution_valid", False))
+
+    #     except Exception as e_solve_outer:
+    #          # Catch error during the initial solve attempt
+    #          if self.verbose: print(f"[LogLik Debug] Exception during initial solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
+    #          return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+
+# --- Inside DynareModelWithJAXAD class ---
+
     def log_likelihood(self,
                        param_dict: Dict[str, float],
                        ys: jax.Array,
@@ -334,89 +544,80 @@ class DynareModelWithJAXAD:
                        init_x_mean: jax.Array,
                        init_P_cov: jax.Array) -> float:
         """
-        Computes the log-likelihood of the data given parameters using Dynamax.
-        Follows the pattern: instantiate with dims, then initialize with matrices.
-
-        Args:
-            param_dict: Dictionary mapping parameter names to values.
-            ys: Observed data (num_timesteps, n_obs).
-            H_obs: Observation noise covariance matrix (n_obs, n_obs).
-            init_x_mean: Mean of initial state vector (n_aug,).
-            init_P_cov: Covariance of initial state vector (n_aug, n_aug).
-
-        Returns:
-            Log-likelihood value (float). Returns -inf if solve fails.
+        Computes the log-likelihood using the custom KalmanFilter class,
+        handling potential solver failures gracefully using jax.lax.cond.
         """
-        if not DYNAMAX_AVAILABLE:
-            print("Error: Dynamax is required for log_likelihood calculation.")
-            return -jnp.inf
+        # Ensure prerequisites are met before entering JAX-traced logic
+        if not KALMAN_FILTER_JAX_AVAILABLE:
+            raise RuntimeError("Custom KalmanFilter class is required.")
+        if ys is None or H_obs is None or init_x_mean is None or init_P_cov is None:
+            raise ValueError("Missing required input (ys, H_obs, init_x_mean, or init_P_cov).")
 
-        # --- Solve the model for the given parameters ---
-        solution = self.solve(param_dict)
+        # --- Define functions for jax.lax.cond branches ---
+        def _calculate_likelihood(pd): # Accepts the param_dict
+            """Calculates likelihood assuming solve was successful."""
+            # Re-solve inside the branch
+            solution = self.solve(pd)
 
-        # --- Check if the solution is valid ---
-        if not solution.get("solution_valid", False):
-            return -jnp.inf # Penalize invalid parameter draws
+            # Assume validity based on outer cond, wrap calculation in try/except
+            try:
+                # Extract results
+                P_aug = solution["P_aug"]
+                R_aug = solution["R_aug"] # NOTE: Your KF expects R s.t. Q=R@R.T
+                Omega = solution["Omega"]
+                # Dimensions are needed for KF constructor if not passed explicitly
+                n_aug = solution["n_aug"]
+                n_obs = solution["n_obs"]
+                n_shocks = solution["n_aug_shock"]
 
-        # --- Extract necessary matrices and dimensions ---
-        P_aug = solution["P_aug"]
-        R_aug = solution["R_aug"] # Includes std dev scaling
-        Omega = solution["Omega"]
-        n_aug = solution["n_aug"]
-        n_obs = solution["n_obs"]
-        n_aug_shock = solution["n_aug_shock"] # Needed for Q calculation size
+                # Add jitter directly to covariance matrices if KF needs it internally
+                # Or ensure KF handles it. Let's assume KF adds jitter if needed.
 
-        # --- Dynamax requires dynamics COVARIANCE (Q) ---
-        # Q = R @ R.T
-        Q_dyn = R_aug @ R_aug.T
-        # Basic check for Q_dyn dimension
-        if Q_dyn.shape != (n_aug, n_aug):
-             print(f"Warning: Q_dyn shape {Q_dyn.shape} unexpected, expected {(n_aug, n_aug)}")
-             # Might need padding if R_aug is not square, but R@R.T should yield n_aug x n_aug
+                # --- Instantiate your KalmanFilter ---
+                kf = KalmanFilter(
+                    T = P_aug,
+                    R = R_aug,     # Pass R directly
+                    C = Omega,
+                    H = H_obs,     # Observation noise COVARIANCE
+                    init_x = init_x_mean,
+                    init_P = init_P_cov
+                )
 
-        # --- Define Dynamax LGSSM object (Step 1: Instantiate with dimensions) ---
-        # Assuming input_dim = 0 and biases are zero (adjust if your model has them)
+                # --- Compute Log Likelihood using your filter's method ---
+                log_prob = kf.log_likelihood(ys)
+
+                # Return likelihood or -inf if filter itself produced non-finite result
+                return jnp.where(jnp.isfinite(log_prob), log_prob, jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE))
+
+            except Exception as e:
+                 if self.verbose: print(f"[LogLik Debug] Exception in _calculate_likelihood branch (using custom KF): {type(e).__name__}: {e}")
+                 # Optional: Print traceback for internal errors
+                 # import traceback
+                 # traceback.print_exc()
+                 return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+
+        def _return_invalid_likelihood(pd): # Accepts param_dict (operand)
+            """Returns -inf when solve failed."""
+            return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+
+        # --- Perform the solve ONCE to get the validity flag ---
         try:
-             # Use state_dim=n_aug, emission_dim=n_obs
-            lgssm = LinearGaussianSSM(n_aug, n_obs, input_dim=0) # Add bias flags if needed
+             solution_check = self.solve(param_dict)
+             is_valid = jnp.asarray(solution_check.get("solution_valid", False))
+        except Exception as e_solve_outer:
+             if self.verbose: print(f"[LogLik Debug] Exception during initial validity solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
+             return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
 
-            # --- Initialize parameters structure (Step 2: Call initialize) ---
-            # Use the argument names from the initialize signature you provided
-            lgssm_params, _ = lgssm.initialize(
-                initial_mean=init_x_mean,
-                initial_covariance=init_P_cov,
-                dynamics_weights=P_aug,
-                dynamics_covariance=Q_dyn,
-                emission_weights=Omega,
-                emission_covariance=H_obs
-                # Add other args like dynamics_bias=jnp.zeros(n_aug), etc. if needed
-            )
+        # --- Use lax.cond ---
+        log_prob = jax.lax.cond(
+            pred=is_valid,
+            true_fun=_calculate_likelihood,
+            false_fun=_return_invalid_likelihood,
+            operand=param_dict # Pass parameters needed by the branches
+        )
 
-            # --- Compute Log Likelihood ---
-            # Call log_probability on the lgssm object, passing the initialized params
-            log_prob = lgssm.log_probability(lgssm_params, ys)
-
-            # Check for non-finite likelihood
-            if not jnp.isfinite(log_prob):
-                # Provide more context if possible
-                print("Warning: Non-finite log-likelihood computed by Dynamax.")
-                #Optionally print some values that might cause issues
-                print("init_x_mean:", init_x_mean)
-                print("init_P_cov:", init_P_cov)
-                print("P_aug:", P_aug)
-                print("Q_dyn:", Q_dyn)
-                print("Omega:", Omega)
-                print("H_obs:", H_obs)
-                return -jnp.inf
-
-            return log_prob
-
-        except Exception as e_dynamax:
-            if self.verbose: print(f"Error during Dynamax instantiation/likelihood: {e_dynamax}")
-            import traceback
-            traceback.print_exc()
-            return -jnp.inf
-
+        return log_prob
+# --- End of Revised log_likelihood ---
 
 
 
@@ -510,23 +711,23 @@ def numpyro_model(
     if extra_keys:
          raise RuntimeError(f"Internal Error: Extra parameters found before likelihood calculation: {extra_keys}")
 
-    # --- Calculate Log Likelihood ---
-    if ys is not None:
-        if not DYNAMAX_AVAILABLE:
-             raise RuntimeError("Dynamax needed for likelihood calculation.")
-        if H_obs is None or init_x_mean is None or init_P_cov is None:
-             raise ValueError("H_obs, init_x_mean, init_P_cov are required when ys is provided.")
+    # # --- Calculate Log Likelihood ---
+    # if ys is not None:
+    #     if not DYNAMAX_AVAILABLE:
+    #          raise RuntimeError("Dynamax needed for likelihood calculation.")
+    #     if H_obs is None or init_x_mean is None or init_P_cov is None:
+    #          raise ValueError("H_obs, init_x_mean, init_P_cov are required when ys is provided.")
 
         # Use the combined dictionary of sampled and fixed parameters
-        log_prob = model_instance.log_likelihood(
-            params_for_likelihood,
-            ys,
-            H_obs,
-            init_x_mean,
-            init_P_cov
-        )
-        # Register the log likelihood with Numpyro
-        numpyro.factor("log_likelihood", log_prob)
+    log_prob = model_instance.log_likelihood(
+        params_for_likelihood,
+        ys,
+        H_obs,
+        init_x_mean,
+        init_P_cov
+    )
+    # Register the log likelihood with Numpyro
+    numpyro.factor("log_likelihood", log_prob)
 
 
 
@@ -542,7 +743,7 @@ if __name__ == "__main__":
     # Simulation settings (for generating test data)
     num_sim_steps = 200
     sim_seed = 123
-    sim_measurement_noise_std = 0.01 # Add some noise to make estimation non-trivial
+    sim_measurement_noise_std = 0.001 # Add some noise to make estimation non-trivial
 
     # Estimation settings
     run_estimation_flag = True # Set to False to only simulate/test solve
@@ -660,16 +861,16 @@ if __name__ == "__main__":
     # ONLY list parameters you want to estimate here
     user_priors = [
         # Example: Estimate persistence and response coefficients
-        {"name": "b1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # Mean ~0.75
-        {"name": "a1", "prior": "beta", "args": {"concentration1": 20.0, "concentration2": 15.0}}, # Mean ~0.57
-        {"name": "g1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # Mean ~0.75
-        {"name": "g2", "prior": "normal", "args": {"loc": 0.3, "scale": 0.1}},
-        {"name": "g3", "prior": "normal", "args": {"loc": 0.25, "scale": 0.1}},
-        {"name": "rho_L_GDP_GAP", "prior": "Beta", "args": {"concentration1": 40.0, "concentration2": 10.0}}, # Mean ~0.8
-        # Example: Estimate key shock std devs
-        {"name": "sigma_SHK_L_GDP_GAP", "prior": "invgamma", "args": {"concentration": 4.0, "scale": 0.1}}, # Approx Mean 0.03
-        {"name": "sigma_SHK_DLA_CPI", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.5}}, # Approx Mean 0.25 (adjust if needed)
-        {"name": "sigma_SHK_RS", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.2}}, # Approx Mean 0.1
+        # {"name": "b1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # Mean ~0.75
+        # {"name": "a1", "prior": "beta", "args": {"concentration1": 20.0, "concentration2": 15.0}}, # Mean ~0.57
+        # {"name": "g1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # Mean ~0.75
+        # {"name": "g2", "prior": "normal", "args": {"loc": 0.3, "scale": 0.1}},
+        # {"name": "g3", "prior": "normal", "args": {"loc": 0.25, "scale": 0.1}},
+        # {"name": "rho_L_GDP_GAP", "prior": "Beta", "args": {"concentration1": 40.0, "concentration2": 10.0}}, # Mean ~0.8
+        # # Example: Estimate key shock std devs
+        # {"name": "sigma_SHK_L_GDP_GAP", "prior": "invgamma", "args": {"concentration": 4.0, "scale": 0.1}}, # Approx Mean 0.03
+        # {"name": "sigma_SHK_DLA_CPI", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.5}}, # Approx Mean 0.25 (adjust if needed)
+         {"name": "sigma_SHK_RS", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.2}}, # Approx Mean 0.1
     ]
     estimated_param_names_set = {p["name"] for p in user_priors}
 
@@ -688,9 +889,10 @@ if __name__ == "__main__":
             print(f"    - {name} = {value:.4f}")
 
 
+           
 
     # --- [5] Run Estimation ---
-    if run_estimation_flag and NUMPYRO_AVAILABLE and DYNAMAX_AVAILABLE:
+    if run_estimation_flag and NUMPYRO_AVAILABLE: #and DYNAMAX_AVAILABLE:
         print(f"\n--- [5] Running Bayesian Estimation (Estimating {len(user_priors)} parameters) ---")
         mcmc_key = random.PRNGKey(mcmc_seed)
 
@@ -698,7 +900,11 @@ if __name__ == "__main__":
         H_obs_est = H_obs_sim # Use same observation noise as simulation
         n_aug_est = sim_solution["n_aug"]
         init_x_mean_est = jnp.zeros(n_aug_est, dtype=_DEFAULT_DTYPE)
+        init_x_mean_est = s0_sim
         init_P_cov_est = jnp.eye(n_aug_est, dtype=_DEFAULT_DTYPE) * 1.0
+
+
+
 
         # --- Initial values ONLY for ESTIMATED parameters ---
         init_values_mcmc = {}
@@ -715,13 +921,57 @@ if __name__ == "__main__":
 
         init_strategy = init_to_value(values=init_values_mcmc) # Pass only estimated params
 
+
+
+     # --- [DEBUG] Test Log Likelihood at Initial Parameters ---
+        print("\n--- [DEBUG] Testing log_likelihood at initial parameters ---")
+        # Combine initial estimated parameters with fixed parameters
+        initial_params_full = fixed_params.copy()
+        initial_params_full.update(init_values_mcmc)
+    
+        # Ensure all parameters are present (sanity check)
+        if set(initial_params_full.keys()) != set(model.all_param_names):
+            print("ERROR: Mismatch between initial_params_full and model.all_param_names!")
+        else:
+            # Temporarily set verbose=True in the model instance for detailed output
+            model.verbose = True
+            try:
+                initial_log_lik = model.log_likelihood(
+                    initial_params_full,
+                    sim_observables,
+                    H_obs_est,
+                    init_x_mean_est,
+                    init_P_cov_est
+                )
+                print(f"--- [DEBUG] Log Likelihood at initial params: {initial_log_lik} ---")
+                if not jnp.isfinite(initial_log_lik):
+                    print("--- [DEBUG] FAILURE: Initial log likelihood is non-finite! ---")
+                    # Optionally exit here if you want to stop before MCMC
+                    # exit()
+                else:
+                    print("--- [DEBUG] SUCCESS: Initial log likelihood is finite. ---")
+
+            except Exception as e_debug:
+                print(f"--- [DEBUG] FAILURE: Error during initial log_likelihood test: {e_debug} ---")
+                import traceback
+                traceback.print_exc()
+                # Optionally exit
+                # exit()
+            finally:
+                # Set verbose back to False if needed for MCMC run
+                model.verbose = False # Set back for cleaner MCMC logs
+        # --- [END DEBUG] ---
+
         # Instantiate NUTS kernel (unchanged)
         kernel = NUTS(numpyro_model, init_strategy=init_strategy, target_accept_prob=mcmc_target_accept)
 
         # Instantiate MCMC (unchanged)
         mcmc = MCMC(
-            kernel, num_warmup=mcmc_warmup, num_samples=mcmc_samples,
-            num_chains=mcmc_chains, progress_bar=(mcmc_chains == 1),
+            kernel, 
+            num_warmup=mcmc_warmup, 
+            num_samples=mcmc_samples,
+            num_chains=mcmc_chains, 
+            progress_bar=(mcmc_chains == 1),
             chain_method='parallel' if mcmc_chains > 1 else 'sequential',
             jit_model_args=True
         )
@@ -746,8 +996,9 @@ if __name__ == "__main__":
             # --- [6] Analyze Estimation Results ---
             print("\n--- [6] Estimation Summary (Estimated Parameters) ---")
             # Print summary only for estimated parameters
-            mcmc.print_summary(var_names=[p["name"] for p in user_priors])
-            posterior_samples = mcmc.get_samples() # Contains only estimated params
+            
+            mcmc.print_summary()
+            posterior_samples = mcmc.get_samples()
 
             # Plotting trace plots (Optional)
             try:
@@ -779,7 +1030,7 @@ if __name__ == "__main__":
 
     print(f"\n--- Script finished ---")
     # Keep plots open if shown
-    if run_estimation_flag and NUMPYRO_AVAILABLE and DYNAMAX_AVAILABLE:
+    if run_estimation_flag and NUMPYRO_AVAILABLE: #and DYNAMAX_AVAILABLE:
        print("Close plot windows to exit.")
        plt.show()
 

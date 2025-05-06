@@ -108,7 +108,7 @@ check;
 trend_shocks;
     var SHK_L_GDP_TREND; stderr 0.001;    
     var SHK_G_TREND; stderr 0.005;
-    var SHK_PI_TREND; stderr 1e-10;
+    var SHK_PI_TREND; stderr 0.01;
     var SHK_RR_TREND; stderr 0.1;
 end;
 
