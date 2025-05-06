@@ -59,6 +59,190 @@ except ImportError:
     print("Warning: Kalman_filter_jax.py not found. Likelihood calculation will fail.")
 # --- End custom Kalman Filter import ---
 
+def test_kalman_integration(model, param_values, obs_data, H_obs, init_x, init_P):
+    """
+    Simple diagnostic function to test the integration between the model and Kalman filter.
+    Performs each step separately to identify potential issues.
+    
+    Args:
+        model: DynareModelWithJAXAD instance
+        param_values: Parameter dictionary
+        obs_data: Observation data [T, n_obs]
+        H_obs: Observation noise covariance matrix [n_obs, n_obs]
+        init_x: Initial state mean [n_aug]
+        init_P: Initial state covariance [n_aug, n_aug]
+        
+    Returns:
+        Success flag and diagnostic information
+    """
+    print("\n=== RUNNING KALMAN INTEGRATION TEST ===")
+    
+    # Step 1: Check model solution
+    print("\nStep 1: Model Solution")
+    try:
+        solution = model.solve(param_values)
+        if not solution["solution_valid"]:
+            print("✗ Model solution is INVALID")
+            return False, {"error": "Invalid model solution"}
+        
+        P_aug = solution["P_aug"]
+        R_aug = solution["R_aug"]
+        Omega = solution["Omega"]
+        n_aug = solution["n_aug"]
+        n_obs = solution["n_obs"]
+        
+        print(f"✓ Model solution valid")
+        print(f"  - State dimension (n_aug): {n_aug}")
+        print(f"  - Observation dimension (n_obs): {n_obs}")
+        print(f"  - P_aug shape: {P_aug.shape}")
+        print(f"  - R_aug shape: {R_aug.shape}")
+        print(f"  - Omega shape: {Omega.shape}")
+    except Exception as e:
+        print(f"✗ Error solving model: {e}")
+        return False, {"error": f"Model solution error: {str(e)}"}
+    
+    # Step 2: Check dimensions for Kalman filter
+    print("\nStep 2: Dimension Checks")
+    try:
+        expected_shapes = {
+            "P_aug": (n_aug, n_aug),
+            "R_aug": (n_aug, R_aug.shape[1]),  # R's columns depend on shock count
+            "Omega": (n_obs, n_aug),
+            "H_obs": (n_obs, n_obs),
+            "init_x": (n_aug,),
+            "init_P": (n_aug, n_aug),
+            "obs_data": (obs_data.shape[0], n_obs)
+        }
+        
+        actual_shapes = {
+            "P_aug": P_aug.shape,
+            "R_aug": R_aug.shape,
+            "Omega": Omega.shape,
+            "H_obs": H_obs.shape,
+            "init_x": init_x.shape,
+            "init_P": init_P.shape,
+            "obs_data": obs_data.shape
+        }
+        
+        mismatches = []
+        for name, expected in expected_shapes.items():
+            actual = actual_shapes[name]
+            if actual != expected:
+                mismatches.append(f"{name}: expected {expected}, got {actual}")
+        
+        if mismatches:
+            print("✗ Dimension mismatches found:")
+            for mismatch in mismatches:
+                print(f"  - {mismatch}")
+            return False, {"error": "Dimension mismatches", "details": mismatches}
+        
+        print("✓ All dimensions match expected values")
+    except Exception as e:
+        print(f"✗ Error checking dimensions: {e}")
+        return False, {"error": f"Dimension check error: {str(e)}"}
+    
+    # Step 3: Check for NaN/Inf values
+    print("\nStep 3: Check for NaN/Inf Values")
+    matrices = {
+        "P_aug": P_aug,
+        "R_aug": R_aug,
+        "Omega": Omega,
+        "H_obs": H_obs,
+        "init_x": init_x,
+        "init_P": init_P,
+    }
+    
+    nan_inf_found = False
+    for name, matrix in matrices.items():
+        if not jnp.all(jnp.isfinite(matrix)):
+            print(f"✗ Matrix {name} contains NaN or Inf values")
+            nan_inf_found = True
+    
+    if nan_inf_found:
+        return False, {"error": "NaN/Inf values in matrices"}
+    
+    print("✓ All matrices contain finite values")
+    
+    # Step 4: Direct test of Kalman filter
+    print("\nStep 4: Direct Kalman Filter Test")
+    try:
+        from Kalman_filter_jax import KalmanFilter
+        
+        # Create Kalman filter instance
+        kf = KalmanFilter(
+            T=P_aug,
+            R=R_aug,
+            C=Omega,
+            H=H_obs,
+            init_x=init_x,
+            init_P=init_P
+        )
+        print("✓ KalmanFilter instantiated successfully")
+        
+        # Test filter operation
+        try:
+            print("  - Testing filter operation...")
+            filter_results = kf.filter(obs_data)
+            print("  ✓ filter() completed successfully")
+            
+            # Check filter results
+            keys_to_check = ['x_pred', 'P_pred', 'x_filt', 'P_filt', 'log_likelihood_contributions']
+            for key in keys_to_check:
+                if key not in filter_results:
+                    print(f"  ✗ Missing expected key in filter results: {key}")
+                    return False, {"error": f"Missing key in filter results: {key}"}
+                
+                # Check if values contain NaN/Inf
+                if not jnp.all(jnp.isfinite(filter_results[key])):
+                    print(f"  ✗ Non-finite values in filter results: {key}")
+                    return False, {"error": f"Non-finite values in filter results: {key}"}
+            
+            print("  ✓ Filter results look valid")
+            
+            # Test log-likelihood
+            try:
+                print("  - Testing log_likelihood calculation...")
+                log_lik = kf.log_likelihood(obs_data)
+                print(f"  ✓ log_likelihood() completed: {log_lik}")
+                
+                if not jnp.isfinite(log_lik):
+                    print("  ✗ Log-likelihood is not finite")
+                    return False, {"error": "Non-finite log-likelihood", "value": float(log_lik)}
+                
+                # Try model's log_likelihood method
+                try:
+                    print("  - Testing model.log_likelihood()...")
+                    model_ll = model.log_likelihood(
+                        param_values, obs_data, H_obs, init_x, init_P
+                    )
+                    print(f"  ✓ model.log_likelihood() completed: {model_ll}")
+                    
+                    # Check if values match
+                    ll_diff = jnp.abs(log_lik - model_ll)
+                    if ll_diff > 1e-6:
+                        print(f"  ⚠ Warning: Difference between direct KF and model log-likelihood: {ll_diff}")
+                    else:
+                        print("  ✓ Direct KF and model log-likelihood match")
+                    
+                except Exception as e_model_ll:
+                    print(f"  ✗ Error in model.log_likelihood(): {e_model_ll}")
+                    return False, {"error": f"Model log_likelihood error: {str(e_model_ll)}"}
+                
+            except Exception as e_ll:
+                print(f"  ✗ Error in kf.log_likelihood(): {e_ll}")
+                return False, {"error": f"log_likelihood error: {str(e_ll)}"}
+            
+        except Exception as e_filter:
+            print(f"  ✗ Error in kf.filter(): {e_filter}")
+            return False, {"error": f"filter error: {str(e_filter)}"}
+        
+    except Exception as e_kf:
+        print(f"✗ Error instantiating KalmanFilter: {e_kf}")
+        return False, {"error": f"KalmanFilter instantiation error: {str(e_kf)}"}
+    
+    print("\n=== KALMAN INTEGRATION TEST PASSED ===")
+    return True, {"log_likelihood": float(log_lik) if 'log_lik' in locals() else None}
+
 
 # --- Import from Parser ---
 # Assume Dynare_parser_sda_solver.py is in the same directory or PYTHONPATH
@@ -535,93 +719,167 @@ class DynareModelWithJAXAD:
     #          if self.verbose: print(f"[LogLik Debug] Exception during initial solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
     #          return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
 
-# --- Inside DynareModelWithJAXAD class ---
-
     def log_likelihood(self,
-                       param_dict: Dict[str, float],
-                       ys: jax.Array,
-                       H_obs: jax.Array, # Observation noise COVARIANCE
-                       init_x_mean: jax.Array,
-                       init_P_cov: jax.Array) -> float:
+                    param_dict: Dict[str, float],
+                    ys: jax.Array,
+                    H_obs: jax.Array,  # Observation noise COVARIANCE
+                    init_x_mean: jax.Array,
+                    init_P_cov: jax.Array) -> float:
         """
         Computes the log-likelihood using the custom KalmanFilter class,
-        handling potential solver failures gracefully using jax.lax.cond.
+        handling potential solver failures gracefully and ensuring finite values for Numpyro.
+        
+        Args:
+            param_dict: Dictionary of model parameters
+            ys: Observation data [T, n_obs]
+            H_obs: Observation noise covariance matrix [n_obs, n_obs]
+            init_x_mean: Initial state mean [n_aug]
+            init_P_cov: Initial state covariance [n_aug, n_aug]
+            
+        Returns:
+            JAX array scalar containing the log-likelihood or a large negative value if invalid
         """
-        # Ensure prerequisites are met before entering JAX-traced logic
         if not KALMAN_FILTER_JAX_AVAILABLE:
             raise RuntimeError("Custom KalmanFilter class is required.")
         if ys is None or H_obs is None or init_x_mean is None or init_P_cov is None:
             raise ValueError("Missing required input (ys, H_obs, init_x_mean, or init_P_cov).")
 
+        # Set a large negative but finite value for invalid cases
+        LARGE_NEG_VALUE = -1e10
+        
         # --- Define functions for jax.lax.cond branches ---
-        def _calculate_likelihood(pd): # Accepts the param_dict
+        def _calculate_likelihood(pd):  # Accepts the param_dict
             """Calculates likelihood assuming solve was successful."""
             # Re-solve inside the branch
             solution = self.solve(pd)
 
-            # Assume validity based on outer cond, wrap calculation in try/except
+            # Add debug print statements if verbose
+            if self.verbose:
+                print(f"Debug: Solution validity: {solution['solution_valid']}")
+                if solution["P_aug"] is not None:
+                    print(f"Debug: P_aug shape: {solution['P_aug'].shape}")
+                if solution["R_aug"] is not None:
+                    print(f"Debug: R_aug shape: {solution['R_aug'].shape}")
+                if solution["Omega"] is not None:
+                    print(f"Debug: Omega shape: {solution['Omega'].shape}")
+                print(f"Debug: n_aug: {solution['n_aug']}, n_obs: {solution['n_obs']}")
+                print(f"Debug: init_x_mean shape: {init_x_mean.shape}")
+                print(f"Debug: init_P_cov shape: {init_P_cov.shape}")
+                print(f"Debug: H_obs shape: {H_obs.shape}, ys shape: {ys.shape}")
+
             try:
                 # Extract results
-                P_aug = solution["P_aug"]
-                R_aug = solution["R_aug"] # NOTE: Your KF expects R s.t. Q=R@R.T
-                Omega = solution["Omega"]
-                # Dimensions are needed for KF constructor if not passed explicitly
-                n_aug = solution["n_aug"]
-                n_obs = solution["n_obs"]
-                n_shocks = solution["n_aug_shock"]
-
-                # Add jitter directly to covariance matrices if KF needs it internally
-                # Or ensure KF handles it. Let's assume KF adds jitter if needed.
-
-                # --- Instantiate your KalmanFilter ---
+                P_aug = solution["P_aug"]   # State transition matrix [n_aug, n_aug]
+                R_aug = solution["R_aug"]   # Shock impact matrix [n_aug, n_shock]  
+                Omega = solution["Omega"]   # Observation matrix [n_obs, n_aug]
+                
+                # Check dimension compatibility
+                n_aug = solution["n_aug"]   # State dimension
+                n_obs = solution["n_obs"]   # Observation dimension
+                
+                shape_ok = (
+                    P_aug.shape == (n_aug, n_aug) and
+                    Omega.shape == (n_obs, n_aug) and
+                    H_obs.shape == (n_obs, n_obs) and
+                    init_x_mean.shape == (n_aug,) and
+                    init_P_cov.shape == (n_aug, n_aug) and
+                    ys.shape[1] == n_obs
+                )
+                
+                # Early return if shape mismatch
+                if not shape_ok:
+                    if self.verbose:
+                        print("Debug: Shape mismatch between matrices.")
+                    return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
+                
+                # Check for NaN/Inf values
+                matrices = [P_aug, R_aug, Omega, H_obs, init_x_mean, init_P_cov]
+                all_finite = True
+                for i, mat in enumerate(matrices):
+                    if not jnp.all(jnp.isfinite(mat)):
+                        if self.verbose:
+                            mat_names = ["P_aug", "R_aug", "Omega", "H_obs", "init_x_mean", "init_P_cov"]
+                            print(f"Debug: Matrix {mat_names[i]} contains NaN/Inf values.")
+                        all_finite = False
+                
+                if not all_finite:
+                    return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
+                
+                # --- Instantiate KalmanFilter ---
                 kf = KalmanFilter(
-                    T = P_aug,
-                    R = R_aug,     # Pass R directly
-                    C = Omega,
-                    H = H_obs,     # Observation noise COVARIANCE
-                    init_x = init_x_mean,
-                    init_P = init_P_cov
+                    T=P_aug,       # State transition matrix
+                    R=R_aug,       # Shock impact matrix (includes std devs)
+                    C=Omega,       # Observation matrix
+                    H=H_obs,       # Observation noise covariance
+                    init_x=init_x_mean,  # Initial state mean
+                    init_P=init_P_cov    # Initial state covariance
                 )
 
-                # --- Compute Log Likelihood using your filter's method ---
-                log_prob = kf.log_likelihood(ys)
+                # --- Compute Log Likelihood ---
+                # The updated KalmanFilter.filter handles NaNs properly (static pattern)
+                raw_log_prob = kf.log_likelihood(ys)
+                
+                if self.verbose:
+                    print(f"Debug: Raw log_prob from KF: {raw_log_prob}")
 
-                # Return likelihood or -inf if filter itself produced non-finite result
-                return jnp.where(jnp.isfinite(log_prob), log_prob, jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE))
+                # --- Ensure valid log-likelihood ---
+                # Return large negative but finite value instead of -inf
+                # This is crucial for Numpyro to work correctly
+                safe_log_prob = jnp.where(
+                    jnp.isfinite(raw_log_prob), 
+                    raw_log_prob, 
+                    jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
+                )
+                
+                return safe_log_prob
 
             except Exception as e:
-                 if self.verbose: print(f"[LogLik Debug] Exception in _calculate_likelihood branch (using custom KF): {type(e).__name__}: {e}")
-                 # Optional: Print traceback for internal errors
-                 # import traceback
-                 # traceback.print_exc()
-                 return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+                if self.verbose:
+                    print(f"[LogLik Debug] Exception in _calculate_likelihood branch: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
 
-        def _return_invalid_likelihood(pd): # Accepts param_dict (operand)
-            """Returns -inf when solve failed."""
-            return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+        def _return_invalid_likelihood(pd):  # Accepts param_dict (operand)
+            """Returns large negative (but finite) value when solve failed."""
+            return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
 
         # --- Perform the solve ONCE to get the validity flag ---
         try:
-             solution_check = self.solve(param_dict)
-             is_valid = jnp.asarray(solution_check.get("solution_valid", False))
+            solution_check = self.solve(param_dict)
+            is_valid = jnp.asarray(solution_check.get("solution_valid", False))
+            
+            if self.verbose:
+                print(f"Debug: Initial solve validity: {is_valid}")
+                
         except Exception as e_solve_outer:
-             if self.verbose: print(f"[LogLik Debug] Exception during initial validity solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
-             return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
+            if self.verbose:
+                print(f"[LogLik Debug] Exception during initial validity solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
+            return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
 
-        # --- Use lax.cond ---
+        # --- Use lax.cond to proceed only if solution is valid ---
         log_prob = jax.lax.cond(
             pred=is_valid,
             true_fun=_calculate_likelihood,
             false_fun=_return_invalid_likelihood,
-            operand=param_dict # Pass parameters needed by the branches
+            operand=param_dict
         )
 
+        # Final safety check - VERY IMPORTANT for Numpyro
+        # This ensures we never return a non-finite value
+        log_prob = jnp.where(
+            jnp.isfinite(log_prob), 
+            log_prob, 
+            jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
+        )
+        
         return log_prob
-# --- End of Revised log_likelihood ---
 
 
 
-def numpyro_model(
+# Fix for the numpyro_model function to handle potential -inf log-likelihoods
+
+def numpyro_model_fixed(
     model_instance: DynareModelWithJAXAD, # Pass the instantiated model
     user_priors: List[Dict[str, Any]], # List of prior specs for estimated params
     fixed_param_values: Dict[str, float], # Values for non-estimated params
@@ -632,6 +890,7 @@ def numpyro_model(
 ):
     """
     Numpyro model function for estimating a subset of Dynare parameters.
+    This version safely handles potential -inf log-likelihoods.
 
     Args:
         model_instance: An instantiated DynareModelWithJAXAD object.
@@ -681,11 +940,14 @@ def numpyro_model(
                 # Numpyro uses scale parameter (which is 1/rate)
                 scale = jnp.maximum(dist_args_processed.get("scale", 1.0), 1e-7) # Ensure positive
                 sampled_value = numpyro.sample(name, dist.InverseGamma(conc, scale))
-            # Add other distributions as needed (e.g., Uniform)
-            # elif dist_name == "uniform":
-            #     low = dist_args_processed.get("low", 0.0)
-            #     high = dist_args_processed.get("high", 1.0)
-            #     sampled_value = numpyro.sample(name, dist.Uniform(low, high))
+            # Add other distributions as needed
+            elif dist_name == "uniform":
+                low = dist_args_processed.get("low", 0.0)
+                high = dist_args_processed.get("high", 1.0)
+                sampled_value = numpyro.sample(name, dist.Uniform(low, high))
+            elif dist_name == "halfnormal":
+                scale = jnp.maximum(dist_args_processed.get("scale", 1.0), 1e-7)
+                sampled_value = numpyro.sample(name, dist.HalfNormal(scale))
             else:
                 raise NotImplementedError(f"Prior distribution '{dist_name}' not implemented or specified for '{name}'.")
 
@@ -711,24 +973,32 @@ def numpyro_model(
     if extra_keys:
          raise RuntimeError(f"Internal Error: Extra parameters found before likelihood calculation: {extra_keys}")
 
-    # # --- Calculate Log Likelihood ---
-    # if ys is not None:
-    #     if not DYNAMAX_AVAILABLE:
-    #          raise RuntimeError("Dynamax needed for likelihood calculation.")
-    #     if H_obs is None or init_x_mean is None or init_P_cov is None:
-    #          raise ValueError("H_obs, init_x_mean, init_P_cov are required when ys is provided.")
+    # Calculate Log Likelihood if data is provided
+    if ys is not None:
+        if H_obs is None or init_x_mean is None or init_P_cov is None:
+            raise ValueError("H_obs, init_x_mean, init_P_cov are required when ys is provided.")
 
-        # Use the combined dictionary of sampled and fixed parameters
-    log_prob = model_instance.log_likelihood(
-        params_for_likelihood,
-        ys,
-        H_obs,
-        init_x_mean,
-        init_P_cov
-    )
-    # Register the log likelihood with Numpyro
-    numpyro.factor("log_likelihood", log_prob)
-
+        # Compute log likelihood
+        log_prob = model_instance.log_likelihood(
+            params_for_likelihood,
+            ys,
+            H_obs,
+            init_x_mean,
+            init_P_cov
+        )
+        
+        # *** KEY FIX: Handle -inf log-likelihood safely ***
+        # Use jax.lax.cond to apply a very large negative but finite penalty 
+        # in case of -inf, which is safer for Numpyro
+        safe_log_prob = jax.lax.cond(
+            jnp.isfinite(log_prob),
+            lambda x: x,                           # If finite, use as is
+            lambda _: jnp.array(-1e10, dtype=_DEFAULT_DTYPE),  # If -inf, use large finite negative value
+            log_prob
+        )
+        
+        # Register the log likelihood with Numpyro
+        numpyro.factor("log_likelihood", safe_log_prob)
 
 
 # --- Main Execution Block ---
@@ -748,9 +1018,9 @@ if __name__ == "__main__":
     # Estimation settings
     run_estimation_flag = True # Set to False to only simulate/test solve
     mcmc_seed = 456
-    mcmc_chains = jax.local_device_count() # Use available CPUs/devices
-    mcmc_warmup = 500
-    mcmc_samples = 1000
+    mcmc_chains = 1 #jax.local_device_count() # Use available CPUs/devices
+    mcmc_warmup = 250
+    mcmc_samples = 500
     mcmc_target_accept = 0.85
 
     # --- [1] Initialize the Model Wrapper ---
@@ -924,46 +1194,35 @@ if __name__ == "__main__":
 
 
      # --- [DEBUG] Test Log Likelihood at Initial Parameters ---
-        print("\n--- [DEBUG] Testing log_likelihood at initial parameters ---")
-        # Combine initial estimated parameters with fixed parameters
         initial_params_full = fixed_params.copy()
         initial_params_full.update(init_values_mcmc)
     
-        # Ensure all parameters are present (sanity check)
-        if set(initial_params_full.keys()) != set(model.all_param_names):
-            print("ERROR: Mismatch between initial_params_full and model.all_param_names!")
-        else:
-            # Temporarily set verbose=True in the model instance for detailed output
-            model.verbose = True
-            try:
-                initial_log_lik = model.log_likelihood(
-                    initial_params_full,
-                    sim_observables,
-                    H_obs_est,
-                    init_x_mean_est,
-                    init_P_cov_est
-                )
-                print(f"--- [DEBUG] Log Likelihood at initial params: {initial_log_lik} ---")
-                if not jnp.isfinite(initial_log_lik):
-                    print("--- [DEBUG] FAILURE: Initial log likelihood is non-finite! ---")
-                    # Optionally exit here if you want to stop before MCMC
-                    # exit()
-                else:
-                    print("--- [DEBUG] SUCCESS: Initial log likelihood is finite. ---")
+        print("\n--- [DEBUG] Testing Kalman filter integration ---")
+        integration_success, diagnostics = test_kalman_integration(
+            model,
+            initial_params_full,
+            sim_observables,
+            H_obs_est,
+            init_x_mean_est,
+            init_P_cov_est
+        )
 
-            except Exception as e_debug:
-                print(f"--- [DEBUG] FAILURE: Error during initial log_likelihood test: {e_debug} ---")
-                import traceback
-                traceback.print_exc()
-                # Optionally exit
-                # exit()
-            finally:
-                # Set verbose back to False if needed for MCMC run
-                model.verbose = False # Set back for cleaner MCMC logs
+        if integration_success:
+            print("✅ Kalman filter integration test successful!")
+            print(f"Log-likelihood at initial parameters: {diagnostics.get('log_likelihood')}")
+        else:
+            print("⚠️ Kalman filter integration test failed:")
+            print(diagnostics.get('error', 'Unknown error'))
+            print(diagnostics.get('details', ''))
+            
+            if input("Continue anyway? (y/n): ").lower() != 'y':
+                print("Exiting as requested.")
+                exit()
+                    
         # --- [END DEBUG] ---
 
         # Instantiate NUTS kernel (unchanged)
-        kernel = NUTS(numpyro_model, init_strategy=init_strategy, target_accept_prob=mcmc_target_accept)
+        kernel = NUTS(numpyro_model_fixed, init_strategy=init_strategy, target_accept_prob=mcmc_target_accept)
 
         # Instantiate MCMC (unchanged)
         mcmc = MCMC(
@@ -971,9 +1230,8 @@ if __name__ == "__main__":
             num_warmup=mcmc_warmup, 
             num_samples=mcmc_samples,
             num_chains=mcmc_chains, 
-            progress_bar=(mcmc_chains == 1),
-            chain_method='parallel' if mcmc_chains > 1 else 'sequential',
-            jit_model_args=True
+            progress_bar=True,  # Always show progress bar
+            chain_method='sequential'  # Use sequential for debugging
         )
 
         # Run MCMC - Pass user_priors and fixed_params

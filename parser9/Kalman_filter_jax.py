@@ -109,99 +109,151 @@ class KalmanFilter:
             # print("Returning zeros for observation noise.")
             return jnp.zeros(tuple(shape) + (self.n_obs,), dtype=self.H.dtype)
 
-# --- Simplified KalmanFilter.filter (Assumes NO NaNs) ---
     def filter(self, ys: ArrayLike) -> Dict[str, jax.Array]:
         """
-        Applies the Kalman filter. ASSUMES NO MISSING VALUES (NaNs) in ys.
-
+        Applies the Kalman filter, optimized for a STATIC pattern of missing values.
+        It assumes that if ys[t, i] is NaN, then ys[k, i] is NaN for all k.
+        The pattern of missing values is determined from the first time step ys[0].
+        
         Args:
-            ys: Observations array, shape `[T, n_obs]`. Must not contain NaNs.
-
+            ys: Observations array, shape `[T, n_obs]`. NaN indicates missing values
+                with a pattern constant over time.
+                
         Returns:
             A dictionary containing filter results and log-likelihood contributions.
         """
         ys_arr = jnp.asarray(ys, dtype=self.C.dtype)
-        T_mat, C_mat, H_mat, I_s = self.T, self.C, self.H, self.I_s # Use full matrices
+        T_mat, C_full, H_full, I_s = self.T, self.C, self.H, self.I_s
         state_cov = self.state_cov
-        n_obs_actual = self.n_obs # Use full dimension
 
         T_steps = ys_arr.shape[0]
-        if T_steps == 0: # Handle empty input (remains the same)
-        # ... (return empty dict as before) ...
+        if T_steps == 0:  # Handle empty input
+            empty_float = lambda *s: jnp.empty(s, dtype=I_s.dtype)
+            empty_innov = lambda *s: jnp.empty(s, dtype=self.C.dtype)
+            n_obs_actual = 0
+            try:
+                valid_obs_idx_np = onp.where(~onp.isnan(onp.asarray(ys[0])))[0]
+                n_obs_actual = len(valid_obs_idx_np)
+            except IndexError: pass
+            return {
+                'x_pred': empty_float(0, self.n_state), 'P_pred': empty_float(0, self.n_state, self.n_state),
+                'x_filt': empty_float(0, self.n_state), 'P_filt': empty_float(0, self.n_state, self.n_state),
+                'innovations': empty_innov(0, n_obs_actual), 'innovation_cov': empty_innov(0, n_obs_actual, n_obs_actual),
+                'log_likelihood_contributions': empty_float(0)
+            }
 
-        # --- REMOVED Preprocessing for NaNs ---
+        # --- Preprocessing: Identify observed subset (assuming static pattern) ---
+        try:
+            valid_obs_idx = jnp.where(~jnp.isnan(ys_arr[0]))[0]
+        except IndexError:
+            valid_obs_idx = jnp.array([], dtype=jnp.int32)
 
-        # --- Kalman Filter Step Function (using full matrices) ---
-           def step_no_nan(carry, y_t): # Takes y_t directly
+        n_obs_actual = len(valid_obs_idx)
+
+        if n_obs_actual == self.n_obs:
+            C_obs = C_full
+            H_obs = H_full
+            I_obs = jnp.eye(self.n_obs, dtype=I_s.dtype)
+            select_obs = lambda y: y
+        elif n_obs_actual > 0:
+            # Extract the observed part of matrices
+            C_obs = C_full[valid_obs_idx, :]
+            H_obs = H_full[jnp.ix_(valid_obs_idx, valid_obs_idx)]
+            I_obs = jnp.eye(n_obs_actual, dtype=I_s.dtype)
+            select_obs = lambda y: y[valid_obs_idx]
+        else:
+            # All observations missing - prediction only
+            C_obs = jnp.empty((0, self.n_state), dtype=C_full.dtype)
+            H_obs = jnp.empty((0, 0), dtype=H_full.dtype)
+            I_obs = jnp.empty((0, 0), dtype=I_s.dtype)
+            select_obs = lambda y: jnp.empty((0,), dtype=y.dtype)
+
+        # --- Kalman Filter Step Function (using observed subset) ---
+        def step_static_nan(carry, y_t_full):
             x_prev_filt, P_prev_filt = carry
 
             # --- Prediction Step ---
             x_pred_t = T_mat @ x_prev_filt
             P_pred_t = T_mat @ P_prev_filt @ T_mat.T + state_cov
 
-            # --- Update Step (using full C_mat, H_mat) ---
-            v = y_t - (C_mat @ x_pred_t) # Innovation using full y_t
+            # --- Update Step ---
+            y_obs_t = select_obs(y_t_full)  # Extract observed part
+            y_pred_obs = C_obs @ x_pred_t
+            v_obs = y_obs_t - y_pred_obs    # Innovation for observed components
 
-            PCt = P_pred_t @ C_mat.T
-            S = C_mat @ PCt + H_mat
-            S_reg = S + _MACHINE_EPSILON * jnp.eye(n_obs_actual, dtype=S.dtype)
+            PCt_obs = P_pred_t @ C_obs.T
+            S_obs = C_obs @ PCt_obs + H_obs
+            S_obs_reg = S_obs + _MACHINE_EPSILON * I_obs  # Regularize
 
             # --- Kalman Gain Calculation ---
-            try: # Use Cholesky solve if possible (more stable)
-                L_S = jnp.linalg.cholesky(S_reg)
-                Kt = jax.scipy.linalg.solve_triangular(L_S, PCt, lower=True).T
-                K = jax.scipy.linalg.solve_triangular(L_S.T, Kt, lower=False).T
-            except Exception: # Fallback to standard solve or pinv
-                try: K = jax.scipy.linalg.solve(S_reg, PCt.T, assume_a='pos').T # K = PCt @ inv(S)
+            try:
+                L_S_obs = jnp.linalg.cholesky(S_obs_reg)
+                Y_obs = jax.scipy.linalg.solve_triangular(L_S_obs, PCt_obs.T, lower=True)
+                K = Y_obs.T  # K = PCt @ inv(S)
+            except Exception:
+                try: K = jax.scipy.linalg.solve(S_obs_reg, PCt_obs.T, assume_a='pos').T
                 except Exception:
-                    try: K = PCt @ jnp.linalg.pinv(S_reg)
-                    except Exception: K = jnp.zeros((self.n_state, n_obs_actual), dtype=x_pred_t.dtype)
-
+                    try:
+                        S_obs_pinv = jnp.linalg.pinv(S_obs_reg)
+                        K = PCt_obs @ S_obs_pinv
+                    except Exception:
+                        K = jnp.zeros((self.n_state, n_obs_actual), dtype=x_pred_t.dtype)
 
             # --- State and Covariance Update ---
-            x_filt_t = x_pred_t + K @ v
-            IKC = I_s - K @ C_mat
+            # If n_obs_actual=0, no update (K will be empty)
+            x_filt_t = x_pred_t + K @ v_obs  # When n_obs_actual=0, this equals x_pred_t
+            
             # Joseph form for covariance update (more stable)
-            P_filt_t = IKC @ P_pred_t @ IKC.T + K @ H_mat @ K.T
-            P_filt_t = (P_filt_t + P_filt_t.T) / 2.0 # Ensure symmetry
+            # When n_obs_actual=0, P_filt_t equals P_pred_t
+            if n_obs_actual > 0:
+                IKC_obs = I_s - K @ C_obs
+                P_filt_t = IKC_obs @ P_pred_t @ IKC_obs.T + K @ H_obs @ K.T
+                P_filt_t = (P_filt_t + P_filt_t.T) / 2.0  # Enforce symmetry
+            else:
+                P_filt_t = P_pred_t
 
             # --- Log Likelihood Contribution Calculation ---
-            log_pi_term = jnp.log(2 * jnp.pi) * n_obs_actual
-            sign, log_det_S = jnp.linalg.slogdet(S_reg)
-
-            try: # Use Cholesky solve for Mahalanobis term
-                L_S = jnp.linalg.cholesky(S_reg) # Recompute or reuse L_S from gain calc
-                z = jax.scipy.linalg.solve_triangular(L_S, v, lower=True)
-                mahalanobis_dist = jnp.sum(z**2)
-            except Exception: # Fallback if Cholesky fails
+            # Default value for empty observations (prediction only)
+            ll_t = 0.0
+            
+            if n_obs_actual > 0:
+                log_pi_term = jnp.log(2 * jnp.pi) * n_obs_actual
+                
+                # Compute log determinant
+                sign, log_det_S_obs = jnp.linalg.slogdet(S_obs_reg)
+                
+                # Compute Mahalanobis distance term
                 try:
-                    S_inv_v = jax.scipy.linalg.solve(S_reg, v, assume_a='pos')
-                    mahalanobis_dist = v @ S_inv_v
+                    solved_term_obs = jax.scipy.linalg.solve(S_obs_reg, v_obs, assume_a='pos')
+                    mahalanobis_dist_obs = v_obs @ solved_term_obs
                 except Exception:
-                    mahalanobis_dist = 1e18 # Assign large penalty if solve fails
-
-            ll_t = -0.5 * (log_pi_term + log_det_S + mahalanobis_dist)
-            safe_ll_t = jnp.where(sign > 0, ll_t, -1e18) # Penalize if S not PD
+                    mahalanobis_dist_obs = 1e18  # Use large penalty if solve fails
+                
+                # Combine terms for log-likelihood
+                ll_t = -0.5 * (log_pi_term + log_det_S_obs + mahalanobis_dist_obs)
+                
+                # Safety check that S_obs is positive definite
+                ll_t = jnp.where(sign > 0, ll_t, -1e18)
 
             outputs = {
                 'x_pred': x_pred_t, 'P_pred': P_pred_t,
                 'x_filt': x_filt_t, 'P_filt': P_filt_t,
-                'innovations': v,
-                'innovation_cov': S,
-                'log_likelihood_contributions': safe_ll_t
+                'innovations': v_obs,
+                'innovation_cov': S_obs,
+                'log_likelihood_contributions': ll_t
             }
             return (x_filt_t, P_filt_t), outputs
 
         # --- Run the Scan ---
         init_carry = (self.init_x, self.init_P)
-        ys_reshaped = jnp.reshape(ys_arr, (-1, self.n_obs)) # Ensure correct shape
-        (_, _), scan_outputs = lax.scan(step_no_nan, init_carry, ys_reshaped)
+        ys_reshaped = jnp.reshape(ys_arr, (-1, self.n_obs))
+        (_, _), scan_outputs = lax.scan(step_static_nan, init_carry, ys_reshaped)
 
         return scan_outputs
 
     # --- Keep log_likelihood method as is ---
     def log_likelihood(self, ys: ArrayLike) -> jax.Array:
-        print("Calculating log-likelihood...") # Quieter
+        # print("Calculating log-likelihood...") # Quieter
         filter_results = self.filter(ys)
         total_log_likelihood = jnp.sum(filter_results['log_likelihood_contributions'])
         # print(f"Log-likelihood calculated: {total_log_likelihood}") # Quieter
@@ -273,11 +325,15 @@ class KalmanFilter:
         return x_smooth, P_smooth
 
 
-    # --- UPDATED simulation smoother single draw ---
     def _simulation_smoother_single_draw(self, ys: jax.Array, key: jax.random.PRNGKey, filter_results_orig: Optional[Dict] = None) -> jax.Array:
-        """ Internal: Performs one draw of Durbin-Koopman simulation smoother."""
+        """ 
+        Internal: Performs one draw of Durbin-Koopman simulation smoother.
+        Handles NaN values in the original data correctly, but simulated data has no NaNs.
+        """
         Tsteps = ys.shape[0]
-        if Tsteps == 0: return jnp.empty((0, self.n_state), dtype=self.init_x.dtype)
+        if Tsteps == 0: 
+            return jnp.empty((0, self.n_state), dtype=self.init_x.dtype)
+        
         n_s = self.n_state
         n_eps = self.n_shocks
 
@@ -292,19 +348,47 @@ class KalmanFilter:
             L0 = jnp.linalg.cholesky(init_P_reg)
             z0 = random.normal(key_init, (n_s,), dtype=self.init_x.dtype)
             x0_star = self.init_x + L0 @ z0
-        except Exception: x0_star = self.init_x
+        except Exception: 
+            x0_star = self.init_x
 
         # Step 3: Simulate state trajectory x*
         eps_star = random.normal(key_eps, (Tsteps, n_eps), dtype=self.R.dtype) if n_eps > 0 else jnp.zeros((Tsteps, 0), dtype=self.R.dtype)
+        
         def state_sim_step(x_prev_star, eps_t_star):
             shock_term = self.R @ eps_t_star if n_eps > 0 else jnp.zeros(self.n_state, dtype=x_prev_star.dtype)
             x_curr_star = self.T @ x_prev_star + shock_term
             return x_curr_star, x_curr_star
+        
         _, x_star = lax.scan(state_sim_step, x0_star, eps_star)
 
         # Step 4: Simulate observation trajectory y*
-        eta_star = self.simulate_obs_noise(key_eta, (Tsteps,))
-        y_star = (x_star @ self.C.T) + eta_star
+        # IMPORTANT: Find which observation variables are always observed, 
+        # for simulated data we only generate values for those positions
+        try:
+            # Get valid observation indices from first time step
+            valid_obs_idx = jnp.where(~jnp.isnan(ys[0]))[0]
+            
+            # In case all rows have the same NaN pattern, extract only valid indices
+            # for C matrix to generate only observable values
+            C_valid = self.C[valid_obs_idx, :]
+            H_valid = self.H[jnp.ix_(valid_obs_idx, valid_obs_idx)]
+            
+            # Generate noise only for observable variables
+            eta_star_valid = self.simulate_obs_noise(key_eta, (Tsteps,))
+            
+            # Generate observations only for observable variables
+            y_star_valid = jnp.zeros((Tsteps, self.n_obs), dtype=x_star.dtype)
+            y_star_valid_only = (x_star @ C_valid.T) + eta_star_valid
+            
+            # Place the valid observations back into a full matrix with NaNs
+            # matching the pattern of the original data
+            y_star = jnp.full((Tsteps, self.n_obs), jnp.nan, dtype=y_star_valid_only.dtype)
+            y_star = y_star.at[:, valid_obs_idx].set(y_star_valid_only)
+            
+        except (IndexError, ValueError):
+            # Fallback: if no valid obs or error occurred, just create fully valid simulated data
+            eta_star = self.simulate_obs_noise(key_eta, (Tsteps,))
+            y_star = (x_star @ self.C.T) + eta_star
 
         # Step 5: RTS smoother on simulated data y* (runs filter internally)
         x_smooth_star, _ = self.smooth(y_star)
@@ -313,18 +397,41 @@ class KalmanFilter:
         x_draw = x_star + (x_smooth_rts - x_smooth_star)
         return x_draw
 
-    # --- UPDATED simulation smoother main method ---
     def simulation_smoother(self, ys: ArrayLike, key: jax.random.PRNGKey, num_draws: int = 1,
                             filter_results: Optional[Dict] = None
                             ) -> Union[jax.Array, Tuple[jax.Array, jax.Array, jax.Array]]:
-        """ Runs the Durbin-Koopman simulation smoother. """
-        if num_draws <= 0: raise ValueError("num_draws must be >= 1.")
+        """ 
+        Runs the Durbin-Koopman simulation smoother with NaN handling.
+        If the original data contains NaNs (missing values), the simulated data
+        will have the same pattern of missingness.
+        
+        Args:
+            ys: Observations array, shape `[T, n_obs]`. NaN indicates missing.
+            key: JAX PRNG key for random draws.
+            num_draws: Number of simulation smoother draws.
+            filter_results: (Optional) Pre-computed filter results.
+            
+        Returns:
+            If num_draws=1:
+                jax.Array: State draws from the posterior [T, n_state]
+            Else:
+                Tuple of:
+                    - mean_smooth_sim: Mean of posterior draws [T, n_state]
+                    - median_smooth_sim: Median of posterior draws [T, n_state]
+                    - all_draws_jax: All posterior draws [num_draws, T, n_state]
+        """
+        if num_draws <= 0: 
+            raise ValueError("num_draws must be >= 1.")
+        
         ys_arr = jnp.asarray(ys, dtype=self.C.dtype)
         Tsteps = ys_arr.shape[0]
         empty_state = jnp.empty((0, self.n_state), dtype=self.init_x.dtype)
+        
         if Tsteps == 0:
-            if num_draws == 1: return empty_state
-            else: return empty_state, empty_state, jnp.empty((num_draws, 0, self.n_state), dtype=self.init_x.dtype)
+            if num_draws == 1: 
+                return empty_state
+            else: 
+                return empty_state, empty_state, jnp.empty((num_draws, 0, self.n_state), dtype=self.init_x.dtype)
 
         # Run filter ONCE if results not provided
         if filter_results is None:
@@ -341,37 +448,20 @@ class KalmanFilter:
 
             # Vmapped function for steps 2-6
             def perform_single_dk_draw(key_single_draw):
-                # This internal call now implicitly passes the original filter results
-                # via the x_smooth_rts_common calculation above.
-                # It recalculates the smoother for the simulated data internally.
-                key_init, key_eps, key_eta = random.split(key_single_draw, 3)
-                try:
-                    init_P_reg = self.init_P + _MACHINE_EPSILON * jnp.eye(self.n_state, dtype=self.init_P.dtype)
-                    L0 = jnp.linalg.cholesky(init_P_reg)
-                    z0 = random.normal(key_init, (self.n_state,), dtype=self.init_x.dtype)
-                    x0_star = self.init_x + L0 @ z0
-                except Exception: x0_star = self.init_x
-                eps_star = random.normal(key_eps, (Tsteps, self.n_shocks), dtype=self.R.dtype) if self.n_shocks > 0 else jnp.zeros((Tsteps, 0), dtype=self.R.dtype)
-                def state_sim_step(x_prev_star, eps_t_star):
-                     shock_term = self.R @ eps_t_star if self.n_shocks > 0 else jnp.zeros(self.n_state, dtype=x_prev_star.dtype)
-                     x_curr_star = self.T @ x_prev_star + shock_term
-                     return x_curr_star, x_curr_star
-                _, x_star = lax.scan(state_sim_step, x0_star, eps_star)
-                eta_star = self.simulate_obs_noise(key_eta, (Tsteps,))
-                y_star = (x_star @ self.C.T) + eta_star
-                x_smooth_star, _ = self.smooth(y_star) # Runs filter internally for y_star
-                x_draw = x_star + (x_smooth_rts_common - x_smooth_star)
-                return x_draw
+                # This reuses the x_smooth_rts_common for all draws
+                return self._simulation_smoother_single_draw(
+                    ys_arr, key_single_draw, 
+                    filter_results_orig={'x_smooth_rts': x_smooth_rts_common}  # Pass directly
+                )
 
             keys = random.split(key, num_draws)
-            # print(f" Performing {num_draws} simulation smoother draws (vectorized)...") # Quieter
             vmapped_smoother = vmap(perform_single_dk_draw, in_axes=(0,))
             all_draws_jax = vmapped_smoother(keys)
-            # print(" Finished smoothing calculations.") # Quieter
-            # print(" Calculating statistics (mean, median)...") # Quieter
+            
+            # Compute statistics across draws
             mean_smooth_sim = jnp.mean(all_draws_jax, axis=0)
             median_smooth_sim = jnp.percentile(all_draws_jax, 50.0, axis=0, method='linear')
-            # print(" Finished.") # Quieter
+            
             return mean_smooth_sim, median_smooth_sim, all_draws_jax
 
 # --- Keep simulation function as is ---
