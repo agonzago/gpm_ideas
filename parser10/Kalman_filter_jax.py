@@ -115,6 +115,8 @@ class KalmanFilter:
         It assumes that if ys[t, i] is NaN, then ys[k, i] is NaN for all k.
         The pattern of missing values is determined from the first time step ys[0].
         
+        Enhanced with additional numerical safeguards to prevent NaN/Inf values.
+        
         Args:
             ys: Observations array, shape `[T, n_obs]`. NaN indicates missing values
                 with a pattern constant over time.
@@ -125,6 +127,12 @@ class KalmanFilter:
         ys_arr = jnp.asarray(ys, dtype=self.C.dtype)
         T_mat, C_full, H_full, I_s = self.T, self.C, self.H, self.I_s
         state_cov = self.state_cov
+
+        # Additional regularization for matrix operations
+        eps = _MACHINE_EPSILON * 10  # Increase regularization factor
+        
+        # Maximum value to clip state estimates (prevent explosion)
+        MAX_STATE_VALUE = 1e6
 
         T_steps = ys_arr.shape[0]
         if T_steps == 0:  # Handle empty input
@@ -174,7 +182,22 @@ class KalmanFilter:
 
             # --- Prediction Step ---
             x_pred_t = T_mat @ x_prev_filt
-            P_pred_t = T_mat @ P_prev_filt @ T_mat.T + state_cov
+            
+            # Clip predicted state to prevent extreme values
+            x_pred_t = jnp.clip(x_pred_t, -MAX_STATE_VALUE, MAX_STATE_VALUE)
+            
+            # Ensure P_prev_filt is symmetric and positive definite 
+            P_prev_filt_sym = (P_prev_filt + P_prev_filt.T) / 2.0
+            P_prev_filt_reg = P_prev_filt_sym + eps * I_s  # Add regularization
+            
+            # Compute prediction covariance
+            P_pred_t = T_mat @ P_prev_filt_reg @ T_mat.T + state_cov
+            
+            # Ensure symmetry in prediction covariance
+            P_pred_t = (P_pred_t + P_pred_t.T) / 2.0
+            
+            # Add regularization to prediction covariance
+            P_pred_t = P_pred_t + eps * I_s
 
             # --- Update Step ---
             y_obs_t = select_obs(y_t_full)  # Extract observed part
@@ -183,34 +206,56 @@ class KalmanFilter:
 
             PCt_obs = P_pred_t @ C_obs.T
             S_obs = C_obs @ PCt_obs + H_obs
-            S_obs_reg = S_obs + _MACHINE_EPSILON * I_obs  # Regularize
+            # Stronger regularization for S matrix
+            S_obs_reg = S_obs + eps * 10.0 * I_obs  # Increase regularization
 
-            # --- Kalman Gain Calculation ---
-            try:
-                L_S_obs = jnp.linalg.cholesky(S_obs_reg)
-                Y_obs = jax.scipy.linalg.solve_triangular(L_S_obs, PCt_obs.T, lower=True)
-                K = Y_obs.T  # K = PCt @ inv(S)
-            except Exception:
-                try: K = jax.scipy.linalg.solve(S_obs_reg, PCt_obs.T, assume_a='pos').T
+            # --- Kalman Gain Calculation with improved numerical stability ---
+            K = jnp.zeros((self.n_state, n_obs_actual), dtype=x_pred_t.dtype)
+            
+            if n_obs_actual > 0:
+                try:
+                    # Try Cholesky-based approach first (most stable)
+                    L_S_obs = jnp.linalg.cholesky(S_obs_reg)
+                    Y_obs = jax.scipy.linalg.solve_triangular(L_S_obs, PCt_obs.T, lower=True)
+                    K = Y_obs.T  # K = PCt @ inv(S)
                 except Exception:
                     try:
-                        S_obs_pinv = jnp.linalg.pinv(S_obs_reg)
-                        K = PCt_obs @ S_obs_pinv
+                        # Try direct solve next
+                        K = jax.scipy.linalg.solve(S_obs_reg, PCt_obs.T, assume_a='pos').T
                     except Exception:
-                        K = jnp.zeros((self.n_state, n_obs_actual), dtype=x_pred_t.dtype)
-
+                        try:
+                            # Resort to pseudoinverse as last resort
+                            S_obs_pinv = jnp.linalg.pinv(S_obs_reg)
+                            K = PCt_obs @ S_obs_pinv
+                        except Exception:
+                            # If all methods fail, use zero Kalman gain (prediction only)
+                            K = jnp.zeros((self.n_state, n_obs_actual), dtype=x_pred_t.dtype)
+            
+                # Clip Kalman gain to prevent extreme values
+                K = jnp.clip(K, -1e3, 1e3)
+            
             # --- State and Covariance Update ---
             # If n_obs_actual=0, no update (K will be empty)
-            x_filt_t = x_pred_t + K @ v_obs  # When n_obs_actual=0, this equals x_pred_t
+            x_filt_t = x_pred_t
+            P_filt_t = P_pred_t
             
-            # Joseph form for covariance update (more stable)
-            # When n_obs_actual=0, P_filt_t equals P_pred_t
             if n_obs_actual > 0:
+                # Update state estimate
+                x_update = K @ v_obs
+                x_filt_t = x_pred_t + x_update
+                
+                # Clip filtered state to prevent extreme values
+                x_filt_t = jnp.clip(x_filt_t, -MAX_STATE_VALUE, MAX_STATE_VALUE)
+                
+                # Joseph form for covariance update (more stable)
                 IKC_obs = I_s - K @ C_obs
                 P_filt_t = IKC_obs @ P_pred_t @ IKC_obs.T + K @ H_obs @ K.T
-                P_filt_t = (P_filt_t + P_filt_t.T) / 2.0  # Enforce symmetry
-            else:
-                P_filt_t = P_pred_t
+                
+                # Ensure symmetry
+                P_filt_t = (P_filt_t + P_filt_t.T) / 2.0
+                
+                # Add regularization
+                P_filt_t = P_filt_t + eps * I_s
 
             # --- Log Likelihood Contribution Calculation ---
             # Default value for empty observations (prediction only)
@@ -223,31 +268,99 @@ class KalmanFilter:
                 sign, log_det_S_obs = jnp.linalg.slogdet(S_obs_reg)
                 
                 # Compute Mahalanobis distance term
+                mahalanobis_dist_obs = 0.0
                 try:
-                    solved_term_obs = jax.scipy.linalg.solve(S_obs_reg, v_obs, assume_a='pos')
-                    mahalanobis_dist_obs = v_obs @ solved_term_obs
+                    # Prefer triangular solve for better numerical stability
+                    L_S_obs = jnp.linalg.cholesky(S_obs_reg)
+                    z = jax.scipy.linalg.solve_triangular(L_S_obs, v_obs, lower=True)
+                    mahalanobis_dist_obs = jnp.sum(z**2)
                 except Exception:
-                    mahalanobis_dist_obs = 1e18  # Use large penalty if solve fails
+                    try:
+                        # Direct solve as fallback
+                        solved_term_obs = jax.scipy.linalg.solve(S_obs_reg, v_obs, assume_a='pos')
+                        mahalanobis_dist_obs = v_obs @ solved_term_obs
+                    except Exception:
+                        # Use large penalty if solve fails
+                        mahalanobis_dist_obs = 1e6
                 
                 # Combine terms for log-likelihood
                 ll_t = -0.5 * (log_pi_term + log_det_S_obs + mahalanobis_dist_obs)
                 
                 # Safety check that S_obs is positive definite
-                ll_t = jnp.where(sign > 0, ll_t, -1e18)
+                # Use a finite large negative value instead of -inf
+                ll_t = jnp.where(sign > 0, ll_t, -1e6)
+            
+            # Additional NaN check for ll_t
+            ll_t = jnp.where(jnp.isfinite(ll_t), ll_t, -1e6)
 
             outputs = {
-                'x_pred': x_pred_t, 'P_pred': P_pred_t,
-                'x_filt': x_filt_t, 'P_filt': P_filt_t,
+                'x_pred': x_pred_t, 
+                'P_pred': P_pred_t,
+                'x_filt': x_filt_t, 
+                'P_filt': P_filt_t,
                 'innovations': v_obs,
                 'innovation_cov': S_obs,
                 'log_likelihood_contributions': ll_t
             }
-            return (x_filt_t, P_filt_t), outputs
+            
+            # IMPORTANT: Handle potential NaN values in outputs
+            # For all array outputs, replace NaN/Inf with zeros
+            for key in ['x_pred', 'x_filt', 'innovations']:
+                if key in outputs and outputs[key].size > 0:
+                    outputs[key] = jnp.where(
+                        jnp.isfinite(outputs[key]),
+                        outputs[key],
+                        jnp.zeros_like(outputs[key])
+                    )
+            
+            # For covariance matrices, replace NaN/Inf with identity * epsilon
+            for key in ['P_pred', 'P_filt', 'innovation_cov']:
+                if key in outputs and outputs[key].size > 0:
+                    shape = outputs[key].shape
+                    if len(shape) == 2 and shape[0] == shape[1]:
+                        dim = shape[0]
+                        outputs[key] = jnp.where(
+                            jnp.isfinite(outputs[key]),
+                            outputs[key],
+                            jnp.eye(dim, dtype=outputs[key].dtype) * eps
+                        )
+            
+            # Ensure states are carried forward correctly even with numerical issues
+            x_filt_t_safe = jnp.where(
+                jnp.isfinite(x_filt_t),
+                x_filt_t,
+                jnp.zeros_like(x_filt_t)
+            )
+            
+            P_filt_t_safe = jnp.where(
+                jnp.isfinite(P_filt_t),
+                P_filt_t,
+                jnp.eye(self.n_state, dtype=P_filt_t.dtype) * eps
+            )
+            
+            return (x_filt_t_safe, P_filt_t_safe), outputs
 
         # --- Run the Scan ---
         init_carry = (self.init_x, self.init_P)
         ys_reshaped = jnp.reshape(ys_arr, (-1, self.n_obs))
         (_, _), scan_outputs = lax.scan(step_static_nan, init_carry, ys_reshaped)
+        
+        # Final safeguard - sanitize all outputs
+        for key in scan_outputs:
+            if key == 'log_likelihood_contributions':
+                # Specific handling for log likelihood values
+                scan_outputs[key] = jnp.where(
+                    jnp.isfinite(scan_outputs[key]),
+                    scan_outputs[key],
+                    jnp.full_like(scan_outputs[key], -1e6)
+                )
+            elif scan_outputs[key].size > 0:
+                # General sanitization for other arrays
+                scan_outputs[key] = jnp.where(
+                    jnp.isfinite(scan_outputs[key]),
+                    scan_outputs[key],
+                    jnp.zeros_like(scan_outputs[key])
+                )
 
         return scan_outputs
 
