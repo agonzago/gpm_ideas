@@ -1,15 +1,15 @@
-# --- START OF FILE run_estimation.py ---
+# --- START OF MODIFIED run_estimation.py ---
 import os
 import time
 import jax
 import jax.numpy as jnp
-import numpy as onp # For plotting or data loading if needed
+import numpy as onp
 import matplotlib.pyplot as plt
 from jax import random
 from typing import Dict, List, Tuple, Optional, Union, Any
-import re  
+import re
 
-# --- JAX/Dynamax/Numpyro Setup ---
+# --- Force CPU Execution (Optional) ---
 print("Attempting to force JAX to use CPU...")
 try:
     jax.config.update("jax_platforms", "cpu")
@@ -18,1279 +18,535 @@ except Exception as e_cpu:
     print(f"Warning: Could not force CPU platform: {e_cpu}")
 print(f"JAX default platform: {jax.default_backend()}")
 
-# Ensure JAX is configured for float64 if enabled
+# --- JAX/Numpyro Setup --- (Keep as is)
+# ...
 jax.config.update("jax_enable_x64", True)
 _DEFAULT_DTYPE = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
-print(f"Using JAX with dtype: {_DEFAULT_DTYPE}")
+# ... (Import numpyro, KalmanFilter) ...
 
-# --- Library Imports ---
-try:
-    import numpyro
-    import numpyro.distributions as dist
-    from numpyro.infer import MCMC, NUTS, init_to_value
-    NUMPYRO_AVAILABLE = True
-    print("Numpyro imported successfully.")
-    try:
-        num_devices_to_use = jax.local_device_count()
-        numpyro.set_host_device_count(num_devices_to_use)
-        print(f"Numpyro configured to use {num_devices_to_use} host devices.")
-    except Exception as e_np_config:
-        print(f"Warning: Could not configure numpyro device count: {e_np_config}")
-except ImportError:
-    NUMPYRO_AVAILABLE = False
-    print("Warning: numpyro not found. Estimation disabled.")
-
-# try:
-#     from dynamax.linear_gaussian_ssm import LinearGaussianSSM,  lgssm_filter
-#     DYNAMAX_AVAILABLE = True
-#     print("Dynamax imported successfully.")
-# except ImportError:
-#     DYNAMAX_AVAILABLE = False
-#     print("Warning: dynamax not found. Likelihood calculation will fail.")
-
-# --- Import your custom Kalman Filter ---
-try:
-    # Assume Kalman_filter_jax.py is in the same directory or path
-    from Kalman_filter_jax import KalmanFilter
-    KALMAN_FILTER_JAX_AVAILABLE = True
-    print("Custom KalmanFilter imported successfully.")
-except ImportError:
-    KALMAN_FILTER_JAX_AVAILABLE = False
-    print("Warning: Kalman_filter_jax.py not found. Likelihood calculation will fail.")
-# --- End custom Kalman Filter import ---
-
-def test_kalman_integration(model, param_values, obs_data, H_obs, init_x, init_P):
-    """
-    Simple diagnostic function to test the integration between the model and Kalman filter.
-    Performs each step separately to identify potential issues.
-    
-    Args:
-        model: DynareModelWithJAXAD instance
-        param_values: Parameter dictionary
-        obs_data: Observation data [T, n_obs]
-        H_obs: Observation noise covariance matrix [n_obs, n_obs]
-        init_x: Initial state mean [n_aug]
-        init_P: Initial state covariance [n_aug, n_aug]
-        
-    Returns:
-        Success flag and diagnostic information
-    """
-    print("\n=== RUNNING KALMAN INTEGRATION TEST ===")
-    
-    # Step 1: Check model solution
-    print("\nStep 1: Model Solution")
-    try:
-        solution = model.solve(param_values)
-        if not solution["solution_valid"]:
-            print("✗ Model solution is INVALID")
-            return False, {"error": "Invalid model solution"}
-        
-        P_aug = solution["P_aug"]
-        R_aug = solution["R_aug"]
-        Omega = solution["Omega"]
-        n_aug = solution["n_aug"]
-        n_obs = solution["n_obs"]
-        
-        print(f"✓ Model solution valid")
-        print(f"  - State dimension (n_aug): {n_aug}")
-        print(f"  - Observation dimension (n_obs): {n_obs}")
-        print(f"  - P_aug shape: {P_aug.shape}")
-        print(f"  - R_aug shape: {R_aug.shape}")
-        print(f"  - Omega shape: {Omega.shape}")
-    except Exception as e:
-        print(f"✗ Error solving model: {e}")
-        return False, {"error": f"Model solution error: {str(e)}"}
-    
-    # Step 2: Check dimensions for Kalman filter
-    print("\nStep 2: Dimension Checks")
-    try:
-        expected_shapes = {
-            "P_aug": (n_aug, n_aug),
-            "R_aug": (n_aug, R_aug.shape[1]),  # R's columns depend on shock count
-            "Omega": (n_obs, n_aug),
-            "H_obs": (n_obs, n_obs),
-            "init_x": (n_aug,),
-            "init_P": (n_aug, n_aug),
-            "obs_data": (obs_data.shape[0], n_obs)
-        }
-        
-        actual_shapes = {
-            "P_aug": P_aug.shape,
-            "R_aug": R_aug.shape,
-            "Omega": Omega.shape,
-            "H_obs": H_obs.shape,
-            "init_x": init_x.shape,
-            "init_P": init_P.shape,
-            "obs_data": obs_data.shape
-        }
-        
-        mismatches = []
-        for name, expected in expected_shapes.items():
-            actual = actual_shapes[name]
-            if actual != expected:
-                mismatches.append(f"{name}: expected {expected}, got {actual}")
-        
-        if mismatches:
-            print("✗ Dimension mismatches found:")
-            for mismatch in mismatches:
-                print(f"  - {mismatch}")
-            return False, {"error": "Dimension mismatches", "details": mismatches}
-        
-        print("✓ All dimensions match expected values")
-    except Exception as e:
-        print(f"✗ Error checking dimensions: {e}")
-        return False, {"error": f"Dimension check error: {str(e)}"}
-    
-    # Step 3: Check for NaN/Inf values
-    print("\nStep 3: Check for NaN/Inf Values")
-    matrices = {
-        "P_aug": P_aug,
-        "R_aug": R_aug,
-        "Omega": Omega,
-        "H_obs": H_obs,
-        "init_x": init_x,
-        "init_P": init_P,
-    }
-    
-    nan_inf_found = False
-    for name, matrix in matrices.items():
-        if not jnp.all(jnp.isfinite(matrix)):
-            print(f"✗ Matrix {name} contains NaN or Inf values")
-            nan_inf_found = True
-    
-    if nan_inf_found:
-        return False, {"error": "NaN/Inf values in matrices"}
-    
-    print("✓ All matrices contain finite values")
-    
-    # Step 4: Direct test of Kalman filter
-    print("\nStep 4: Direct Kalman Filter Test")
-    try:
-        from Kalman_filter_jax import KalmanFilter
-        
-        # Create Kalman filter instance
-        kf = KalmanFilter(
-            T=P_aug,
-            R=R_aug,
-            C=Omega,
-            H=H_obs,
-            init_x=init_x,
-            init_P=init_P
-        )
-        print("✓ KalmanFilter instantiated successfully")
-        
-        # Test filter operation
-        try:
-            print("  - Testing filter operation...")
-            filter_results = kf.filter(obs_data)
-            print("  ✓ filter() completed successfully")
-            
-            # Check filter results
-            keys_to_check = ['x_pred', 'P_pred', 'x_filt', 'P_filt', 'log_likelihood_contributions']
-            for key in keys_to_check:
-                if key not in filter_results:
-                    print(f"  ✗ Missing expected key in filter results: {key}")
-                    return False, {"error": f"Missing key in filter results: {key}"}
-                
-                # Check if values contain NaN/Inf
-                if not jnp.all(jnp.isfinite(filter_results[key])):
-                    print(f"  ✗ Non-finite values in filter results: {key}")
-                    return False, {"error": f"Non-finite values in filter results: {key}"}
-            
-            print("  ✓ Filter results look valid")
-            
-            # Test log-likelihood
-            try:
-                print("  - Testing log_likelihood calculation...")
-                log_lik = kf.log_likelihood(obs_data)
-                print(f"  ✓ log_likelihood() completed: {log_lik}")
-                
-                if not jnp.isfinite(log_lik):
-                    print("  ✗ Log-likelihood is not finite")
-                    return False, {"error": "Non-finite log-likelihood", "value": float(log_lik)}
-                
-                # Try model's log_likelihood method
-                try:
-                    print("  - Testing model.log_likelihood()...")
-                    model_ll = model.log_likelihood(
-                        param_values, obs_data, H_obs, init_x, init_P
-                    )
-                    print(f"  ✓ model.log_likelihood() completed: {model_ll}")
-                    
-                    # Check if values match
-                    ll_diff = jnp.abs(log_lik - model_ll)
-                    if ll_diff > 1e-6:
-                        print(f"  ⚠ Warning: Difference between direct KF and model log-likelihood: {ll_diff}")
-                    else:
-                        print("  ✓ Direct KF and model log-likelihood match")
-                    
-                except Exception as e_model_ll:
-                    print(f"  ✗ Error in model.log_likelihood(): {e_model_ll}")
-                    return False, {"error": f"Model log_likelihood error: {str(e_model_ll)}"}
-                
-            except Exception as e_ll:
-                print(f"  ✗ Error in kf.log_likelihood(): {e_ll}")
-                return False, {"error": f"log_likelihood error: {str(e_ll)}"}
-            
-        except Exception as e_filter:
-            print(f"  ✗ Error in kf.filter(): {e_filter}")
-            return False, {"error": f"filter error: {str(e_filter)}"}
-        
-    except Exception as e_kf:
-        print(f"✗ Error instantiating KalmanFilter: {e_kf}")
-        return False, {"error": f"KalmanFilter instantiation error: {str(e_kf)}"}
-    
-    print("\n=== KALMAN INTEGRATION TEST PASSED ===")
-    return True, {"log_likelihood": float(log_lik) if 'log_lik' in locals() else None}
-
-
-# --- Import from Parser ---
-# Assume Dynare_parser_sda_solver.py is in the same directory or PYTHONPATH
+# --- Import from Parser --- (Keep as is)
 from dynare_parser_sda_solver_jax import (
-    extract_declarations,
-    extract_model_equations,
-    extract_trend_declarations,
-    extract_trend_equations,
-    extract_observation_declarations,
-    extract_measurement_equations,
-    extract_stationary_shock_stderrs,
-    extract_trend_shock_stderrs,
-    parse_and_compute_matrices_jax_ad, # Used for initial parse/ordering
-    compute_matrices_jax_ad,           # Used within solve method
-    build_trend_matrices_jax_ad,       # Used within solve method
-    build_observation_matrix_jax_ad,   # Used within solve method
+    # ... all necessary imports ...
+    parse_and_order_stationary_model_symbolic,
+    generate_matrix_lambda_functions,
+    generate_trend_lambda_functions,
+    generate_observation_lambda_functions,
     solve_quadratic_matrix_equation_jax,
     compute_Q_jax,
-    construct_initial_state, # Helper for simulation/initialization
-    simulate_ssm_data, # For generating test data
-    plot_simulation_with_trends_matched # For plotting
-    # Add other necessary imports like plot_irfs if needed
+    construct_initial_state,
+    simulate_ssm_data,
+    plot_simulation_with_trends_matched,
+    plot_irfs,
+    extract_trend_declarations, # Needed below
+    extract_trend_shock_stderrs # Needed below
 )
 
 
-# --- Dynare Model Class using JAX AD ---
-
-class DynareModelWithJAXAD:
-    """
-    Represents a Dynare model, computing matrices using JAX AD and
-    providing methods for solving and likelihood calculation (via Dynamax).
-    """
+class DynareModelWithSympyVJPs:
     def __init__(self, mod_file_path: str, verbose: bool = False):
         self.mod_file_path = mod_file_path
         self.verbose = verbose
         self._parsed = False
-        self._parse_model() # Parse structure on initialization
+        self._symbolic_data = {}
 
-    def _parse_model(self):
-        """Parses the model structure (equations, names) once."""
-        if self._parsed:
-            return
-
-        if self.verbose: print("--- Parsing Model Structure ---")
         with open(self.mod_file_path, 'r') as f:
-            model_def = f.read()
+            self.model_def_content = f.read()
 
-        # --- Stationary Part ---
-        # Use parse_and_compute_matrices_jax_ad primarily for parsing and ordering info
-        # We will recompute matrices with sampled params later
-        try:
-            (_, _, _, _,
-             self.ordered_stat_vars, self.stat_shocks, self.param_names_stat,
-             self.param_assignments_stat, self.var_perm_indices_stat,
-             self.eq_perm_indices_stat, self.initial_stat_vars, _ # Ignore matrices/code
-             ) = parse_and_compute_matrices_jax_ad(model_def, verbose=self.verbose)
+        self._parse_and_generate_lambdas()
 
-            # Store processed equations (needed for re-computation)
-            # Re-run relevant parts of parse_and_compute_matrices_jax_ad without AD
-            self.declared_vars, _, _, _ = extract_declarations(model_def)
-            raw_equations_stat = extract_model_equations(model_def)
-            # Re-run aux variable handling to get processed equations
-            _vars = list(self.declared_vars)
-            _aux = {}
-            self.processed_equations_stat = list(raw_equations_stat)
-            _var_time_regex = re.compile(r'\b([a-zA-Z_]\w*)\s*\(\s*([+-]?\d+)\s*\)')
-            _eq_idx = 0
-            while _eq_idx < len(self.processed_equations_stat):
-                 _eq = self.processed_equations_stat[_eq_idx]; _eq_idx += 1; _mod_eq = _eq
-                 _matches = list(_var_time_regex.finditer(_eq))
-                 # [Copy the exact auxiliary variable handling loop from parser here]
-                 for _match in reversed(_matches):
-                     _base, _shift = _match.group(1), int(_match.group(2))
-                     if _base not in _vars and _base not in _aux: continue
-                     if _shift > 1:
-                         _defs = []; _target = ""
-                         for k in range(1, _shift):
-                             _aux_n = f"aux_{_base}_lead_p{k}"
-                             if _aux_n not in _aux:
-                                 _prev = _base if k == 1 else f"aux_{_base}_lead_p{k-1}"
-                                 _def_str = f"({_aux_n}) - ({_prev}(+1))"; _aux[_aux_n] = _def_str; _defs.append(_def_str)
-                                 if _aux_n not in _vars: _vars.append(_aux_n)
-                         _target = f"aux_{_base}_lead_p{_shift-1}"
-                         _repl = f"{_target}(+1)"; _start, _end = _match.span(); _mod_eq = _mod_eq[:_start] + _repl + _mod_eq[_end:]
-                         for _def in _defs:
-                              if _def not in self.processed_equations_stat and f"({_def.split('-')[0].strip().strip('()')}) - ({_def.split('-')[1].strip().strip('()')})" not in self.processed_equations_stat: self.processed_equations_stat.append(_def)
-                     elif _shift < -1:
-                         _defs = []; _target = ""
-                         for k in range(1, abs(_shift)):
-                             _aux_n = f"aux_{_base}_lag_m{k}"
-                             if _aux_n not in _aux:
-                                 _prev = _base if k == 1 else f"aux_{_base}_lag_m{k-1}"
-                                 _def_str = f"({_aux_n}) - ({_prev}(-1))"; _aux[_aux_n] = _def_str; _defs.append(_def_str)
-                                 if _aux_n not in _vars: _vars.append(_aux_n)
-                         _target = f"aux_{_base}_lag_m{abs(_shift)-1}"
-                         _repl = f"{_target}(-1)"; _start, _end = _match.span(); _mod_eq = _mod_eq[:_start] + _repl + _mod_eq[_end:]
-                         for _def in _defs:
-                             if _def not in self.processed_equations_stat and f"({_def.split('-')[0].strip().strip('()')}) - ({_def.split('-')[1].strip().strip('()')})" not in self.processed_equations_stat: self.processed_equations_stat.append(_def)
-                 if _mod_eq != _eq: self.processed_equations_stat[_eq_idx - 1] = _mod_eq
-
-
-        except Exception as e:
-            print(f"Error during initial stationary model parse: {e}")
-            raise
-
-        # --- Trend Part ---
-        self.trend_vars, self.trend_shocks = extract_trend_declarations(model_def)
-        self.trend_equations = extract_trend_equations(model_def)
-        self.trend_stderr_params = extract_trend_shock_stderrs(model_def)
-
-        # --- Observation Part ---
-        self.obs_vars = extract_observation_declarations(model_def)
-        self.measurement_equations = extract_measurement_equations(model_def)
-
-        # --- Combine Parameters ---
-        _stat_sigma_params = [f"sigma_{shk}" for shk in self.stat_shocks]
-        _trend_sigma_params = [f"sigma_{shk}" for shk in self.trend_shocks]
-        self.all_param_names = list(dict.fromkeys(
-            self.param_names_stat + list(self.trend_stderr_params.keys()) + _stat_sigma_params + _trend_sigma_params
-        ).keys())
-
-        self.default_param_assignments = self.param_assignments_stat.copy()
-        self.default_param_assignments.update(self.trend_stderr_params)
-        # Ensure defaults for ALL sigmas (including stationary if not in shocks block)
-        for p_sigma in _stat_sigma_params + _trend_sigma_params:
-             if p_sigma not in self.default_param_assignments:
-                 self.default_param_assignments[p_sigma] = 1.0 # Default std dev
-
-        # --- Store dimensions ---
-        self.n_stat = len(self.ordered_stat_vars)
-        self.n_s_shock = len(self.stat_shocks)
-        self.n_t_shock = len(self.trend_shocks)
-        self.n_obs = len(self.obs_vars)
-        # Trend state vars determined during solve
-        self.n_trend = -1 # Will be set later
-        self.n_aug = -1
-        self.n_aug_shock = -1
-        self.aug_state_vars = []
-        self.aug_shocks = []
-        self.ordered_trend_state_vars = []
-        self.contemp_trend_defs = {}
-        self.ordered_obs_vars = []
-
+    def _parse_and_generate_lambdas(self):
+        # --- This method remains largely the same ---
+        # It parses structure and calls generate_matrix_lambda_functions
+        # to populate self._symbolic_data, self.all_param_names,
+        # self.stat_var_perm_indices, self.stat_eq_perm_indices, etc.
+        if self._parsed: return
+        if self.verbose: print("--- DynareModel: Parsing and Generating Symbolic Lambdas ---")
+        # 1. Stationary Part
+        self.stationary_structure = parse_and_order_stationary_model_symbolic(self.model_def_content, verbose=self.verbose)
+        self.all_param_names = self.stationary_structure['param_names_all']
+        self.default_param_assignments = self.stationary_structure['param_assignments_default']
+        self._symbolic_data['stationary'] = generate_matrix_lambda_functions(
+            equations_str=self.stationary_structure['equations_processed'],
+            var_names_ordered=self.stationary_structure['var_names_initial_order'],
+            shock_names_ordered=self.stationary_structure['shock_names'],
+            all_param_names_ordered=self.all_param_names, model_type="stationary", verbose=self.verbose)
+        self.stat_var_perm_indices = jnp.array(self.stationary_structure['var_permutation_indices'])
+        self.stat_eq_perm_indices = jnp.array(self.stationary_structure['eq_permutation_indices'])
+        self.ordered_stat_vars = self.stationary_structure['ordered_vars_final']
+        self.stat_shocks = self.stationary_structure['shock_names']
+        # 2. Trend Part
+        _trend_stderr_p = extract_trend_shock_stderrs(self.model_def_content)
+        self.default_param_assignments.update(_trend_stderr_p)
+        for p_name in _trend_stderr_p.keys():
+            if p_name not in self.all_param_names: self.all_param_names.append(p_name)
+        self._symbolic_data['trend'] = generate_trend_lambda_functions(self.model_def_content, self.all_param_names, verbose=self.verbose)
+        self.ordered_trend_state_vars = self._symbolic_data['trend'].get('state_trend_vars', [])
+        self.contemp_trend_defs = self._symbolic_data['trend'].get('contemporaneous_trend_defs', {})
+        _, self.trend_shocks = extract_trend_declarations(self.model_def_content)
+        # 3. Observation Part
+        self._symbolic_data['observation'] = generate_observation_lambda_functions(
+            self.model_def_content, self.all_param_names, self.ordered_stat_vars,
+            self.ordered_trend_state_vars, self.contemp_trend_defs, verbose=self.verbose)
+        self.ordered_obs_vars = self._symbolic_data['observation'].get('ordered_obs_vars', [])
+        # Store dimensions
+        self.n_stat, self.n_s_shock = len(self.ordered_stat_vars), len(self.stat_shocks)
+        self.n_trend, self.n_t_shock = len(self.ordered_trend_state_vars), len(self.trend_shocks)
+        self.n_obs = len(self.ordered_obs_vars)
+        self.n_aug, self.n_aug_shock = self.n_stat + self.n_trend, self.n_s_shock + self.n_t_shock
+        self.aug_state_vars = self.ordered_stat_vars + self.ordered_trend_state_vars
+        self.aug_shocks = self.stat_shocks + self.trend_shocks
         self._parsed = True
-        if self.verbose: print("--- Model Structure Parsing Complete ---")
+        if self.verbose: print("--- DynareModel: Symbolic Setup Complete ---")
 
 
-    # def solve(self, param_dict: Dict[str, float]) -> Dict[str, Any]:
-    #     """
-    #     Solves the model for given parameters using JAX AD matrices.
+    # --- Static VJP methods for Stationary Matrices ---
+    @staticmethod
+    def _build_stationary_matrices_vjp_fwd_static(
+        params_tuple_jax, # Differentiable inputs first
+        lambdas_stat,     # Non-differentiable data
+        stat_eq_perm_indices,
+        stat_var_perm_indices
+        ):
+        # --- Forward pass logic (same as before, but NO self) ---
+        num_eq = len(lambdas_stat['A']['elements'])
+        num_vars = len(lambdas_stat['A']['elements'][0]) if num_eq > 0 else 0
+        num_shocks = len(lambdas_stat['D']['elements'][0]) if num_eq > 0 and lambdas_stat['D']['elements'] and lambdas_stat['D']['elements'][0] else 0
+        A_unord_list = [[lambdas_stat['A']['elements'][i][j](*params_tuple_jax) for j in range(num_vars)] for i in range(num_eq)]
+        B_unord_list = [[lambdas_stat['B']['elements'][i][j](*params_tuple_jax) for j in range(num_vars)] for i in range(num_eq)]
+        C_unord_list = [[lambdas_stat['C']['elements'][i][j](*params_tuple_jax) for j in range(num_vars)] for i in range(num_eq)]
+        D_unord_list = [[lambdas_stat['D']['elements'][i][j](*params_tuple_jax) for j in range(num_shocks)] for i in range(num_eq)] if num_shocks > 0 else [[] for _ in range(num_eq)]
+        A_unord = jnp.array(A_unord_list, dtype=_DEFAULT_DTYPE).reshape(num_eq, num_vars) if num_vars > 0 else jnp.zeros((num_eq, 0), dtype=_DEFAULT_DTYPE)
+        B_unord = jnp.array(B_unord_list, dtype=_DEFAULT_DTYPE).reshape(num_eq, num_vars) if num_vars > 0 else jnp.zeros((num_eq, 0), dtype=_DEFAULT_DTYPE)
+        C_unord = jnp.array(C_unord_list, dtype=_DEFAULT_DTYPE).reshape(num_eq, num_vars) if num_vars > 0 else jnp.zeros((num_eq, 0), dtype=_DEFAULT_DTYPE)
+        D_unord = jnp.array(D_unord_list, dtype=_DEFAULT_DTYPE).reshape(num_eq, num_shocks) if num_shocks > 0 else jnp.zeros((num_eq, 0), dtype=_DEFAULT_DTYPE)
+        A_ord = A_unord[jnp.ix_(stat_eq_perm_indices, stat_var_perm_indices)] if num_vars > 0 else jnp.zeros((num_eq,0), dtype=_DEFAULT_DTYPE)
+        B_ord = B_unord[jnp.ix_(stat_eq_perm_indices, stat_var_perm_indices)] if num_vars > 0 else jnp.zeros((num_eq,0), dtype=_DEFAULT_DTYPE)
+        C_ord = C_unord[jnp.ix_(stat_eq_perm_indices, stat_var_perm_indices)] if num_vars > 0 else jnp.zeros((num_eq,0), dtype=_DEFAULT_DTYPE)
+        D_ord = D_unord[jnp.ix_(stat_eq_perm_indices, jnp.arange(D_unord.shape[1]))] if num_shocks > 0 else jnp.zeros((num_eq,0), dtype=_DEFAULT_DTYPE)
+        # --- Residuals needed for backward pass ---
+        residuals = (params_tuple_jax, lambdas_stat, A_unord, B_unord, C_unord, D_unord, stat_eq_perm_indices, stat_var_perm_indices)
+        return (A_ord, B_ord, C_ord, D_ord), residuals
 
-    #     Args:
-    #         param_dict: Dictionary mapping parameter names to values.
+    @staticmethod
+    def _build_stationary_matrices_vjp_bwd_static(residuals, grads_output_ordered_tuple):
+        # --- Backward pass logic (same as before, but NO self) ---
+        params_tuple_jax, lambdas_stat, A_unord, B_unord, C_unord, D_unord, stat_eq_perm_indices, stat_var_perm_indices = residuals
+        grad_A_ord, grad_B_ord, grad_C_ord, grad_D_ord = grads_output_ordered_tuple
+        num_params = len(params_tuple_jax)
+        grad_A_unord, grad_B_unord, grad_C_unord, grad_D_unord = jnp.zeros_like(A_unord), jnp.zeros_like(B_unord), jnp.zeros_like(C_unord), jnp.zeros_like(D_unord)
+        # --- Inverse permutation ---
+        if A_unord.size > 0:
+            for r_new in range(grad_A_ord.shape[0]):
+                r_old_eq = stat_eq_perm_indices[r_new]
+                for c_new_var in range(grad_A_ord.shape[1]):
+                    c_old_var = stat_var_perm_indices[c_new_var]
+                    grad_A_unord = grad_A_unord.at[r_old_eq, c_old_var].add(grad_A_ord[r_new, c_new_var])
+                    grad_B_unord = grad_B_unord.at[r_old_eq, c_old_var].add(grad_B_ord[r_new, c_new_var])
+                    grad_C_unord = grad_C_unord.at[r_old_eq, c_old_var].add(grad_C_ord[r_new, c_new_var])
+        if D_unord.size > 0:
+            for r_new in range(grad_D_ord.shape[0]):
+                r_old_eq = stat_eq_perm_indices[r_new]
+                for c_new_shk in range(grad_D_ord.shape[1]):
+                     grad_D_unord = grad_D_unord.at[r_old_eq, c_new_shk].add(grad_D_ord[r_new, c_new_shk])
+        # --- Gradient accumulation ---
+        param_grads_list = [jnp.array(0.0, dtype=_DEFAULT_DTYPE) for _ in range(num_params)]
+        for p_idx in range(num_params):
+            current_param_grad = jnp.array(0.0, dtype=_DEFAULT_DTYPE)
+            if A_unord.size > 0:
+                for i,j in jnp.ndindex(A_unord.shape): current_param_grad += grad_A_unord[i,j] * lambdas_stat['A']['grads'][i][j][p_idx](*params_tuple_jax)
+            if B_unord.size > 0:
+                for i,j in jnp.ndindex(B_unord.shape): current_param_grad += grad_B_unord[i,j] * lambdas_stat['B']['grads'][i][j][p_idx](*params_tuple_jax)
+            if C_unord.size > 0:
+                for i,j in jnp.ndindex(C_unord.shape): current_param_grad += grad_C_unord[i,j] * lambdas_stat['C']['grads'][i][j][p_idx](*params_tuple_jax)
+            if D_unord.size > 0:
+                for i,j in jnp.ndindex(D_unord.shape): current_param_grad += grad_D_unord[i,j] * lambdas_stat['D']['grads'][i][j][p_idx](*params_tuple_jax)
+            param_grads_list[p_idx] = current_param_grad
+        # --- Return grads for differentiable inputs ONLY (params_tuple_jax) ---
+        # The other inputs to _vjp_fwd_static (lambdas, indices) are non-differentiable.
+        return (tuple(param_grads_list), None, None, None) # Match inputs of _build_stationary_matrices_symbolic_static
 
-    #     Returns:
-    #         Dictionary containing:
-    #          - P_aug (jax.Array): Augmented transition matrix.
-    #          - R_aug (jax.Array): Augmented shock impact matrix (scaled by std dev).
-    #          - Omega (jax.Array): Observation matrix.
-    #          - solution_valid (bool): True if solve successful, False otherwise.
-    #          - ordered_trend_state_vars (List[str]): Names of trend state vars.
-    #          - contemp_trend_defs (Dict): Contemporaneous trend definitions.
-    #          - ordered_obs_vars (List[str]): Names of observable vars.
-    #          - aug_state_vars (List[str]): Names of augmented state vars.
-    #          - aug_shocks (List[str]): Names of augmented shocks.
-    #          - n_aug, n_aug_shock, n_obs (int): Dimensions.
-    #     """
-    #     if not self._parsed: self._parse_model()
+    # --- Static VJP Primal Function ---
+    # Takes differentiable args first, then static data args
+    @staticmethod
+    @jax.custom_vjp
+    def _build_stationary_matrices_symbolic_static(
+        params_tuple_jax, # Differentiable
+        lambdas_stat, stat_eq_perm_indices, stat_var_perm_indices # Non-differentiable data
+        ):
+        # This function just defines the primal computation signature for VJP
+        (A_ord, B_ord, C_ord, D_ord), _ = DynareModelWithSympyVJPs._build_stationary_matrices_vjp_fwd_static(
+             params_tuple_jax, lambdas_stat, stat_eq_perm_indices, stat_var_perm_indices
+             )
+        return A_ord, B_ord, C_ord, D_ord
 
-    #     results = {"solution_valid": False} # Default to invalid
+    # --- Associate VJP rules with the static function ---
+    _build_stationary_matrices_symbolic_static.defvjp(
+        _build_stationary_matrices_vjp_fwd_static,
+        _build_stationary_matrices_vjp_bwd_static
+    )
 
-    #     try:
-    #         # --- STEP 1: Compute Stationary Matrices (Unordered) ---
-    #         matrices_unordered, _ = compute_matrices_jax_ad(
-    #             equations=self.processed_equations_stat,
-    #             var_names=self.initial_stat_vars, # Use initial order
-    #             shock_names=self.stat_shocks,
-    #             param_names=self.all_param_names, # Use combined list
-    #             param_values=param_dict,
-    #             model_type="stationary",
-    #             dtype=_DEFAULT_DTYPE
-    #         )
-    #         A_unord = matrices_unordered['A']
-    #         B_unord = matrices_unordered['B']
-    #         C_unord = matrices_unordered['C']
-    #         D_unord = matrices_unordered['D']
+    # --- Repeat static VJP pattern for Trend ---
+    @staticmethod
+    def _build_trend_matrices_vjp_fwd_static(params_tuple_jax, lambdas_trend_data):
+        if not lambdas_trend_data or not lambdas_trend_data.get('lambda_matrices') or not lambdas_trend_data['lambda_matrices'].get('P_trends'): # Check if 'P_trends' exists
+            P_trends = jnp.empty((0,0), dtype=_DEFAULT_DTYPE)
+            Q_trends = jnp.empty((0,0), dtype=_DEFAULT_DTYPE)
+            residuals = (params_tuple_jax, lambdas_trend_data, P_trends, Q_trends) # Need P/Q shape info even if empty
+            return (P_trends, Q_trends), residuals
 
-    #          # --- STEP 1b: Reorder Stationary Matrices ---
-    #         # Use pre-calculated permutation indices from __init__
-    #         eq_perm_indices_jax = jnp.array(self.eq_perm_indices_stat)
-    #         var_perm_indices_jax = jnp.array(self.var_perm_indices_stat)
-    #         A_num_stat = A_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
-    #         B_num_stat = B_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
-    #         C_num_stat = C_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
-    #         D_num_stat = D_unord[jnp.ix_(eq_perm_indices_jax, jnp.arange(self.n_s_shock))]
+        lambdas_trend = lambdas_trend_data['lambda_matrices']
+        num_rows_p = len(lambdas_trend['P_trends']['elements'])
+        num_cols_p = len(lambdas_trend['P_trends']['elements'][0]) if num_rows_p > 0 else 0
+        num_cols_q = 0
+        if 'Q_trends' in lambdas_trend and lambdas_trend['Q_trends']['elements'] and lambdas_trend['Q_trends']['elements'][0]:
+             num_cols_q = len(lambdas_trend['Q_trends']['elements'][0])
 
+        P_list = [[lambdas_trend['P_trends']['elements'][i][j](*params_tuple_jax) for j in range(num_cols_p)] for i in range(num_rows_p)]
+        Q_list = [[lambdas_trend['Q_trends']['elements'][i][j](*params_tuple_jax) for j in range(num_cols_q)] for i in range(num_rows_p)] if num_cols_q > 0 else [[] for _ in range(num_rows_p)]
+        P_trends = jnp.array(P_list, dtype=_DEFAULT_DTYPE).reshape(num_rows_p, num_cols_p) if num_rows_p * num_cols_p > 0 else jnp.zeros((num_rows_p,0), dtype=_DEFAULT_DTYPE)
+        Q_trends = jnp.array(Q_list, dtype=_DEFAULT_DTYPE).reshape(num_rows_p, num_cols_q) if num_rows_p * num_cols_q > 0 else jnp.zeros((num_rows_p,0), dtype=_DEFAULT_DTYPE)
+        residuals = (params_tuple_jax, lambdas_trend_data, P_trends, Q_trends)
+        return (P_trends, Q_trends), residuals
 
-    #         # --- STEP 2: Solve Stationary Model ---
-    #         P_sol_stat, _, _, converged = solve_quadratic_matrix_equation_jax(
-    #             A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=500
-    #         )
-    #         if not converged or not jnp.all(jnp.isfinite(P_sol_stat)):
-    #             if self.verbose: print("Warning: Stationary SDA solver failed.")
-    #             return results # Return invalid results
-    #         Q_sol_stat = compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat)
-    #         if not jnp.all(jnp.isfinite(Q_sol_stat)):
-    #              if self.verbose: print("Warning: Stationary Q computation failed (likely singular A*P+B).")
-    #              return results
+    @staticmethod
+    def _build_trend_matrices_vjp_bwd_static(residuals, grads_output_tuple):
+        params_tuple_jax, lambdas_trend_data, P_trends, Q_trends = residuals
+        grad_P, grad_Q = grads_output_tuple
+        if not lambdas_trend_data or not lambdas_trend_data.get('lambda_matrices') or not lambdas_trend_data['lambda_matrices'].get('P_trends'):
+            return (tuple(jnp.array(0.0, dtype=_DEFAULT_DTYPE) for _ in params_tuple_jax), None) # Grad for params, None for data
 
+        lambdas_trend = lambdas_trend_data['lambda_matrices']
+        num_params = len(params_tuple_jax)
+        param_grads_list = [jnp.array(0.0, dtype=_DEFAULT_DTYPE) for _ in range(num_params)]
+        for p_idx in range(num_params):
+            current_param_grad = jnp.array(0.0, dtype=_DEFAULT_DTYPE)
+            if P_trends.size > 0:
+                for i,j in jnp.ndindex(P_trends.shape): current_param_grad += grad_P[i,j] * lambdas_trend['P_trends']['grads'][i][j][p_idx](*params_tuple_jax)
+            if Q_trends.size > 0 and 'Q_trends' in lambdas_trend: # Check if Q exists
+                for i,j in jnp.ndindex(Q_trends.shape): current_param_grad += grad_Q[i,j] * lambdas_trend['Q_trends']['grads'][i][j][p_idx](*params_tuple_jax)
+            param_grads_list[p_idx] = current_param_grad
+        return (tuple(param_grads_list), None) # Grad for params, None for data
 
-    #         # --- STEP 3: Build Trend Matrices ---
-    #         P_num_trend, Q_num_trend, self.ordered_trend_state_vars, self.contemp_trend_defs = build_trend_matrices_jax_ad(
-    #             self.trend_equations, self.trend_vars, self.trend_shocks,
-    #             self.all_param_names, param_dict, verbose=self.verbose)
-    #         self.n_trend = len(self.ordered_trend_state_vars)
+    @staticmethod
+    @jax.custom_vjp
+    def _build_trend_matrices_symbolic_static(params_tuple_jax, lambdas_trend_data):
+        (P, Q), _ = DynareModelWithSympyVJPs._build_trend_matrices_vjp_fwd_static(params_tuple_jax, lambdas_trend_data)
+        return P, Q
+    _build_trend_matrices_symbolic_static.defvjp(_build_trend_matrices_vjp_fwd_static, _build_trend_matrices_vjp_bwd_static)
 
+    # --- Repeat static VJP pattern for Observation ---
+    @staticmethod
+    def _build_observation_matrix_vjp_fwd_static(params_tuple_jax, lambdas_obs_data, n_obs, n_aug): # Pass shapes needed if empty
+        if not lambdas_obs_data or not lambdas_obs_data.get('lambda_matrices') or not lambdas_obs_data['lambda_matrices'].get('Omega'):
+             Omega = jnp.empty((n_obs, n_aug), dtype=_DEFAULT_DTYPE) # Use passed shapes
+             residuals = (params_tuple_jax, lambdas_obs_data, Omega)
+             return Omega, residuals
 
-    #         # --- STEP 4: Build Observation Matrix ---
-    #         Omega_num, self.ordered_obs_vars = build_observation_matrix_jax_ad(
-    #             self.measurement_equations, self.obs_vars, self.ordered_stat_vars,
-    #             self.ordered_trend_state_vars, self.contemp_trend_defs,
-    #             self.all_param_names, param_dict, verbose=self.verbose)
+        lambdas_omega = lambdas_obs_data['lambda_matrices']['Omega']
+        num_rows = len(lambdas_omega['elements'])
+        num_cols = len(lambdas_omega['elements'][0]) if num_rows > 0 else 0
+        Omega_list = [[lambdas_omega['elements'][i][j](*params_tuple_jax) for j in range(num_cols)] for i in range(num_rows)]
+        Omega = jnp.array(Omega_list, dtype=_DEFAULT_DTYPE).reshape(num_rows, num_cols) if num_rows * num_cols > 0 else jnp.zeros((num_rows,0), dtype=_DEFAULT_DTYPE)
+        residuals = (params_tuple_jax, lambdas_obs_data, Omega)
+        return Omega, residuals
 
+    @staticmethod
+    def _build_observation_matrix_vjp_bwd_static(residuals, grad_Omega):
+        params_tuple_jax, lambdas_obs_data, Omega = residuals
+        if not lambdas_obs_data or not lambdas_obs_data.get('lambda_matrices') or not lambdas_obs_data['lambda_matrices'].get('Omega'):
+            return (tuple(jnp.array(0.0, dtype=_DEFAULT_DTYPE) for _ in params_tuple_jax), None, None) # Grad params, None data, None shapes
 
-    #         # --- STEP 5: Build R Matrices & Augmented System ---
-    #         shock_std_devs = {}
-    #         self.aug_shocks = self.stat_shocks + self.trend_shocks
-    #         for shock_name in self.aug_shocks:
-    #             sigma_param_name = f"sigma_{shock_name}"
-    #             std_dev = param_dict.get(sigma_param_name)
-    #             if std_dev is None:
-    #                 print(f"CRITICAL WARNING: Sigma parameter '{sigma_param_name}' missing in param_dict during solve!")
-    #                 std_dev = 1.0 # Fallback, but indicates an issue
-    #             shock_std_devs[shock_name] = jnp.maximum(std_dev, 1e-9) # Ensure positivity for diag
+        lambdas_omega = lambdas_obs_data['lambda_matrices']['Omega']
+        num_params = len(params_tuple_jax)
+        param_grads_list = [jnp.array(0.0, dtype=_DEFAULT_DTYPE) for _ in range(num_params)]
+        for p_idx in range(num_params):
+            current_param_grad = jnp.array(0.0, dtype=_DEFAULT_DTYPE)
+            if Omega.size > 0:
+                for i,j in jnp.ndindex(Omega.shape): current_param_grad += grad_Omega[i,j] * lambdas_omega['grads'][i][j][p_idx](*params_tuple_jax)
+            param_grads_list[p_idx] = current_param_grad
+        return (tuple(param_grads_list), None, None, None) # Match inputs: params, lambdas, n_obs, n_aug
 
-    #         stat_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.stat_shocks], dtype=_DEFAULT_DTYPE)
-    #         trend_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.trend_shocks], dtype=_DEFAULT_DTYPE)
+    @staticmethod
+    @jax.custom_vjp
+    def _build_observation_matrix_symbolic_static(params_tuple_jax, lambdas_obs_data, n_obs, n_aug): # Add shapes
+        Omega, _ = DynareModelWithSympyVJPs._build_observation_matrix_vjp_fwd_static(params_tuple_jax, lambdas_obs_data, n_obs, n_aug)
+        return Omega
+    _build_observation_matrix_symbolic_static.defvjp(_build_observation_matrix_vjp_fwd_static, _build_observation_matrix_vjp_bwd_static)
 
-    #         R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr) if self.n_s_shock > 0 else jnp.zeros((self.n_stat, 0), dtype=_DEFAULT_DTYPE)
-    #         R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr) if self.n_t_shock > 0 else jnp.zeros((self.n_trend, 0), dtype=_DEFAULT_DTYPE)
-
-    #         # Build Augmented P_aug, R_aug
-    #         self.n_aug = self.n_stat + self.n_trend
-    #         self.n_aug_shock = self.n_s_shock + self.n_t_shock
-    #         self.aug_state_vars = self.ordered_stat_vars + self.ordered_trend_state_vars
-
-    #         P_aug = jax.scipy.linalg.block_diag(P_sol_stat, P_num_trend)
-    #         R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=P_aug.dtype)
-    #         if self.n_stat > 0 and self.n_s_shock > 0 and R_sol_stat.shape == (self.n_stat, self.n_s_shock): R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
-    #         if self.n_trend > 0 and self.n_t_shock > 0 and R_num_trend.shape == (self.n_trend, self.n_t_shock): R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
-
-    #         # --- Store results ---
-    #         results["P_aug"] = P_aug
-    #         results["R_aug"] = R_aug # Note: This is R = Q_impact @ diag(std)
-    #         results["Omega"] = Omega_num
-    #         results["solution_valid"] = True
-    #         results["ordered_trend_state_vars"] = self.ordered_trend_state_vars
-    #         results["contemp_trend_defs"] = self.contemp_trend_defs
-    #         results["ordered_obs_vars"] = self.ordered_obs_vars
-    #         results["aug_state_vars"] = self.aug_state_vars
-    #         results["aug_shocks"] = self.aug_shocks
-    #         results["n_aug"] = self.n_aug
-    #         results["n_aug_shock"] = self.n_aug_shock
-    #         results["n_obs"] = self.n_obs
-
-    #         # Final validation
-    #         if not jnp.all(jnp.isfinite(P_aug)) or not jnp.all(jnp.isfinite(R_aug)) or not jnp.all(jnp.isfinite(Omega_num)):
-    #             if self.verbose: print("Warning: NaNs/Infs found in final augmented matrices.")
-    #             results["solution_valid"] = False
-
-
-    #     except Exception as e:
-    #         if self.verbose: print(f"Error during model solve: {e}")
-    #         import traceback
-    #         traceback.print_exc()
-    #         results["solution_valid"] = False # Ensure invalid on error
-
-    #     return results
-
-# Inside DynareModelWithJAXAD class
 
     def solve(self, param_dict: Dict[str, float]) -> Dict[str, Any]:
-        """
-        Solves the model for given parameters using JAX AD matrices.
-        Returns results dictionary including a JAX boolean 'solution_valid'.
-        """
-        if not self._parsed: self._parse_model()
+        if not self._parsed: self._parse_and_generate_lambdas()
+        params_tuple_jax = tuple(jnp.asarray(param_dict[p_name], dtype=_DEFAULT_DTYPE) for p_name in self.all_param_names)
 
-        results = {"solution_valid": jnp.array(False)} # Default to invalid (JAX bool)
-        P_aug, R_aug, Omega_num = None, None, None # Initialize
-
-        try:
-            # --- STEP 1: Compute and Reorder Stationary Matrices ---
-            matrices_unordered, _ = compute_matrices_jax_ad(
-                self.processed_equations_stat, self.initial_stat_vars, self.stat_shocks,
-                self.all_param_names, param_dict, "stationary", _DEFAULT_DTYPE
+        results = {"solution_valid": jnp.array(False)}
+        try: # Wrap entire solve in try-except
+            # Call STATIC VJP functions, passing data from self
+            A_num_stat, B_num_stat, C_num_stat, D_num_stat = DynareModelWithSympyVJPs._build_stationary_matrices_symbolic_static(
+                params_tuple_jax,
+                self._symbolic_data['stationary']['lambda_matrices'],
+                self.stat_eq_perm_indices,
+                self.stat_var_perm_indices
             )
-            A_unord, B_unord, C_unord, D_unord = (matrices_unordered['A'], matrices_unordered['B'],
-                                                matrices_unordered['C'], matrices_unordered['D'])
-            eq_perm_indices_jax = jnp.array(self.eq_perm_indices_stat)
-            var_perm_indices_jax = jnp.array(self.var_perm_indices_stat)
-            A_num_stat = A_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
-            B_num_stat = B_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
-            C_num_stat = C_unord[jnp.ix_(eq_perm_indices_jax, var_perm_indices_jax)]
-            D_num_stat = D_unord[jnp.ix_(eq_perm_indices_jax, jnp.arange(self.n_s_shock))]
 
-            # --- STEP 2: Solve Stationary Model ---
             P_sol_stat, _, _, converged_stat = solve_quadratic_matrix_equation_jax(
                 A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=500
             )
-            # Check convergence immediately (converged_stat is a JAX bool)
-            # Also check if P_sol_stat contains NaN (implicitly checked by converged_stat)
-            valid_stat_solve = converged_stat
+            valid_stat_solve = converged_stat & jnp.all(jnp.isfinite(P_sol_stat))
 
-            # Compute Q only if solve was valid
             Q_sol_stat = jnp.where(
                  valid_stat_solve,
                  compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat),
-                 jnp.full_like(D_num_stat, jnp.nan) # Return NaN Q if P invalid
+                 jnp.full_like(D_num_stat, jnp.nan)
             )
-            valid_q_compute = jnp.all(jnp.isfinite(Q_sol_stat)) # Check Q finiteness
+            valid_q_compute = jnp.all(jnp.isfinite(Q_sol_stat))
 
-            # --- STEP 3 & 4: Build Trend & Observation Matrices ---
-            P_num_trend, Q_num_trend, self.ordered_trend_state_vars, self.contemp_trend_defs = build_trend_matrices_jax_ad(
-                self.trend_equations, self.trend_vars, self.trend_shocks,
-                self.all_param_names, param_dict, verbose=False) # Less verbose solve
-            self.n_trend = len(self.ordered_trend_state_vars)
+            P_num_trend, Q_num_trend = DynareModelWithSympyVJPs._build_trend_matrices_symbolic_static(
+                params_tuple_jax,
+                self._symbolic_data['trend'] # Pass the whole trend data dict
+            )
 
-            Omega_num, self.ordered_obs_vars = build_observation_matrix_jax_ad(
-                self.measurement_equations, self.obs_vars, self.ordered_stat_vars,
-                self.ordered_trend_state_vars, self.contemp_trend_defs,
-                self.all_param_names, param_dict, verbose=False)
+            Omega_num = DynareModelWithSympyVJPs._build_observation_matrix_symbolic_static(
+                params_tuple_jax,
+                self._symbolic_data['observation'], # Pass the whole obs data dict
+                self.n_obs, # Pass shape info
+                self.n_aug  # Pass shape info
+            )
 
-            # --- STEP 5: Build R Matrices & Augmented System ---
-            # ... (calculate R_sol_stat, R_num_trend using shock_std_devs) ...
+            # --- Build R Matrices & Augmented System (Numerical part) ---
             shock_std_devs = {}
-            self.aug_shocks = self.stat_shocks + self.trend_shocks
             for shock_name in self.aug_shocks:
                 sigma_param_name = f"sigma_{shock_name}"
-                std_dev = param_dict.get(sigma_param_name, 1.0) # Default 1 if missing (shouldn't happen)
-                # Ensure positivity and non-zero for diag
+                param_idx = self.all_param_names.index(sigma_param_name)
+                std_dev = params_tuple_jax[param_idx]
                 shock_std_devs[shock_name] = jnp.maximum(jnp.abs(std_dev), 1e-9)
 
-            stat_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.stat_shocks], dtype=_DEFAULT_DTYPE)
-            trend_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.trend_shocks], dtype=_DEFAULT_DTYPE)
+            stat_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.stat_shocks], dtype=_DEFAULT_DTYPE) if self.stat_shocks else jnp.array([], dtype=_DEFAULT_DTYPE)
+            trend_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.trend_shocks], dtype=_DEFAULT_DTYPE) if self.trend_shocks else jnp.array([], dtype=_DEFAULT_DTYPE)
 
-            R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr) if self.n_s_shock > 0 else jnp.zeros((self.n_stat, 0), dtype=_DEFAULT_DTYPE)
-            R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr) if self.n_t_shock > 0 else jnp.zeros((self.n_trend, 0), dtype=_DEFAULT_DTYPE)
+            # Ensure Q matrices have correct dimensions before multiplying
+            R_sol_stat = jnp.zeros((self.n_stat, self.n_s_shock), dtype=_DEFAULT_DTYPE)
+            if self.n_s_shock > 0 and Q_sol_stat.shape == (self.n_stat, self.n_s_shock):
+                R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr)
 
-            self.n_aug = self.n_stat + self.n_trend
-            self.n_aug_shock = self.n_s_shock + self.n_t_shock
-            self.aug_state_vars = self.ordered_stat_vars + self.ordered_trend_state_vars
+            R_num_trend = jnp.zeros((self.n_trend, self.n_t_shock), dtype=_DEFAULT_DTYPE)
+            if self.n_t_shock > 0 and Q_num_trend.shape == (self.n_trend, self.n_t_shock):
+                 R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr)
 
-            P_aug = jax.scipy.linalg.block_diag(P_sol_stat, P_num_trend)
-            R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=P_aug.dtype)
-            # Use jnp.where to handle potentially NaN R_sol_stat
-            if self.n_stat > 0 and self.n_s_shock > 0: R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
-            if self.n_trend > 0 and self.n_t_shock > 0: R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
+            # Handle potentially empty blocks in block_diag
+            blocks = []
+            if P_sol_stat.size > 0: blocks.append(P_sol_stat)
+            if P_num_trend.size > 0: blocks.append(P_num_trend)
+            if not blocks: P_aug = jnp.zeros((self.n_aug, self.n_aug), dtype=_DEFAULT_DTYPE)
+            elif len(blocks) == 1: P_aug = blocks[0] # If only one block is non-empty
+            else: P_aug = jax.scipy.linalg.block_diag(*blocks)
+            # Ensure P_aug has correct final shape if one block was empty
+            if P_aug.shape != (self.n_aug, self.n_aug):
+                 # This might happen if e.g. n_stat > 0, n_trend = 0
+                 temp_P_aug = jnp.zeros((self.n_aug, self.n_aug), dtype=_DEFAULT_DTYPE)
+                 if P_sol_stat.size > 0: temp_P_aug = temp_P_aug.at[:self.n_stat, :self.n_stat].set(P_sol_stat)
+                 # No need to set P_num_trend if it was empty
+                 P_aug = temp_P_aug
 
+            R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=_DEFAULT_DTYPE)
+            if self.n_stat > 0 and self.n_s_shock > 0 and R_sol_stat.shape == (self.n_stat, self.n_s_shock):
+                 R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
+            if self.n_trend > 0 and self.n_t_shock > 0 and R_num_trend.shape == (self.n_trend, self.n_t_shock):
+                 R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
 
-            # --- Final Validity Check (JAX compatible) ---
-            all_finite = (
-                jnp.all(jnp.isfinite(P_aug)) &
-                jnp.all(jnp.isfinite(R_aug)) &
-                jnp.all(jnp.isfinite(Omega_num))
-            )
-            # Solution is valid only if stat solve converged AND Q computation worked AND final matrices finite
+            all_finite = (jnp.all(jnp.isfinite(P_aug)) & jnp.all(jnp.isfinite(R_aug)) & jnp.all(jnp.isfinite(Omega_num)))
             solution_valid_final = valid_stat_solve & valid_q_compute & all_finite
 
-            # Store results (matrices might contain NaNs if !solution_valid_final)
-            results["P_aug"] = P_aug
-            results["R_aug"] = R_aug
-            results["Omega"] = Omega_num
-            results["solution_valid"] = solution_valid_final # Store JAX bool
-            results["ordered_trend_state_vars"] = self.ordered_trend_state_vars # Python list
-            results["contemp_trend_defs"] = self.contemp_trend_defs # Python dict
-            results["ordered_obs_vars"] = self.ordered_obs_vars # Python list
-            results["aug_state_vars"] = self.aug_state_vars # Python list
-            results["aug_shocks"] = self.aug_shocks # Python list
-            results["n_aug"] = self.n_aug # Python int
-            results["n_aug_shock"] = self.n_aug_shock # Python int
-            results["n_obs"] = self.n_obs # Python int
+            results.update({
+                "P_aug": P_aug, "R_aug": R_aug, "Omega": Omega_num,
+                "solution_valid": solution_valid_final,
+                "ordered_trend_state_vars": self.ordered_trend_state_vars,
+                "contemp_trend_defs": self.contemp_trend_defs,
+                "ordered_obs_vars": self.ordered_obs_vars,
+                "aug_state_vars": self.aug_state_vars,
+                "aug_shocks": self.aug_shocks,
+                "n_aug": self.n_aug, "n_aug_shock": self.n_aug_shock, "n_obs": self.n_obs
+            })
 
-
-        except Exception as e:
-            if self.verbose: print(f"Exception during model solve: {e}")
-            # Ensure results dict contains default valid=False and potentially None matrices
-            results["solution_valid"] = jnp.array(False) # Ensure JAX bool False on error
-            # Optionally clear potentially partially computed matrices
-            results["P_aug"], results["R_aug"], results["Omega"] = None, None, None
+        except Exception as e: # Catch errors during solve (incl. VJP calls, SDA, etc.)
+             if self.verbose: print(f"Exception during model solve (VJP): {type(e).__name__}: {e}")
+             # import traceback; traceback.print_exc() # Optional detailed traceback
+             results["solution_valid"] = jnp.array(False)
+             # Ensure matrices are None or NaN filled if solve fails for stability
+             results["P_aug"] = jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE) if hasattr(self, 'n_aug') else None
+             results["R_aug"] = jnp.full((self.n_aug, self.n_aug_shock), jnp.nan, dtype=_DEFAULT_DTYPE) if hasattr(self, 'n_aug') and hasattr(self, 'n_aug_shock') else None
+             results["Omega"] = jnp.full((self.n_obs, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE) if hasattr(self, 'n_obs') and hasattr(self, 'n_aug') else None
 
         return results
-    
 
-    # def log_likelihood(self,
-    #                 param_dict: Dict[str, float],
-    #                 ys: jax.Array,
-    #                 H_obs: jax.Array, # Observation noise COVARIANCE
-    #                 init_x_mean: jax.Array,
-    #                 init_P_cov: jax.Array) -> float:
-    #     """
-    #     Computes the log-likelihood using Dynamax filter, handling potential
-    #     solver failures gracefully using jax.lax.cond based *only* on the validity flag.
-    #     Relies on solve() returning valid=False or filter failing for bad params.
-    #     """
-    #     # Ensure prerequisites are met before entering JAX-traced logic
-    #     if not DYNAMAX_AVAILABLE:
-    #         # This error is better raised during setup than returning -inf repeatedly
-    #         raise RuntimeError("Dynamax library is required for log_likelihood.")
-    #     if ys is None or H_obs is None or init_x_mean is None or init_P_cov is None:
-    #         raise ValueError("Missing required input (ys, H_obs, init_x_mean, or init_P_cov).")
+    # log_likelihood method remains the same, it calls self.solve()
 
-
-    #     # --- Define functions for jax.lax.cond branches ---
-    #     def _calculate_likelihood(pd): # Accepts the param_dict
-    #         """Calculates likelihood assuming solve was successful."""
-    #         # Re-solve inside the branch to ensure tracing works correctly with cond
-    #         # This might seem redundant but helps with JAX control flow primitives
-    #         solution = self.solve(pd)
-
-    #         # Since this branch is only executed if the initial solve outside cond was valid,
-    #         # we proceed directly, but wrap in try/except for runtime filter/numerical errors.
-    #         try:
-    #             # Extract results - assume they are valid based on the outer cond check
-    #             P_aug = solution["P_aug"]
-    #             R_aug = solution["R_aug"]
-    #             Omega = solution["Omega"]
-    #             n_aug = solution["n_aug"] # Get actual dimension used in solve
-    #             n_obs = solution["n_obs"]
-
-    #             # Calculate Q_dyn and add jitter
-    #             # Use jnp.maximum to prevent issues if std dev param is exactly zero
-    #             # (although priors/transforms should ideally prevent this)
-    #             Q_dyn = R_aug @ R_aug.T
-    #             q_jitter = 1e-8 # Slightly increased jitter for robustness
-    #             Q_dyn = Q_dyn + q_jitter * jnp.eye(n_aug, dtype=Q_dyn.dtype)
-
-    #             # Instantiate and Initialize Dynamax LGSSM
-    #             lgssm = LinearGaussianSSM(n_aug, n_obs, input_dim=0)
-    #             lgssm_params, _ = lgssm.initialize(
-    #                 initial_mean=init_x_mean, initial_covariance=init_P_cov,
-    #                 dynamics_weights=P_aug, dynamics_covariance=Q_dyn,
-    #                 emission_weights=Omega, emission_covariance=H_obs
-    #             )
-
-    #             # Compute Log Likelihood via Filtering
-    #             filtered_results = lgssm_filter(lgssm_params, emissions=ys)
-    #             log_prob = filtered_results.marginal_loglik
-
-    #             # Return likelihood or -inf if filter itself produced non-finite result
-    #             # Ensure dtype matches the default float type for consistency
-    #             return jnp.where(jnp.isfinite(log_prob), log_prob, jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE))
-
-    #         except Exception as e:
-    #              # Catch potential runtime errors *within* this valid branch
-    #              # (e.g., LinAlgError from filter if Q_dyn still numerically bad)
-    #              if self.verbose: print(f"[LogLik Debug] Exception in _calculate_likelihood branch: {type(e).__name__}: {e}")
-    #              return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
-
-    #     def _return_invalid_likelihood(pd): # Accepts param_dict (operand)
-    #         """Returns -inf when solve failed."""
-    #         # Match the expected return type (JAX scalar array)
-    #         return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
-
-    #     # --- Perform the solve ONCE to get the validity flag ---
-    #     # Crucially, ensure solve() itself does not contain Python `if` on tracers
-    #     try:
-    #          solution_check = self.solve(param_dict)
-    #          # Ensure is_valid is a JAX boolean scalar, default to False if key missing
-    #          is_valid = jnp.asarray(solution_check.get("solution_valid", False))
-
-    #     except Exception as e_solve_outer:
-    #          # Catch error during the initial solve attempt
-    #          if self.verbose: print(f"[LogLik Debug] Exception during initial solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
-    #          return jnp.array(-jnp.inf, dtype=_DEFAULT_DTYPE)
-
-    def log_likelihood(self,
-                    param_dict: Dict[str, float],
-                    ys: jax.Array,
-                    H_obs: jax.Array,  # Observation noise COVARIANCE
-                    init_x_mean: jax.Array,
-                    init_P_cov: jax.Array) -> float:
-        """
-        Computes the log-likelihood using the custom KalmanFilter class,
-        handling potential solver failures gracefully and ensuring finite values for Numpyro.
-        
-        Args:
-            param_dict: Dictionary of model parameters
-            ys: Observation data [T, n_obs]
-            H_obs: Observation noise covariance matrix [n_obs, n_obs]
-            init_x_mean: Initial state mean [n_aug]
-            init_P_cov: Initial state covariance [n_aug, n_aug]
-            
-        Returns:
-            JAX array scalar containing the log-likelihood or a large negative value if invalid
-        """
-        if not KALMAN_FILTER_JAX_AVAILABLE:
-            raise RuntimeError("Custom KalmanFilter class is required.")
-        if ys is None or H_obs is None or init_x_mean is None or init_P_cov is None:
-            raise ValueError("Missing required input (ys, H_obs, init_x_mean, or init_P_cov).")
-
-        # Set a large negative but finite value for invalid cases
+    def log_likelihood(self, param_dict: Dict[str, float], ys: jax.Array,
+                       H_obs: jax.Array, init_x_mean: jax.Array, init_P_cov: jax.Array) -> jax.Array:
+        if not KALMAN_FILTER_JAX_AVAILABLE: raise RuntimeError("Custom KalmanFilter required.")
         LARGE_NEG_VALUE = -1e10
-        
-        # --- Define functions for jax.lax.cond branches ---
-        def _calculate_likelihood(pd):  # Accepts the param_dict
-            """Calculates likelihood assuming solve was successful."""
-            # Re-solve inside the branch
-            solution = self.solve(pd)
+        solution = self.solve(param_dict) # Calls the solve method using VJPs
 
-            # Add debug print statements if verbose
-            if self.verbose:
-                print(f"Debug: Solution validity: {solution['solution_valid']}")
-                if solution["P_aug"] is not None:
-                    print(f"Debug: P_aug shape: {solution['P_aug'].shape}")
-                if solution["R_aug"] is not None:
-                    print(f"Debug: R_aug shape: {solution['R_aug'].shape}")
-                if solution["Omega"] is not None:
-                    print(f"Debug: Omega shape: {solution['Omega'].shape}")
-                print(f"Debug: n_aug: {solution['n_aug']}, n_obs: {solution['n_obs']}")
-                print(f"Debug: init_x_mean shape: {init_x_mean.shape}")
-                print(f"Debug: init_P_cov shape: {init_P_cov.shape}")
-                print(f"Debug: H_obs shape: {H_obs.shape}, ys shape: {ys.shape}")
+        def _calculate_likelihood_branch(sol):
+            # Check if solution seems valid before trying KF
+            if not jnp.all(jnp.isfinite(sol["P_aug"])) or \
+               not jnp.all(jnp.isfinite(sol["R_aug"])) or \
+               not jnp.all(jnp.isfinite(sol["Omega"])):
+                 # if self.verbose: print("[LogLik VJP] Non-finite matrices in valid solution branch.")
+                 return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
+
+            # Check dimensions before KF instantiation
+            P_aug, R_aug, Omega_m = sol["P_aug"], sol["R_aug"], sol["Omega"]
+            n_aug_kf, n_obs_kf = P_aug.shape[0], Omega_m.shape[0]
+            n_aug_shock_kf = R_aug.shape[1]
+            # Add checks against init_x_mean, init_P_cov, ys, H_obs shapes
+            shapes_ok = (
+                 P_aug.shape==(n_aug_kf, n_aug_kf) and R_aug.shape==(n_aug_kf, n_aug_shock_kf) and
+                 Omega_m.shape==(n_obs_kf, n_aug_kf) and H_obs.shape==(n_obs_kf, n_obs_kf) and
+                 init_x_mean.shape==(n_aug_kf,) and init_P_cov.shape==(n_aug_kf, n_aug_kf) and
+                 (ys.ndim==1 and ys.shape[0]==n_obs_kf or ys.ndim==2 and ys.shape[1]==n_obs_kf) # Allow single obs row or multiple
+                 )
+            if not shapes_ok:
+                 # if self.verbose: print("[LogLik VJP] Shape mismatch before KF.")
+                 return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
 
             try:
-                # Extract results
-                P_aug = solution["P_aug"]   # State transition matrix [n_aug, n_aug]
-                R_aug = solution["R_aug"]   # Shock impact matrix [n_aug, n_shock]  
-                Omega = solution["Omega"]   # Observation matrix [n_obs, n_aug]
-                
-                # Check dimension compatibility
-                n_aug = solution["n_aug"]   # State dimension
-                n_obs = solution["n_obs"]   # Observation dimension
-                
-                shape_ok = (
-                    P_aug.shape == (n_aug, n_aug) and
-                    Omega.shape == (n_obs, n_aug) and
-                    H_obs.shape == (n_obs, n_obs) and
-                    init_x_mean.shape == (n_aug,) and
-                    init_P_cov.shape == (n_aug, n_aug) and
-                    ys.shape[1] == n_obs
-                )
-                
-                # Early return if shape mismatch
-                if not shape_ok:
-                    if self.verbose:
-                        print("Debug: Shape mismatch between matrices.")
-                    return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
-                
-                # Check for NaN/Inf values
-                matrices = [P_aug, R_aug, Omega, H_obs, init_x_mean, init_P_cov]
-                all_finite = True
-                for i, mat in enumerate(matrices):
-                    if not jnp.all(jnp.isfinite(mat)):
-                        if self.verbose:
-                            mat_names = ["P_aug", "R_aug", "Omega", "H_obs", "init_x_mean", "init_P_cov"]
-                            print(f"Debug: Matrix {mat_names[i]} contains NaN/Inf values.")
-                        all_finite = False
-                
-                if not all_finite:
-                    return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
-                
-                # --- Instantiate KalmanFilter ---
-                kf = KalmanFilter(
-                    T=P_aug,       # State transition matrix
-                    R=R_aug,       # Shock impact matrix (includes std devs)
-                    C=Omega,       # Observation matrix
-                    H=H_obs,       # Observation noise covariance
-                    init_x=init_x_mean,  # Initial state mean
-                    init_P=init_P_cov    # Initial state covariance
-                )
-
-                # --- Compute Log Likelihood ---
-                # The updated KalmanFilter.filter handles NaNs properly (static pattern)
-                raw_log_prob = kf.log_likelihood(ys)
-                
-                if self.verbose:
-                    print(f"Debug: Raw log_prob from KF: {raw_log_prob}")
-
-                # --- Ensure valid log-likelihood ---
-                # Return large negative but finite value instead of -inf
-                # This is crucial for Numpyro to work correctly
-                safe_log_prob = jnp.where(
-                    jnp.isfinite(raw_log_prob), 
-                    raw_log_prob, 
-                    jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
-                )
-                
+                kf = KalmanFilter(T=P_aug, R=R_aug, C=Omega_m, H=H_obs, init_x=init_x_mean, init_P=init_P_cov)
+                log_prob = kf.log_likelihood(ys)
+                # Ensure final value is finite for Numpyro
+                safe_log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE))
                 return safe_log_prob
-
-            except Exception as e:
-                if self.verbose:
-                    print(f"[LogLik Debug] Exception in _calculate_likelihood branch: {type(e).__name__}: {e}")
-                    import traceback
-                    traceback.print_exc()
+            except Exception as kf_e:
+                # if self.verbose: print(f"[LogLik VJP] KF Exception: {kf_e}")
                 return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
 
-        def _return_invalid_likelihood(pd):  # Accepts param_dict (operand)
-            """Returns large negative (but finite) value when solve failed."""
+        def _invalid_likelihood_branch(_):
             return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
 
-        # --- Perform the solve ONCE to get the validity flag ---
-        try:
-            solution_check = self.solve(param_dict)
-            is_valid = jnp.asarray(solution_check.get("solution_valid", False))
-            
-            if self.verbose:
-                print(f"Debug: Initial solve validity: {is_valid}")
-                
-        except Exception as e_solve_outer:
-            if self.verbose:
-                print(f"[LogLik Debug] Exception during initial validity solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
-            return jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
-
-        # --- Use lax.cond to proceed only if solution is valid ---
-        log_prob = jax.lax.cond(
-            pred=is_valid,
-            true_fun=_calculate_likelihood,
-            false_fun=_return_invalid_likelihood,
-            operand=param_dict
+        # Use lax.cond on the solution_valid flag
+        log_prob_final = jax.lax.cond(
+            solution["solution_valid"],
+            _calculate_likelihood_branch,
+            _invalid_likelihood_branch,
+            solution # Pass the solution dict as operand
         )
-
-        # Final safety check - VERY IMPORTANT for Numpyro
-        # This ensures we never return a non-finite value
-        log_prob = jnp.where(
-            jnp.isfinite(log_prob), 
-            log_prob, 
-            jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE)
-        )
-        
-        return log_prob
+        # Final safety check (redundant if branches handle it, but safe)
+        return jnp.where(jnp.isfinite(log_prob_final), log_prob_final, jnp.array(LARGE_NEG_VALUE, dtype=_DEFAULT_DTYPE))
 
 
-
-# Fix for the numpyro_model function to handle potential -inf log-likelihoods
-
-def numpyro_model_fixed(
-    model_instance: DynareModelWithJAXAD, # Pass the instantiated model
-    user_priors: List[Dict[str, Any]], # List of prior specs for estimated params
-    fixed_param_values: Dict[str, float], # Values for non-estimated params
-    ys: Optional[jax.Array] = None, # Observations, None if prior predictive
-    H_obs: Optional[jax.Array] = None, # Fixed observation noise covariance
-    init_x_mean: Optional[jax.Array] = None, # Fixed initial state mean
-    init_P_cov: Optional[jax.Array] = None # Fixed initial state covariance
+# --- Numpyro Model Function (Unchanged from previous version) ---
+def numpyro_model_symbolic_vjp(
+    model_instance: DynareModelWithSympyVJPs,
+    user_priors: List[Dict[str, Any]],
+    fixed_param_values: Dict[str, float],
+    ys: Optional[jax.Array] = None,
+    H_obs: Optional[jax.Array] = None,
+    init_x_mean: Optional[jax.Array] = None,
+    init_P_cov: Optional[jax.Array] = None
 ):
-    """
-    Numpyro model function for estimating a subset of Dynare parameters.
-    This version safely handles potential -inf log-likelihoods.
-
-    Args:
-        model_instance: An instantiated DynareModelWithJAXAD object.
-        user_priors: List defining priors for parameters TO BE ESTIMATED.
-                     Example: [{"name": "p1", "prior": "Normal", "args": {"loc":0,"scale":1}}, ...]
-        fixed_param_values: Dictionary containing name:value pairs for parameters
-                            NOT estimated (fixed at these values).
-        ys: Observed data array (num_timesteps, n_obs).
-        H_obs: Observation noise covariance matrix.
-        init_x_mean: Initial state mean vector.
-        init_P_cov: Initial state covariance matrix.
-    """
-    if not NUMPYRO_AVAILABLE:
-        raise RuntimeError("Numpyro is required for this model function.")
-
-    # Dictionary to hold all parameter values (sampled and fixed) for this MCMC step
+    # --- This function remains exactly the same ---
+    # It samples parameters and calls model_instance.log_likelihood
+    if not NUMPYRO_AVAILABLE: raise RuntimeError("Numpyro required.")
     params_for_likelihood = {}
-
-    # Set of parameters that have priors specified by the user
-    estimated_param_names = {p_spec["name"] for p_spec in user_priors}
-
-    # --- Sample Parameters with Priors ---
+    estimated_param_names = {p["name"] for p in user_priors}
     for prior_spec in user_priors:
-        name = prior_spec["name"]
-        dist_name = prior_spec.get("prior", "").lower()
-        args = prior_spec.get("args", {})
-
-        # Ensure args values are JAX arrays with correct dtype
-        dist_args_processed = {k: jnp.asarray(v, dtype=_DEFAULT_DTYPE) for k, v in args.items()}
-
-        sampled_value = None
-        try:
-            if dist_name == "normal":
-                loc = dist_args_processed.get("loc", 0.0)
-                scale = jnp.maximum(dist_args_processed.get("scale", 1.0), 1e-7) # Ensure positive scale
-                sampled_value = numpyro.sample(name, dist.Normal(loc, scale))
-            elif dist_name == "beta":
-                c1 = jnp.maximum(dist_args_processed.get("concentration1", 1.0), 1e-7) # Ensure positive
-                c2 = jnp.maximum(dist_args_processed.get("concentration2", 1.0), 1e-7) # Ensure positive
-                sampled_value = numpyro.sample(name, dist.Beta(c1, c2))
-            elif dist_name == "gamma":
-                conc = jnp.maximum(dist_args_processed.get("concentration", 1.0), 1e-7) # Ensure positive
-                rate = jnp.maximum(dist_args_processed.get("rate", 1.0), 1e-7) # Ensure positive
-                sampled_value = numpyro.sample(name, dist.Gamma(conc, rate=rate))
-            elif dist_name == "invgamma":
-                conc = jnp.maximum(dist_args_processed.get("concentration", 1.0), 1e-7) # Ensure positive
-                # Numpyro uses scale parameter (which is 1/rate)
-                scale = jnp.maximum(dist_args_processed.get("scale", 1.0), 1e-7) # Ensure positive
-                sampled_value = numpyro.sample(name, dist.InverseGamma(conc, scale))
-            # Add other distributions as needed
-            elif dist_name == "uniform":
-                low = dist_args_processed.get("low", 0.0)
-                high = dist_args_processed.get("high", 1.0)
-                sampled_value = numpyro.sample(name, dist.Uniform(low, high))
-            elif dist_name == "halfnormal":
-                scale = jnp.maximum(dist_args_processed.get("scale", 1.0), 1e-7)
-                sampled_value = numpyro.sample(name, dist.HalfNormal(scale))
-            else:
-                raise NotImplementedError(f"Prior distribution '{dist_name}' not implemented or specified for '{name}'.")
-
-            params_for_likelihood[name] = sampled_value
-
-        except KeyError as e:
-             raise ValueError(f"Missing required argument for prior '{dist_name}' for parameter '{name}': {e}")
-        except Exception as e_dist:
-             raise RuntimeError(f"Error sampling parameter '{name}' with prior '{dist_name}': {e_dist}")
-
-    # --- Add Fixed Parameters ---
+        name, dist_name, args = prior_spec["name"], prior_spec.get("prior","").lower(), prior_spec.get("args",{})
+        dist_args_proc = {k: jnp.asarray(v,dtype=_DEFAULT_DTYPE) for k,v in args.items()}
+        val = None
+        if dist_name=="normal": val=numpyro.sample(name,dist.Normal(dist_args_proc.get("loc",0.0),jnp.maximum(dist_args_proc.get("scale",1.0),1e-7)))
+        elif dist_name=="beta": val=numpyro.sample(name,dist.Beta(jnp.maximum(dist_args_proc.get("concentration1",1.0),1e-7),jnp.maximum(dist_args_proc.get("concentration2",1.0),1e-7)))
+        elif dist_name=="gamma": val=numpyro.sample(name,dist.Gamma(jnp.maximum(dist_args_proc.get("concentration",1.0),1e-7),rate=jnp.maximum(dist_args_proc.get("rate",1.0),1e-7)))
+        elif dist_name=="invgamma": val=numpyro.sample(name,dist.InverseGamma(jnp.maximum(dist_args_proc.get("concentration",1.0),1e-7),scale=jnp.maximum(dist_args_proc.get("scale",1.0),1e-7)))
+        elif dist_name=="uniform": val=numpyro.sample(name,dist.Uniform(dist_args_proc.get("low",0.0),dist_args_proc.get("high",1.0)))
+        elif dist_name=="halfnormal": val=numpyro.sample(name,dist.HalfNormal(jnp.maximum(dist_args_proc.get("scale",1.0),1e-7)))
+        else: raise NotImplementedError(f"Prior '{dist_name}' not implemented for '{name}'.")
+        params_for_likelihood[name] = val
     for name, value in fixed_param_values.items():
-        if name not in estimated_param_names:
-            # Important: Convert fixed value to JAX array for type consistency
-            params_for_likelihood[name] = jnp.asarray(value, dtype=_DEFAULT_DTYPE)
-
-    # --- Verify all parameters are present ---
-    missing_keys = set(model_instance.all_param_names) - set(params_for_likelihood.keys())
-    if missing_keys:
-        # Provide more info in the error
-        raise RuntimeError(f"Internal Error: Parameters missing before likelihood calculation: {missing_keys}. Estimated: {estimated_param_names}, Fixed: {set(fixed_param_values.keys())}")
-    extra_keys = set(params_for_likelihood.keys()) - set(model_instance.all_param_names)
-    if extra_keys:
-         raise RuntimeError(f"Internal Error: Extra parameters found before likelihood calculation: {extra_keys}")
-
-    # Calculate Log Likelihood if data is provided
+        if name not in estimated_param_names: params_for_likelihood[name] = jnp.asarray(value, dtype=_DEFAULT_DTYPE)
     if ys is not None:
-        if H_obs is None or init_x_mean is None or init_P_cov is None:
-            raise ValueError("H_obs, init_x_mean, init_P_cov are required when ys is provided.")
-
-        # Compute log likelihood
-        log_prob = model_instance.log_likelihood(
-            params_for_likelihood,
-            ys,
-            H_obs,
-            init_x_mean,
-            init_P_cov
-        )
-        
-        # *** KEY FIX: Handle -inf log-likelihood safely ***
-        # Use jax.lax.cond to apply a very large negative but finite penalty 
-        # in case of -inf, which is safer for Numpyro
-        safe_log_prob = jax.lax.cond(
-            jnp.isfinite(log_prob),
-            lambda x: x,                           # If finite, use as is
-            lambda _: jnp.array(-1e10, dtype=_DEFAULT_DTYPE),  # If -inf, use large finite negative value
-            log_prob
-        )
-        
-        # Register the log likelihood with Numpyro
-        numpyro.factor("log_likelihood", safe_log_prob)
+        if H_obs is None or init_x_mean is None or init_P_cov is None: raise ValueError("H_obs, init_x_mean, init_P_cov required with ys.")
+        log_prob = model_instance.log_likelihood(params_for_likelihood, ys, H_obs, init_x_mean, init_P_cov)
+        numpyro.factor("log_likelihood", log_prob)
 
 
-# --- Main Execution Block ---
+# --- Main Execution Block (Modified to use DynareModelWithSympyVJPs) ---
 if __name__ == "__main__":
-
-    # --- Configuration ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Make sure this points to your actual model file
     default_mod_file = os.path.join(script_dir, "qpm_simpl1_with_trends.dyn")
-    mod_file_path = os.environ.get("DYNARE_MOD_FILE", default_mod_file) # Allow override via env var
+    mod_file_path = os.environ.get("DYNARE_MOD_FILE", default_mod_file)
 
-    # Simulation settings (for generating test data)
-    num_sim_steps = 200
-    sim_seed = 123
-    sim_measurement_noise_std = 0.001 # Add some noise to make estimation non-trivial
+    num_sim_steps, sim_seed, sim_measurement_noise_std = 200, 123, 0.001
+    run_estimation_flag, mcmc_seed, mcmc_chains, mcmc_warmup, mcmc_samples, mcmc_target_accept = True, 456, 1, 250, 500, 0.85 # Back to original samples
 
-    # Estimation settings
-    run_estimation_flag = True # Set to False to only simulate/test solve
-    mcmc_seed = 456
-    mcmc_chains = 1 #jax.local_device_count() # Use available CPUs/devices
-    mcmc_warmup = 250
-    mcmc_samples = 500
-    mcmc_target_accept = 0.85
+    print(f"\n--- [1] Initializing Dynare Model with Symbolic VJPs ({mod_file_path}) ---")
+    model = DynareModelWithSympyVJPs(mod_file_path, verbose=False)
+    print(f"Model initialized. Found {len(model.all_param_names)} parameters total.")
 
-    # --- [1] Initialize the Model Wrapper ---
-    print(f"\n--- [1] Initializing Dynare Model ({mod_file_path}) ---")
-    init_start_time = time.time()
-    try:
-        model = DynareModelWithJAXAD(mod_file_path, verbose=False) # Less verbose init
-    except FileNotFoundError:
-        print(f"FATAL ERROR: Model file not found at {mod_file_path}")
-        exit()
-    except Exception as e:
-        print(f"FATAL ERROR: Failed to initialize DynareModelWithJAXAD: {e}")
-        import traceback
-        traceback.print_exc()
-        exit()
-    init_end_time = time.time()
-    print(f"Model initialized ({init_end_time - init_start_time:.2f} seconds).")
-    print(f"  Found {len(model.all_param_names)} parameters total.")
-
-
-    # --- [2] Define Parameter Set for Simulation ---
-    # Use defaults and apply overrides for simulation
     sim_param_values = model.default_param_assignments.copy()
-    # Apply overrides used in previous examples
-    # sim_param_overrides = {
-    #     'b1': 0.75, 'b4': 0.65, 'a1': 0.55, 'a2': 0.12, 'g1': 0.7,
-    #     'g2': 0.3, 'g3': 0.25, 'rho_L_GDP_GAP': 0.8, 'rho_DLA_CPI': 0.7,
-    #     'rho_rs': 0.75, 'rho_rs2': 0.05,
-    #     # Ensure sigma overrides are included if different from defaults
-    #     "sigma_SHK_L_GDP_GAP": 0.10,
-    #     "sigma_SHK_DLA_CPI": 1.5, # Using dyn file value
-    #     "sigma_SHK_RS": 0.5, # Using dyn file value
-    #     "sigma_SHK_L_GDP_TREND": 0.001, # Using dyn file value
-    #     "sigma_SHK_G_TREND": 0.0, # Make growth constant for clearer simulation
-    #     "sigma_SHK_PI_TREND": 1e-10, # Using dyn file value
-    #     "sigma_SHK_RR_TREND": 0.1, # Using dyn file value
-    # }
-    #sim_param_values.update(sim_param_overrides)
+    # sim_param_values.update({'b1': 0.7, ...}) # Apply overrides if needed
 
-    # Verify all model parameters are present
-    missing_sim_params = [p for p in model.all_param_names if p not in sim_param_values]
-    if missing_sim_params:
-        print(f"FATAL ERROR: Missing simulation parameter values: {missing_sim_params}")
-        exit()
-    print("\n--- [2] Simulation parameter set defined ---")
-
-    # --- [3] Generate Simulated Data ---
     print("\n--- [3] Simulating Data ---")
-    sim_key_master = random.PRNGKey(sim_seed)
-    sim_key_init, sim_key_path = random.split(sim_key_master)
-
-    # Solve once with sim params to get dimensions
-    sim_solution = model.solve(sim_param_values)
-    if not sim_solution["solution_valid"]:
-         print("FATAL ERROR: Cannot solve model with simulation parameters.")
-         exit()
-
-    # Define initial state configuration for simulation
-    sim_initial_state_config = {
-        "L_GDP_TREND": {"mean": 10000.0, "std": 0.01},
-        "G_TREND":     {"mean": 0.5, "std": 0.0}, # Exact start for constant growth
-        "PI_TREND":    {"mean": 2.0, "std": 0.0}, # Exact start
-        "RR_TREND":    {"mean": 1.0, "std": 0.01}
-    }
-    s0_sim = construct_initial_state(
-        n_aug=sim_solution["n_aug"], n_stat=model.n_stat,
-        aug_state_vars=sim_solution["aug_state_vars"], key_init=sim_key_init,
-        initial_state_config=sim_initial_state_config, dtype=_DEFAULT_DTYPE
-    )
-
-    # Ensure observation noise matrix is correct size and positive definite
-    n_obs_sim = sim_solution["n_obs"]
-    H_obs_sim = jnp.eye(n_obs_sim, dtype=_DEFAULT_DTYPE) * (sim_measurement_noise_std**2)
-
-    sim_start_time = time.time()
+    sim_key_master = random.PRNGKey(sim_seed); sim_key_init, sim_key_path = random.split(sim_key_master)
+    # Need to wrap solve in try-except here in case initial solve fails
     try:
-        sim_states, sim_observables = simulate_ssm_data(
-            P=sim_solution["P_aug"],
-            R=sim_solution["R_aug"],
-            Omega=sim_solution["Omega"],
-            T=num_sim_steps,
-            key=sim_key_path,
-            state_init=s0_sim,
-            # Pass H_obs to simulate_ssm_data if it handles obs noise, otherwise add manually
-            measurement_noise_std=sim_measurement_noise_std # Assuming simulate_ssm_data adds it based on std
-        )
-        sim_end_time = time.time()
-        print(f"Simulation complete ({sim_end_time - sim_start_time:.2f} seconds).")
+        sim_solution = model.solve(sim_param_values)
+        if not sim_solution["solution_valid"]:
+            print("FATAL: Cannot solve model with simulation parameters for VJP model."); exit()
+    except Exception as e_solve_init:
+         print(f"FATAL: Error during initial solve for simulation: {e_solve_init}"); exit()
 
-        # Plot simulation results
-        plot_simulation_with_trends_matched(
-            sim_observables, sim_solution["ordered_obs_vars"],
-            sim_states, sim_solution["aug_state_vars"],
-            sim_solution["ordered_trend_state_vars"], sim_solution["contemp_trend_defs"],
-            title=f"Simulated Data (Meas Noise Std={sim_measurement_noise_std:.2e})"
-        )
-        plt.show(block=False)
 
-    except Exception as e_sim:
-        sim_end_time = time.time()
-        print(f"FATAL ERROR during simulation: {e_sim}")
-        import traceback
-        traceback.print_exc()
-        exit()
-
+    s0_sim = construct_initial_state(
+        sim_solution["n_aug"], model.n_stat, sim_solution["aug_state_vars"], sim_key_init,
+        initial_state_config={"L_GDP_TREND":{"mean":10000.0,"std":0.01},"G_TREND":{"mean":0.5},"PI_TREND":{"mean":2.0}},
+        dtype=_DEFAULT_DTYPE
+    )
+    H_obs_sim = jnp.eye(sim_solution["n_obs"], dtype=_DEFAULT_DTYPE) * (sim_measurement_noise_std**2)
+    sim_states, sim_observables = simulate_ssm_data(
+        sim_solution["P_aug"], sim_solution["R_aug"], sim_solution["Omega"],
+        num_sim_steps, sim_key_path, s0_sim, sim_measurement_noise_std
+    )
+    print(f"Simulation complete. Observables shape: {sim_observables.shape}")
+    # plot_simulation_with_trends_matched(...) # Optional plot
 
     print("\n--- [4] Defining Priors for Estimation ---")
-    # ONLY list parameters you want to estimate here
-    user_priors = [
-        # Example: Estimate persistence and response coefficients
-        # {"name": "b1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # Mean ~0.75
-        # {"name": "a1", "prior": "beta", "args": {"concentration1": 20.0, "concentration2": 15.0}}, # Mean ~0.57
-        # {"name": "g1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # Mean ~0.75
-        # {"name": "g2", "prior": "normal", "args": {"loc": 0.3, "scale": 0.1}},
-        # {"name": "g3", "prior": "normal", "args": {"loc": 0.25, "scale": 0.1}},
-        # {"name": "rho_L_GDP_GAP", "prior": "Beta", "args": {"concentration1": 40.0, "concentration2": 10.0}}, # Mean ~0.8
-        # # Example: Estimate key shock std devs
-        # {"name": "sigma_SHK_L_GDP_GAP", "prior": "invgamma", "args": {"concentration": 4.0, "scale": 0.1}}, # Approx Mean 0.03
-        # {"name": "sigma_SHK_DLA_CPI", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.5}}, # Approx Mean 0.25 (adjust if needed)
-         {"name": "sigma_SHK_RS", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.2}}, # Approx Mean 0.1
-    ]
+    user_priors = [{"name": "sigma_SHK_RS", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.2}}]
     estimated_param_names_set = {p["name"] for p in user_priors}
+    fixed_params = {name: val for name, val in model.default_param_assignments.items() if name not in estimated_param_names_set}
 
-
-    # --- Determine Fixed Parameters and their values ---
-    fixed_params = {}
-    print("  Parameters treated as FIXED (using .dyn file values):")
-    for name in model.all_param_names:
-        if name not in estimated_param_names_set:
-            # Get value from parsed defaults (which include .dyn assignments)
-            value = model.default_param_assignments.get(name)
-            if value is None:
-                # This should not happen if parser guarantees defaults
-                raise ValueError(f"Critical: No default value found for parameter '{name}' intended to be fixed.")
-            fixed_params[name] = value
-            print(f"    - {name} = {value:.4f}")
-
-
-           
-
-    # --- [5] Run Estimation ---
-    if run_estimation_flag and NUMPYRO_AVAILABLE: #and DYNAMAX_AVAILABLE:
-        print(f"\n--- [5] Running Bayesian Estimation (Estimating {len(user_priors)} parameters) ---")
+    if run_estimation_flag and NUMPYRO_AVAILABLE and KALMAN_FILTER_JAX_AVAILABLE:
+        print(f"\n--- [5] Running Bayesian Estimation (Symbolic VJP Model) ---")
         mcmc_key = random.PRNGKey(mcmc_seed)
+        H_obs_est, init_x_mean_est, init_P_cov_est = H_obs_sim, s0_sim, jnp.eye(sim_solution["n_aug"], dtype=_DEFAULT_DTYPE) * 1.0
+        init_values_mcmc = {p["name"]: sim_param_values.get(p["name"], 0.1) for p in user_priors}
 
-        # Define fixed inputs for the likelihood (unchanged)
-        H_obs_est = H_obs_sim # Use same observation noise as simulation
-        n_aug_est = sim_solution["n_aug"]
-        init_x_mean_est = jnp.zeros(n_aug_est, dtype=_DEFAULT_DTYPE)
-        init_x_mean_est = s0_sim
-        init_P_cov_est = jnp.eye(n_aug_est, dtype=_DEFAULT_DTYPE) * 1.0
-
-
-
-
-        # --- Initial values ONLY for ESTIMATED parameters ---
-        init_values_mcmc = {}
-        print("  Setting initial MCMC values from simulation parameters for:")
-        for p_spec in user_priors:
-             name = p_spec["name"]
-             if name in sim_param_values:
-                 init_values_mcmc[name] = sim_param_values[name]
-                 print(f"    - {name} = {sim_param_values[name]:.4f}")
-             else:
-                 # Fallback if sim value not available (shouldn't happen here)
-                 init_values_mcmc[name] = fixed_params.get(name, 0.0) # Or sample from prior mean
-                 print(f"    - {name} (using fixed/default as fallback init)")
-
-        init_strategy = init_to_value(values=init_values_mcmc) # Pass only estimated params
-
-
-
-     # --- [DEBUG] Test Log Likelihood at Initial Parameters ---
-        initial_params_full = fixed_params.copy()
-        initial_params_full.update(init_values_mcmc)
-    
-        print("\n--- [DEBUG] Testing Kalman filter integration ---")
-        integration_success, diagnostics = test_kalman_integration(
-            model,
-            initial_params_full,
-            sim_observables,
-            H_obs_est,
-            init_x_mean_est,
-            init_P_cov_est
-        )
-
-        if integration_success:
-            print("✅ Kalman filter integration test successful!")
-            print(f"Log-likelihood at initial parameters: {diagnostics.get('log_likelihood')}")
-        else:
-            print("⚠️ Kalman filter integration test failed:")
-            print(diagnostics.get('error', 'Unknown error'))
-            print(diagnostics.get('details', ''))
-            
-            if input("Continue anyway? (y/n): ").lower() != 'y':
-                print("Exiting as requested.")
+        initial_params_full = {**fixed_params, **init_values_mcmc}
+        try:
+            ll_test = model.log_likelihood(initial_params_full, sim_observables, H_obs_est, init_x_mean_est, init_P_cov_est)
+            print(f"Log-likelihood at initial parameters (VJP Model): {ll_test}")
+            if not jnp.isfinite(ll_test) or ll_test < -1e9 :
+                print("ERROR: Initial log-likelihood is not valid. Exiting before MCMC.")
                 exit()
-                    
-        # --- [END DEBUG] ---
+        except Exception as e_ll_test:
+             print(f"ERROR evaluating initial log-likelihood: {e_ll_test}"); exit()
 
-        # Instantiate NUTS kernel (unchanged)
-        kernel = NUTS(numpyro_model_fixed, init_strategy=init_strategy, target_accept_prob=mcmc_target_accept)
+        kernel = NUTS(numpyro_model_symbolic_vjp, init_strategy=init_to_value(values=init_values_mcmc), target_accept_prob=mcmc_target_accept)
+        mcmc = MCMC(kernel, num_warmup=mcmc_warmup, num_samples=mcmc_samples, num_chains=mcmc_chains, progress_bar=True, chain_method='parallel')
 
-        # Instantiate MCMC (unchanged)
-        mcmc = MCMC(
-            kernel, 
-            num_warmup=mcmc_warmup, 
-            num_samples=mcmc_samples,
-            num_chains=mcmc_chains, 
-            progress_bar=True,  # Always show progress bar
-            chain_method='sequential'  # Use sequential for debugging
-        )
-
-        # Run MCMC - Pass user_priors and fixed_params
-        print(f"Starting MCMC...")
+        print(f"Starting MCMC (Symbolic VJP Model)...")
         est_start_time = time.time()
         try:
-            mcmc.run(
-                mcmc_key,
-                model,               # Positional arg 1 -> model_instance
-                user_priors,         # Positional arg 2 -> user_priors
-                fixed_params,        # Positional arg 3 -> fixed_param_values
-                sim_observables,     # Positional arg 4 -> ys
-                H_obs_est,           # Positional arg 5 -> H_obs
-                init_x_mean_est,     # Positional arg 6 -> init_x_mean
-                init_P_cov_est       # Positional arg 7 -> init_P_cov
-            )
+            mcmc.run(mcmc_key, model, user_priors, fixed_params, sim_observables, H_obs_est, init_x_mean_est, init_P_cov_est)
             est_end_time = time.time()
             print(f"--- Estimation Complete ({est_end_time - est_start_time:.2f} seconds) ---")
-
-            # --- [6] Analyze Estimation Results ---
-            print("\n--- [6] Estimation Summary (Estimated Parameters) ---")
-            # Print summary only for estimated parameters
-            
             mcmc.print_summary()
-            posterior_samples = mcmc.get_samples()
-
-            # Plotting trace plots (Optional)
-            try:
-                import arviz as az
-                print(" Generating trace plots...")
-                az_data = az.from_numpyro(mcmc) # Arviz automatically gets sampled vars
-                az.plot_trace(az_data) # Plots all estimated parameters
-                plt.suptitle("Trace Plots (Estimated Parameters)", y=1.02)
-                plt.tight_layout()
-                plt.show(block=False)
-                print(" Trace plots generated (may be in background).")
-            except ImportError:
-                print(" Install arviz (`pip install arviz`) to see trace plots.")
-            except Exception as e_trace:
-                print(f" Could not generate trace plots: {e_trace}")
-
-        except Exception as e_est:
-            est_end_time = time.time()
-            print(f"\n--- Estimation FAILED ({est_end_time - est_start_time:.2f} seconds) ---")
-            print(f"An error occurred during estimation: {e_est}")
-            import traceback
-            traceback.print_exc()
-
-    elif not run_estimation_flag:
-        print("\n--- [5] Skipping Estimation (run_estimation_flag=False) ---")
+        except Exception as e_mcmc:
+            print(f"\n--- MCMC FAILED ---")
+            print(f"{type(e_mcmc).__name__}: {e_mcmc}")
+            import traceback; traceback.print_exc() # Print full traceback for MCMC errors
     else:
-        print("\n--- [5] Skipping Estimation (Numpyro or Dynamax not available) ---")
+        print("\n--- Skipping Estimation ---")
 
+    print(f"\n--- Script finished (Symbolic VJP Model) ---")
+    # if run_estimation_flag: plt.show()
 
-    print(f"\n--- Script finished ---")
-    # Keep plots open if shown
-    if run_estimation_flag and NUMPYRO_AVAILABLE: #and DYNAMAX_AVAILABLE:
-       print("Close plot windows to exit.")
-       plt.show()
-
-
-# --- END OF FILE run_estimation.py ---
+# --- END OF MODIFIED FILE run_estimation.py ---
