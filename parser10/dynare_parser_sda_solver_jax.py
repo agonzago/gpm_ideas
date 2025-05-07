@@ -164,6 +164,370 @@ def plot_simulation_with_trends_matched(
 
 # --- Symbolic Processing and Lambdification ---
 
+# Add these functions to dynare_parser_sda_solver_jax.py
+
+def parse_and_order_stationary_model_symbolic(model_string, verbose=True):
+    """
+    Parses the stationary model, handles leads/lags,
+    orders variables/equations based on Dynare conventions.
+    
+    Args:
+        model_string (str): The full content of the Dynare file.
+        verbose (bool): If True, prints progress information.
+        
+    Returns:
+        dict: Dictionary containing parsed and ordered model components.
+    """
+    if verbose:  print("--- Parsing Stationary Model Declarations ---")
+    
+    # Extract variables, shocks, and parameters
+    declared_vars, shock_names, param_names_declared, param_assignments_initial = extract_declarations(model_string)
+    
+    # Process parameter definitions
+    inferred_sigma_params = [f"sigma_{shk}" for shk in shock_names]
+    stat_stderr_values = extract_stationary_shock_stderrs(model_string)
+    
+    # Combine parameter information
+    combined_param_names = list(dict.fromkeys(param_names_declared).keys())
+    for p_sigma in inferred_sigma_params:
+        if p_sigma not in combined_param_names:
+            combined_param_names.append(p_sigma)
+    
+    combined_param_assignments = stat_stderr_values.copy()
+    combined_param_assignments.update(param_assignments_initial)
+    
+    # Set defaults for sigma parameters if not found
+    for p_sigma in inferred_sigma_params:
+        if p_sigma not in combined_param_assignments:
+            combined_param_assignments[p_sigma] = 1.0
+    
+    param_names = combined_param_names
+    param_assignments = combined_param_assignments
+    
+    if verbose:
+        print(f"Declared Variables: {len(declared_vars)}, Shocks: {len(shock_names)}, Parameters: {len(param_names)}")
+    
+    # Extract and process equations
+    raw_equations = extract_model_equations(model_string)
+    if verbose: print(f"Found {len(raw_equations)} equations in model block.")
+    
+    # Handle leads/lags and auxiliary variables
+    endogenous_vars = list(declared_vars)
+    aux_variables = OrderedDict()
+    processed_equations = list(raw_equations)
+    var_time_regex = re.compile(r'\b([a-zA-Z_]\w*)\s*\(\s*([+-]?\d+)\s*\)')
+    
+    # Process each equation
+    eq_idx = 0
+    while eq_idx < len(processed_equations):
+        eq = processed_equations[eq_idx]
+        eq_idx += 1
+        modified_eq = eq
+        matches = list(var_time_regex.finditer(eq))
+        
+        for match in reversed(matches):
+            base_name = match.group(1)
+            time_shift = int(match.group(2))
+            
+            # Skip if not an endogenous variable or already processed aux
+            if base_name not in endogenous_vars and base_name not in aux_variables:
+                continue
+            
+            # Handle leads > 1
+            if time_shift > 1:
+                aux_needed_defs = []
+                for k in range(1, time_shift):
+                    aux_name = f"aux_{base_name}_lead_p{k}"
+                    if aux_name not in aux_variables:
+                        prev_var_for_def = base_name if k == 1 else f"aux_{base_name}_lead_p{k-1}"
+                        def_eq_str = f"({aux_name}) - ({prev_var_for_def}(+1))"
+                        aux_variables[aux_name] = def_eq_str
+                        aux_needed_defs.append(def_eq_str)
+                        if aux_name not in endogenous_vars:
+                            endogenous_vars.append(aux_name)
+                
+                # Replace with appropriate auxiliary variable
+                target_aux = f"aux_{base_name}_lead_p{time_shift-1}"
+                replacement = f"{target_aux}(+1)"
+                start, end = match.span()
+                modified_eq = modified_eq[:start] + replacement + modified_eq[end:]
+                
+                # Add auxiliary definitions
+                for def_eq in aux_needed_defs:
+                    if def_eq not in processed_equations:
+                        processed_equations.append(def_eq)
+            
+            # Handle lags < -1
+            elif time_shift < -1:
+                aux_needed_defs = []
+                for k in range(1, abs(time_shift)):
+                    aux_name = f"aux_{base_name}_lag_m{k}"
+                    if aux_name not in aux_variables:
+                        prev_var_for_def = base_name if k == 1 else f"aux_{base_name}_lag_m{k-1}"
+                        def_eq_str = f"({aux_name}) - ({prev_var_for_def}(-1))"
+                        aux_variables[aux_name] = def_eq_str
+                        aux_needed_defs.append(def_eq_str)
+                        if aux_name not in endogenous_vars:
+                            endogenous_vars.append(aux_name)
+                
+                # Replace with appropriate auxiliary variable
+                target_aux = f"aux_{base_name}_lag_m{abs(time_shift)-1}"
+                replacement = f"{target_aux}(-1)"
+                start, end = match.span()
+                modified_eq = modified_eq[:start] + replacement + modified_eq[end:]
+                
+                # Add auxiliary definitions
+                for def_eq in aux_needed_defs:
+                    if def_eq not in processed_equations:
+                        processed_equations.append(def_eq)
+        
+        # Update equation if modified
+        if modified_eq != eq:
+            processed_equations[eq_idx - 1] = modified_eq
+    
+    # Finalize variable list
+    initial_vars_ordered = list(endogenous_vars)
+    num_vars = len(initial_vars_ordered)
+    num_eq = len(processed_equations)
+    
+    # Ensure model is square
+    if num_vars != num_eq:
+        raise ValueError(f"Stationary model not square after processing leads/lags: {num_vars} vars vs {num_eq} eqs.")
+    
+    # Create symbolic representation
+    param_syms = {p: sympy.symbols(p) for p in param_names}
+    shock_syms = {s: sympy.symbols(s) for s in shock_names}
+    var_syms = {}
+    
+    for var in initial_vars_ordered:
+        sym_m1 = create_timed_symbol(var, -1)
+        sym_t = create_timed_symbol(var, 0)
+        sym_p1 = create_timed_symbol(var, 1)
+        var_syms[var] = {'m1': sym_m1, 't': sym_t, 'p1': sym_p1}
+    
+    # Parse equations into symbolic form
+    local_dict = {
+        str(s): s for s in list(param_syms.values()) + list(shock_syms.values()) + 
+        [v for var_dict in var_syms.values() for v in var_dict.values()]
+    }
+    local_dict.update({'log': sympy.log, 'exp': sympy.exp, 'sqrt': sympy.sqrt, 'abs': sympy.Abs})
+    
+    from sympy.parsing.sympy_parser import (parse_expr, standard_transformations,
+                                         implicit_multiplication_application, rationalize)
+    transformations = (standard_transformations + (implicit_multiplication_application, rationalize))
+    
+    # Parse and convert equations
+    sym_equations = []
+    for i, eq_str in enumerate(processed_equations):
+        eq_str_sym = eq_str
+        # Replace timed variables
+        def replace_var_time(match):
+            base_name, time_shift_str = match.groups()
+            time_shift = int(time_shift_str)
+            
+            if base_name in shock_names:
+                if time_shift == 0: return str(shock_syms[base_name])
+                else: raise ValueError(f"Shock {base_name}({time_shift}) invalid in eq {i}: '{eq_str}'.")
+            elif base_name in var_syms:
+                if time_shift == -1: return str(var_syms[base_name]['m1'])
+                if time_shift == 0: return str(var_syms[base_name]['t'])
+                if time_shift == 1: return str(var_syms[base_name]['p1'])
+                raise ValueError(f"Unexpected time shift {time_shift} for variable {base_name} in eq {i}.")
+            elif base_name in param_syms:
+                raise ValueError(f"Parameter {base_name}({time_shift}) is invalid in eq {i}.")
+            
+            # Unknown symbol - likely an error
+            return match.group(0)
+            
+        eq_str_sym = var_time_regex.sub(replace_var_time, eq_str_sym)
+        
+        # Replace base names - sort by length to avoid partial matches
+        all_base_names = sorted(list(var_syms.keys()) + list(param_syms.keys()) + list(shock_syms.keys()), key=len, reverse=True)
+        for name in all_base_names:
+            pattern = r'\b' + re.escape(name) + r'\b'
+            if name in var_syms:
+                replacement = str(var_syms[name]['t'])  # Current time
+            elif name in param_syms:
+                replacement = str(param_syms[name])
+            elif name in shock_syms:
+                replacement = str(shock_syms[name])
+            else:
+                continue
+            eq_str_sym = re.sub(pattern, replacement, eq_str_sym)
+        
+        # Parse symbolic expression
+        try:
+            sym_eq = parse_expr(eq_str_sym, local_dict=local_dict, transformations=transformations)
+            sym_equations.append(sym_eq)
+        except Exception as e:
+            print(f"\nError parsing equation {i}: '{eq_str}'")
+            print(f"Processed form: '{eq_str_sym}'")
+            raise
+    
+    # Generate symbolic matrices for A*P^2 + B*P + C = 0
+    # A: coefficients of y(t+1), B: coefficients of y(t), C: coefficients of y(t-1)
+    sympy_A_quad = sympy.zeros(num_eq, num_vars)
+    sympy_B_quad = sympy.zeros(num_eq, num_vars)
+    sympy_C_quad = sympy.zeros(num_eq, num_vars)
+    sympy_D_quad = sympy.zeros(num_eq, len(shock_names))
+    
+    # Extract variable symbols for Jacobian
+    var_p1_syms = [var_syms[v]['p1'] for v in initial_vars_ordered]
+    var_t_syms = [var_syms[v]['t'] for v in initial_vars_ordered]
+    var_m1_syms = [var_syms[v]['m1'] for v in initial_vars_ordered]
+    shock_t_syms = [shock_syms[s] for s in shock_names]
+    
+    # Compute Jacobians
+    for i, eq in enumerate(sym_equations):
+        for j, var_p1 in enumerate(var_p1_syms):
+            sympy_A_quad[i, j] = sympy.diff(eq, var_p1)
+        for j, var_t in enumerate(var_t_syms):
+            sympy_B_quad[i, j] = sympy.diff(eq, var_t)
+        for j, var_m1 in enumerate(var_m1_syms):
+            sympy_C_quad[i, j] = sympy.diff(eq, var_m1)
+        for k, shk_t in enumerate(shock_t_syms):
+            sympy_D_quad[i, k] = -sympy.diff(eq, shk_t)  # Note minus sign
+    
+    # Store initial matrices
+    initial_info = {
+        'A': sympy_A_quad.copy(),
+        'B': sympy_B_quad.copy(),
+        'C': sympy_C_quad.copy(),
+        'D': sympy_D_quad.copy(),
+        'vars': list(initial_vars_ordered),
+        'eqs': list(processed_equations)
+    }
+    
+    # --- Classify Variables ---
+    # Key part based on Model_reduction.pdf guidance
+    if verbose: print("\n--- Classifying Variables for Ordering (Following Dynare Convention) ---")
+    
+    # 1. First identify potential backward looking variables
+    potential_backward = [v for v in initial_vars_ordered if v.startswith("RES_") or 
+                         (v.startswith("aux_") and "_lag_" in v)]
+    
+    backward_exo_vars = []
+    forward_backward_endo_vars = []
+    static_endo_vars = []
+    
+    # 2. Check if these potential backward variables are truly backward
+    for var in potential_backward:
+        j = initial_vars_ordered.index(var)
+        # Check if it has lead dependency (appears in A = dF/dy(t+1))
+        has_lead = not sympy_A_quad.col(j).is_zero_matrix
+        if has_lead:
+            forward_backward_endo_vars.append(var)
+        else:
+            backward_exo_vars.append(var)
+    
+    # 3. For remaining variables, check lead/lag dependencies
+    remaining_vars = [v for v in initial_vars_ordered if v not in backward_exo_vars + forward_backward_endo_vars]
+    for var in remaining_vars:
+        j = initial_vars_ordered.index(var)
+        has_lag = not sympy_C_quad.col(j).is_zero_matrix
+        has_lead = not sympy_A_quad.col(j).is_zero_matrix
+        
+        if has_lead or has_lag:
+            forward_backward_endo_vars.append(var)
+        else:
+            static_endo_vars.append(var)
+    
+    # 4. Final ordering: backward exo, then forward/backward, then static
+    ordered_vars = backward_exo_vars + forward_backward_endo_vars + static_endo_vars
+    
+    # 5. Create permutation indices
+    var_perm_indices = [initial_vars_ordered.index(v) for v in ordered_vars]
+    
+    # --- Determine Equation Order ---
+    eq_perm_indices = []
+    used_eq_indices = set()
+    
+    # Compile regex patterns for auxiliary/RES definitions
+    aux_def_patterns = {
+        name: re.compile(fr"^\s*\({name}\)\s*-\s*\({base_name_from_aux(name)}\s*\(\s*-1\s*\)\)$", re.IGNORECASE)
+        for name in aux_variables if "_lag_" in name
+    }
+    
+    res_def_patterns = {
+        name: re.compile(fr"^\s*\({name}\)\s*-\s*.*\({name}\s*\(\s*-1\s*\)\).*", re.IGNORECASE)
+        for name in initial_vars_ordered if name.startswith("RES_")
+    }
+    
+    # Assign defining equations for backward variables first
+    for var in backward_exo_vars:
+        pattern = None
+        if var.startswith("aux_") and "_lag_" in var:
+            pattern = aux_def_patterns.get(var)
+        elif var.startswith("RES_"):
+            pattern = res_def_patterns.get(var)
+            
+        if pattern:
+            for i, eq_str in enumerate(processed_equations):
+                if i in used_eq_indices:
+                    continue
+                    
+                if pattern.match(eq_str):
+                    eq_perm_indices.append(i)
+                    used_eq_indices.add(i)
+                    break
+    
+    # Assign equations for forward/backward and static variables
+    for var in forward_backward_endo_vars + static_endo_vars:
+        for i, eq_str in enumerate(processed_equations):
+            if i in used_eq_indices:
+                continue
+                
+            if eq_str.strip().startswith(f"({var})"):
+                eq_perm_indices.append(i)
+                used_eq_indices.add(i)
+                break
+    
+    # Add any remaining unassigned equations
+    remaining_eq_indices = [i for i in range(num_eq) if i not in used_eq_indices]
+    eq_perm_indices.extend(remaining_eq_indices)
+    
+    # Validate permutation indices
+    if len(eq_perm_indices) != num_eq:
+        raise ValueError(f"Equation permutation construction failed. Expected {num_eq} indices, got {len(eq_perm_indices)}.")
+    
+    if len(set(eq_perm_indices)) != num_eq:
+        raise ValueError("Equation permutation construction failed. Indices not unique.")
+    
+    # --- Reorder Symbolic Matrices ---
+    sympy_A_ord = sympy_A_quad.extract(eq_perm_indices, var_perm_indices)
+    sympy_B_ord = sympy_B_quad.extract(eq_perm_indices, var_perm_indices)
+    sympy_C_ord = sympy_C_quad.extract(eq_perm_indices, var_perm_indices)
+    sympy_D_ord = sympy_D_quad.extract(eq_perm_indices, list(range(len(shock_names))))
+    
+    symbolic_matrices_ordered = {'A': sympy_A_ord, 'B': sympy_B_ord, 'C': sympy_C_ord, 'D': sympy_D_ord}
+    
+    return {
+        "equations_processed": processed_equations,
+        "var_names_initial_order": initial_vars_ordered,
+        "ordered_vars_final": ordered_vars,
+        "shock_names": shock_names,
+        "param_names_all": param_names,
+        "param_assignments_default": param_assignments,
+        "var_permutation_indices": var_perm_indices,
+        "eq_permutation_indices": eq_perm_indices,
+    }
+
+def create_timed_symbol(base_name, time_shift):
+    """Creates a SymPy symbol with appropriate time suffix."""
+    suffix_map = {-1: "_m1", 0: "", 1: "_p1"}
+    suffix = suffix_map.get(time_shift, f"_t{time_shift:+}")
+    return sympy.symbols(f"{base_name}{suffix}")
+
+def base_name_from_aux(aux_name):
+    """Extracts base variable name from auxiliary variable name."""
+    match_lead = re.match(r"aux_([a-zA-Z_]\w*)_lead_p\d+", aux_name)
+    if match_lead:
+        return match_lead.group(1)
+    match_lag = re.match(r"aux_([a-zA-Z_]\w*)_lag_m\d+", aux_name)
+    if match_lag:
+        return match_lag.group(1)
+    return aux_name
+
 def _create_timed_symbol(base_name: str, time_shift: int, suffix_map: Dict[int, str] = {-1: "_m1", 0: "", 1: "_p1"}):
     """Creates a SymPy symbol with a time suffix."""
     return sympy.symbols(f"{base_name}{suffix_map.get(time_shift, f'_t{time_shift:+}')}")
