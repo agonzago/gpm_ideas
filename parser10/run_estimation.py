@@ -216,6 +216,12 @@ class DynareModelWithLambdified:
         results = {"solution_valid": jnp.array(False, dtype=jnp.bool_)}
         P_aug, R_aug, Omega_num = None, None, None # Initialize to None
 
+        print("parameter velaues")    
+           # Do this for a vertical display:
+        jax.debug.print("Solving with parameters:")
+        for k, v in param_dict.items():
+            jax.debug.print("  {}: {}", k, v)
+        
         # This initial print of param_dict is fine as param_dict itself is not directly in a Python if
         if self.verbose:
             print(f"  [solve() context] Called. Input param_dict (subset):")
