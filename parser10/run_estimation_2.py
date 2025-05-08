@@ -215,20 +215,17 @@ class DynareModelWithLambdified:
 
         results = {"solution_valid": jnp.array(False, dtype=jnp.bool_)}
         P_aug, R_aug, Omega_num = None, None, None # Initialize to None
-
-        print("parameter velaues")    
-           # Do this for a vertical display:
-        jax.debug.print("Solving with parameters:")
-        for k, v in param_dict.items():
-            jax.debug.print("  {}: {}", k, v)
         
-        # This initial print of param_dict is fine as param_dict itself is not directly in a Python if
+        # Conditional printing for verbosity, using jax.debug.print for traced values
         if self.verbose:
-            print(f"  [solve() context] Called. Input param_dict (subset):")
-            keys_to_print_in_solve = ['sigma_SHK_RS', 'rho_L_GDP_GAP', 'b1', 'a1']
-            for p_name_to_print in keys_to_print_in_solve:
-                 if p_name_to_print in param_dict:
-                     print(f"    {p_name_to_print}: {param_dict.get(p_name_to_print)}") # .get() is fine
+            # jax.debug.print("Solving with parameters (verbose mode): {params}", params=param_dict) # Prints entire dict, can be large
+            # Selective printing:
+            keys_to_print_solve_verbose = ['sigma_SHK_RS', 'rho_L_GDP_GAP', 'b1', 'a1']
+            # Create a sub-dict for printing to avoid iterating over potentially traced dict in Python
+            print_subset = {k: param_dict.get(k) for k in keys_to_print_solve_verbose if k in param_dict}
+            if print_subset:
+                 jax.debug.print("  [solve() verbose] Input param_dict (subset): {subset}", subset=print_subset)
+
 
         try:
             # --- STEP 1: Evaluate Stationary Matrices ---
@@ -236,32 +233,34 @@ class DynareModelWithLambdified:
                 param_dict.get(p_name, self.default_param_assignments.get(p_name, 1.0))
                 for p_name in self.param_names_for_stat_funcs
             ]
-            # These lambdified functions will produce JAX arrays (tracers if inputs are tracers)
             A_num_stat = jnp.asarray(self.func_A_stat(*stat_param_values_ordered), dtype=_DEFAULT_DTYPE)
             B_num_stat = jnp.asarray(self.func_B_stat(*stat_param_values_ordered), dtype=_DEFAULT_DTYPE)
             C_num_stat = jnp.asarray(self.func_C_stat(*stat_param_values_ordered), dtype=_DEFAULT_DTYPE)
             D_num_stat = jnp.asarray(self.func_D_stat(*stat_param_values_ordered), dtype=_DEFAULT_DTYPE)
 
             # --- STEP 2: Solve Stationary Model ---
+            # INCREASED max_iter FROM 30 to 200
             P_sol_stat, actual_iters, _, converged_stat = solve_quadratic_matrix_equation_jax(
-                A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=20 # Use calibrated max_iter
+                A_num_stat, B_num_stat, C_num_stat, tol=1e-12, max_iter=200 
             )
-            # actual_iters will be a tracer if A,B,C are tracers. Printing it is fine.
+            
             if self.verbose:
-                print(f"  [solve() debug] SDA actual_iters: {actual_iters}") # Fine to print a tracer
+                jax.debug.print("  [solve() debug] SDA actual_iters: {iters}", iters=actual_iters)
 
-            # These are JAX boolean operations, resulting in JAX boolean (tracers if inputs are tracers)
             valid_stat_solve = converged_stat & jnp.all(jnp.isfinite(P_sol_stat))
             
+            Q_sol_stat_if_valid = compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat)
+            Q_sol_stat_if_invalid = jnp.full_like(D_num_stat, jnp.nan) # Ensure D_num_stat exists for shape
+            
             Q_sol_stat = jnp.where(
-                 valid_stat_solve, # Fine to use JAX tracer as pred for jnp.where
-                 compute_Q_jax(A_num_stat, B_num_stat, D_num_stat, P_sol_stat),
-                 jnp.full_like(D_num_stat, jnp.nan) # Ensure D_num_stat exists for shape
+                 valid_stat_solve,
+                 Q_sol_stat_if_valid,
+                 Q_sol_stat_if_invalid 
             )
             valid_q_compute = jnp.all(jnp.isfinite(Q_sol_stat))
 
             # --- STEP 3: Evaluate Trend & Observation Matrices ---
-            all_param_values_ordered = [ # ... (as before)
+            all_param_values_ordered = [
                 param_dict.get(p_name, self.default_param_assignments.get(p_name, 1.0))
                 for p_name in self.all_param_names
             ]
@@ -270,64 +269,54 @@ class DynareModelWithLambdified:
             Omega_num = jnp.asarray(self.func_Omega(*all_param_values_ordered), dtype=_DEFAULT_DTYPE)
 
             # --- STEP 4: Build R Matrices & Augmented System ---
-            # ... (shock_std_devs, R_sol_stat, R_num_trend setup as before - these involve JAX ops) ...
             shock_std_devs = {}
             for shock_name in self.aug_shocks:
                 sigma_param_name = f"sigma_{shock_name}"
                 std_dev = param_dict.get(sigma_param_name, self.default_param_assignments.get(sigma_param_name, 1.0))
-                shock_std_devs[shock_name] = jnp.maximum(jnp.abs(std_dev), 1e-9)
+                shock_std_devs[shock_name] = jnp.maximum(jnp.abs(std_dev), 1e-9) # Ensure positive std dev
+            
             stat_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.stat_shocks], dtype=_DEFAULT_DTYPE)
             trend_std_devs_arr = jnp.array([shock_std_devs[shk] for shk in self.trend_shocks], dtype=_DEFAULT_DTYPE)
-            R_sol_stat = Q_sol_stat @ jnp.diag(stat_std_devs_arr) if self.n_s_shock > 0 and Q_sol_stat.shape[1] == len(stat_std_devs_arr) else jnp.zeros((self.n_stat, 0), dtype=_DEFAULT_DTYPE)
+            
+            # Handle cases where Q_sol_stat might be NaN due to invalid solve earlier
+            R_sol_stat_if_q_valid = Q_sol_stat @ jnp.diag(stat_std_devs_arr) if self.n_s_shock > 0 and Q_sol_stat.shape[1] == len(stat_std_devs_arr) else jnp.zeros((self.n_stat, 0), dtype=_DEFAULT_DTYPE)
+            R_sol_stat = jnp.where(valid_q_compute, R_sol_stat_if_q_valid, jnp.full((self.n_stat, self.n_s_shock if self.n_s_shock > 0 else 0), jnp.nan, dtype=_DEFAULT_DTYPE))
+
             R_num_trend = Q_num_trend @ jnp.diag(trend_std_devs_arr) if self.n_t_shock > 0 and Q_num_trend.shape[1] == len(trend_std_devs_arr) else jnp.zeros((self.n_trend, 0), dtype=_DEFAULT_DTYPE)
 
+            P_aug_if_valid = jax.scipy.linalg.block_diag(P_sol_stat, P_num_trend)
+            P_aug = jnp.where(valid_stat_solve, P_aug_if_valid, jnp.full((self.n_aug, self.n_aug), jnp.nan, dtype=_DEFAULT_DTYPE))
 
-            P_aug = jax.scipy.linalg.block_diag(P_sol_stat, P_num_trend)
-            R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=P_aug.dtype)
+            R_aug = jnp.zeros((self.n_aug, self.n_aug_shock), dtype=P_aug.dtype) # Initialize with correct dtype
             if self.n_stat > 0 and self.n_s_shock > 0 and R_sol_stat.shape == (self.n_stat, self.n_s_shock):
-                R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat)
+                 R_aug = R_aug.at[:self.n_stat, :self.n_s_shock].set(R_sol_stat) # R_sol_stat might be NaN here
             if self.n_trend > 0 and self.n_t_shock > 0 and R_num_trend.shape == (self.n_trend, self.n_t_shock):
-                R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
+                 R_aug = R_aug.at[self.n_stat:, self.n_s_shock:].set(R_num_trend)
+
 
             # --- Final Validity Check (all JAX operations) ---
-            all_finite = (
+            # R_aug can contain NaNs if R_sol_stat was NaN.
+            all_finite_check = (
                 jnp.all(jnp.isfinite(P_aug)) &
-                jnp.all(jnp.isfinite(R_aug)) &
+                jnp.all(jnp.isfinite(R_aug)) & # This will be false if R_sol_stat was NaN
                 jnp.all(jnp.isfinite(Omega_num))
             )
-            solution_valid_final = valid_stat_solve & valid_q_compute & all_finite
+            # solution_valid_final depends on valid_stat_solve, valid_q_compute, and then all_finite_check
+            # If valid_stat_solve is False, P_sol_stat -> P_aug might be NaN.
+            # If valid_q_compute is False, Q_sol_stat -> R_sol_stat -> R_aug might be NaN.
+            solution_valid_final = valid_stat_solve & valid_q_compute & all_finite_check
             solution_valid_final_jax = jnp.asarray(solution_valid_final, dtype=jnp.bool_)
 
-
-            # --- VERBOSE PRINTING SECTION ---
-            # This entire block is conditional on a Python bool `self.verbose`
             if self.verbose:
-                # Printing JAX tracers is fine. Using them in Python `if` is not.
-                print(f"  [solve() validity details] valid_stat_solve (tracer): {valid_stat_solve}")
-                # The following conditional print is the source of the error.
-                # To fix, we must avoid the Python `if not ...:` on a JAX tracer.
-                # We can use jax.debug.print for conditional printing based on a tracer.
-                # However, for now, let's just print the status.
-                # If valid_stat_solve is False, the previous print will show it.
-                # We can infer the "SDA solver FAILED" message from that.
-
-                # Instead of:
-                # if not jnp.all(valid_stat_solve): # PROBLEM HERE if valid_stat_solve is a tracer
-                #     print(f"  [solve() debug] >>> SDA solver FAILED for P_sol_stat. <<<")
-                # We can do this (less direct but avoids the error):
-                print(f"  [solve() debug] (To see if SDA failed, check if valid_stat_solve above is False/Traced[False])")
-
-
-                print(f"  [solve() validity details] valid_q_compute (tracer): {valid_q_compute}")
-                print(f"  [solve() validity details] all_finite (P_aug,R_aug,Omega) (tracer): {all_finite}")
-                print(f"  [solve() validity details] solution_valid_final_JAX_BOOL (tracer): {solution_valid_final_jax}")
-            # --- END VERBOSE PRINTING SECTION ---
-
+                jax.debug.print("  [solve() validity details] valid_stat_solve: {x}", x=valid_stat_solve)
+                jax.debug.print("  [solve() validity details] valid_q_compute: {x}", x=valid_q_compute)
+                jax.debug.print("  [solve() validity details] all_finite (P_aug,R_aug,Omega): {x}", x=all_finite_check)
+                jax.debug.print("  [solve() validity details] solution_valid_final_JAX_BOOL: {x}", x=solution_valid_final_jax)
+            
             results["P_aug"] = P_aug
             results["R_aug"] = R_aug
             results["Omega"] = Omega_num
             results["solution_valid"] = solution_valid_final_jax
-            # ... (other results assignments as before) ...
             results["ordered_trend_state_vars"] = self.ordered_trend_state_vars; results["contemp_trend_defs"] = self.contemp_trend_defs
             results["ordered_obs_vars"] = self.ordered_obs_vars; results["aug_state_vars"] = self.aug_state_vars
             results["aug_shocks"] = self.aug_shocks; results["n_aug"] = self.n_aug; results["n_aug_shock"] = self.n_aug_shock
@@ -335,30 +324,24 @@ class DynareModelWithLambdified:
 
 
         except Exception as e:
-            # This except block itself uses Python `if self.verbose:` which is fine.
             if self.verbose:
+                # This print is in Python scope, so direct printing of e is fine.
                 print(f"[solve()] Exception during model solve's try block: {type(e).__name__}: {e}")
-                # Only uncomment traceback if debugging a persistent error here,
-                # as it can be very noisy during MCMC if solve fails often.
-                # import traceback; traceback.print_exc()
-            results["solution_valid"] = jnp.array(False, dtype=jnp.bool_) # Ensure JAX bool
-            # Ensure P_aug etc are None if solve failed before their assignment
-            results["P_aug"] = None # Or jnp.empty(...) if a specific shape is always needed
+            results["solution_valid"] = jnp.array(False, dtype=jnp.bool_) 
+            results["P_aug"] = None 
             results["R_aug"] = None
             results["Omega"] = None
-            # Populate other results with safe defaults or None
             results["ordered_trend_state_vars"] = self.ordered_trend_state_vars if hasattr(self, 'ordered_trend_state_vars') else []
             results["contemp_trend_defs"] = self.contemp_trend_defs if hasattr(self, 'contemp_trend_defs') else {}
             results["ordered_obs_vars"] = self.ordered_obs_vars if hasattr(self, 'ordered_obs_vars') else []
             results["aug_state_vars"] = self.aug_state_vars if hasattr(self, 'aug_state_vars') else []
             results["aug_shocks"] = self.aug_shocks if hasattr(self, 'aug_shocks') else []
-            results["n_aug"] = self.n_aug if hasattr(self, 'n_aug') else -1 # Or appropriate default
+            results["n_aug"] = self.n_aug if hasattr(self, 'n_aug') else -1 
             results["n_aug_shock"] = self.n_aug_shock if hasattr(self, 'n_aug_shock') else -1
-            results["n_obs"] = self.n_obs # Should be set in _parse_model
+            results["n_obs"] = self.n_obs 
 
-        # This print is also fine as results['solution_valid'] is now a JAX tracer/array
         if self.verbose:
-            print(f"  [solve() end] Returning solution_valid (tracer or concrete): {results.get('solution_valid')}")
+            jax.debug.print("  [solve() end] Returning solution_valid: {valid_flag}", valid_flag=results.get('solution_valid'))
         return results
     
     def log_likelihood(self,
@@ -367,125 +350,127 @@ class DynareModelWithLambdified:
                     H_obs: jax.Array,          # Full H matrix
                     init_x_mean: jax.Array,
                     init_P_cov: jax.Array,
-                    # NEW arguments for precomputed static NaN info:
-                    static_valid_obs_idx: jax.Array, # JAX array of indices
-                    static_n_obs_actual: int         # Python int (length)
+                    static_valid_obs_idx: jax.Array, 
+                    static_n_obs_actual: int         
                     ) -> float:
         if not KALMAN_FILTER_JAX_AVAILABLE:
             raise RuntimeError("Custom KalmanFilter class is required.")
-        # Removed redundant None checks for ys, H_obs etc. as numpyro_model_fixed should ensure they are passed
 
-        LARGE_NEG_VALUE = -1e10 # Default for invalid likelihood
-        # For MCMC stability, some prefer a less extreme but still very bad value:
-        # LARGE_NEG_VALUE = -1e8
+        LARGE_NEG_VALUE = -1e10 
         desired_dtype = _DEFAULT_DTYPE
 
         if self.verbose:
-            print(f"\n[LogLik Top] Called. Estimating params in this dict subset:")
-            # This can be very verbose during MCMC. Consider printing only if a flag is set
-            # or only printing estimated params.
-            # For now, let's print the ones being estimated from user_priors
-            # This requires user_priors to be accessible or passed, which is complex here.
-            # For simplicity, print a few known estimated ones for now.
-            keys_to_print_in_loglik = ['sigma_SHK_RS', 'rho_L_GDP_GAP'] # Example
-            for p_name_to_print in keys_to_print_in_loglik:
-                 if p_name_to_print in param_dict:
-                     print(f"  LL Param: {p_name_to_print}: {param_dict[p_name_to_print]}")
-            print(f"  LL static_n_obs_actual: {static_n_obs_actual}")
+            # Selective printing for log_likelihood
+            keys_to_print_loglik_verbose = ['sigma_SHK_RS', 'rho_L_GDP_GAP']
+            print_subset_loglik = {k: param_dict.get(k) for k in keys_to_print_loglik_verbose if k in param_dict}
+            if print_subset_loglik:
+                 jax.debug.print("\n[LogLik Top] Called. Estimating params (subset): {subset}", subset=print_subset_loglik)
+            jax.debug.print("  LL static_n_obs_actual: {n_actual}", n_actual=static_n_obs_actual)
 
-        def _calculate_likelihood(pd_operand):
-            solution = self.solve(pd_operand) # `solution["solution_valid"]` is a JAX tracer
-            
-            # We need to make decisions based on solution["solution_valid"] using JAX ops
-            # Let's call it solution_inner_valid
-            solution_inner_valid_tracer = solution.get("solution_valid", jnp.array(False, dtype=jnp.bool_))
 
-            # Define what to do if the inner solve is valid
+        def _calculate_likelihood_branch(pd_operand_branch): # Renamed operand
+            # This is the "true" branch of the outer lax.cond.
+            # self.solve is called again here.
+            solution_inner = self.solve(pd_operand_branch) 
+            solution_inner_valid_tracer = solution_inner.get("solution_valid", jnp.array(False, dtype=jnp.bool_))
+
             def ll_if_inner_solve_valid():
-                P_aug_inner = solution["P_aug"]
-                R_aug_inner = solution["R_aug"]
-                Omega_sol_inner = solution["Omega"]
-
-                # Add an explicit check for None here, though if solution_inner_valid_tracer
-                # is correctly False, this branch shouldn't be taken with None matrices.
-                # This Python `if` is problematic if P_aug_inner can be a tracer AND None.
-                # However, if solution_inner_valid_tracer leads here, P_aug_inner should be a JAX array.
-                if P_aug_inner is None or R_aug_inner is None or Omega_sol_inner is None: # Should not happen if valid
-                     if self.verbose: print(f"  [LogLik _calc_ll -> ll_if_inner_solve_valid] P_aug/R_aug/Omega is None despite supposedly valid inner solve.")
-                     return jnp.array(LARGE_NEG_VALUE, dtype=desired_dtype)
+                P_aug_inner = solution_inner["P_aug"]
+                R_aug_inner = solution_inner["R_aug"]
+                Omega_sol_inner = solution_inner["Omega"]
+                
+                # This Python if P_aug_inner is None should ideally not be hit if solution_inner_valid_tracer is True
+                # and P_aug_inner is correctly populated. However, JAX might trace it.
+                # To be safe, ensure P_aug_inner, etc., are JAX arrays even if representing failure.
+                # The current self.solve returns NaNs for P_aug if solution_valid is false.
+                
+                # This check might be problematic if P_aug_inner is a tracer that *could* be None
+                # Python `if P_aug_inner is None` on a JAX tracer is an error.
+                # However, self.solve ensures P_aug, R_aug, Omega are JAX arrays (possibly with NaNs) or None
+                # only if an exception occurs *before* their assignment.
+                # If solution_inner_valid_tracer is True, P_aug_inner should be a valid JAX array.
+                # The problem arises if solution_inner_valid_tracer is False, P_aug_inner has NaNs,
+                # and this branch is taken due to JAX tracing both sides of the *outer* cond.
+                # This check for None is only problematic if P_aug_inner itself is a tracer.
+                # If it's a concrete None (due to an early exception in `solve`), this branch of the *outer* cond
+                # shouldn't be taken if the outer `is_valid` was also False.
+                # Let's assume if this branch is taken, P_aug_inner is a JAX array (possibly with NaNs if inner_solve_valid is False)
 
                 n_obs_full_model = self.n_obs
+                # Construct C_obs_static_for_kf, H_obs_static_for_kf, I_obs_static_for_kf based on Omega_sol_inner
+                # This part is fine as it uses JAX ops or static values.
                 if static_n_obs_actual == n_obs_full_model:
-                    C_obs_static_for_kf = Omega_sol_inner
-                    H_obs_static_for_kf = H_obs
-                    I_obs_static_for_kf = jnp.eye(n_obs_full_model, dtype=desired_dtype)
-                # ... (elif static_n_obs_actual > 0 and else as before for C_obs_static_for_kf etc.)
+                    C_obs_static_for_kf_val = Omega_sol_inner
+                    H_obs_static_for_kf_val = H_obs
+                    I_obs_static_for_kf_val = jnp.eye(n_obs_full_model, dtype=desired_dtype)
                 elif static_n_obs_actual > 0:
-                    C_obs_static_for_kf = Omega_sol_inner.take(static_valid_obs_idx, axis=0)
+                    C_obs_static_for_kf_val = Omega_sol_inner.take(static_valid_obs_idx, axis=0)
                     H_obs_temp = H_obs.take(static_valid_obs_idx, axis=0)
-                    H_obs_static_for_kf = H_obs_temp.take(static_valid_obs_idx, axis=1)
-                    I_obs_static_for_kf = jnp.eye(static_n_obs_actual, dtype=desired_dtype)
-                else:
-                    C_obs_static_for_kf = jnp.empty((0, Omega_sol_inner.shape[1]), dtype=Omega_sol_inner.dtype)
-                    H_obs_static_for_kf = jnp.empty((0, 0), dtype=H_obs.dtype)
-                    I_obs_static_for_kf = jnp.empty((0, 0), dtype=desired_dtype)
-
+                    H_obs_static_for_kf_val = H_obs_temp.take(static_valid_obs_idx, axis=1)
+                    I_obs_static_for_kf_val = jnp.eye(static_n_obs_actual, dtype=desired_dtype)
+                else: # static_n_obs_actual == 0
+                    C_obs_static_for_kf_val = jnp.empty((0, Omega_sol_inner.shape[1] if Omega_sol_inner is not None and Omega_sol_inner.ndim > 1 else self.n_aug ), dtype=desired_dtype)
+                    H_obs_static_for_kf_val = jnp.empty((0, 0), dtype=desired_dtype)
+                    I_obs_static_for_kf_val = jnp.empty((0, 0), dtype=desired_dtype)
+                
                 try:
+                    # We need to ensure P_aug_inner, R_aug_inner, Omega_sol_inner are valid *before* KF instantiation
+                    # This is what solution_inner_valid_tracer is for.
                     kf = KalmanFilter(T=P_aug_inner, R=R_aug_inner, C=Omega_sol_inner, H=H_obs, init_x=init_x_mean, init_P=init_P_cov)
                     raw_log_prob = kf.log_likelihood(ys, static_valid_obs_idx, static_n_obs_actual,
-                                                     C_obs_static_for_kf, H_obs_static_for_kf, I_obs_static_for_kf)
+                                                     C_obs_static_for_kf_val, H_obs_static_for_kf_val, I_obs_static_for_kf_val)
                     raw_log_prob_scalar = jnp.asarray(raw_log_prob, dtype=desired_dtype).reshape(())
                     safe_ll = jnp.where(jnp.isfinite(raw_log_prob_scalar), raw_log_prob_scalar, jnp.array(LARGE_NEG_VALUE, dtype=desired_dtype))
-                    if self.verbose: print(f"  [LogLik _calc_ll -> ll_if_inner_solve_valid] KF raw: {raw_log_prob_scalar}, safe: {safe_ll}")
+                    if self.verbose: jax.debug.print("  [LogLik _calc_ll -> ll_if_inner_solve_valid] KF raw: {x}, safe: {y}", x=raw_log_prob_scalar, y=safe_ll)
                     return safe_ll
-                except Exception as e_kf_inner:
-                    if self.verbose: print(f"  [LogLik _calc_ll -> ll_if_inner_solve_valid] Exception in KF: {type(e_kf_inner).__name__}: {e_kf_inner}")
+                except Exception as e_kf_inner: # This Python try-except is problematic in JIT
+                    if self.verbose: print(f"  [LogLik _calc_ll -> ll_if_inner_solve_valid] Exception in KF: {type(e_kf_inner).__name__}: {e_kf_inner}") # Won't run if JITted
                     return jnp.array(LARGE_NEG_VALUE, dtype=desired_dtype)
 
-            # Define what to do if the inner solve is NOT valid
             def ll_if_inner_solve_invalid():
-                if self.verbose: print(f"  [LogLik _calc_ll -> ll_if_inner_solve_invalid] Inner solve was invalid.")
+                if self.verbose: jax.debug.print("  [LogLik _calc_ll -> ll_if_inner_solve_invalid] Inner solve was invalid.")
                 return jnp.array(LARGE_NEG_VALUE, dtype=desired_dtype)
 
-            # Use another lax.cond for the inner solve's validity
             return jax.lax.cond(
                 solution_inner_valid_tracer,
                 ll_if_inner_solve_valid,
                 ll_if_inner_solve_invalid
             )
 
-        def _return_invalid_likelihood(pd_operand):
+        def _return_invalid_likelihood_branch(pd_operand_branch): # Renamed operand
             if self.verbose:
-                print(f"  [LogLik _return_invalid] Solution was invalid. Params (subset):")
-                for p_name_to_print in ['sigma_SHK_RS', 'rho_L_GDP_GAP']:
-                    if p_name_to_print in pd_operand:
-                         print(f"    {p_name_to_print}: {pd_operand[p_name_to_print]}")
+                keys_to_print_invalid_branch = ['sigma_SHK_RS', 'rho_L_GDP_GAP']
+                print_subset_invalid = {k: pd_operand_branch.get(k) for k in keys_to_print_invalid_branch if k in pd_operand_branch}
+                if print_subset_invalid:
+                    jax.debug.print("  [LogLik _return_invalid] Outer solution was invalid. Params (subset): {subset}", subset=print_subset_invalid)
             return jnp.array(LARGE_NEG_VALUE, dtype=desired_dtype)
 
-        # This first call to self.solve() is to get the `is_valid` JAX boolean.
-        # Its verbosity is controlled by `self.verbose`.
+        # Perform the initial solve for validity check
+        # This call to self.solve is outside any lax.cond in this function itself.
         try:
-            solution_check = self.solve(param_dict)
-            is_valid_intermediate = solution_check.get("solution_valid", jnp.array(False, dtype=jnp.bool_)) # Default to JAX False
-            is_valid = jnp.asarray(is_valid_intermediate, dtype=jnp.bool_) # Ensure JAX bool
+            solution_outer_check = self.solve(param_dict) # param_dict can have JVP tracers here
+            is_valid_outer = solution_outer_check.get("solution_valid", jnp.array(False, dtype=jnp.bool_))
+            is_valid_outer = jnp.asarray(is_valid_outer, dtype=jnp.bool_) 
 
             if self.verbose:
-                print(f"  [LogLik ValidityCheck] Initial solve for validity: is_valid_intermediate_raw_from_solve={solution_check.get('solution_valid')}, is_valid_for_cond={is_valid}")
-        except Exception as e_solve_outer:
-            if self.verbose: print(f"  [LogLik ValidityCheck] Exception during initial validity solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
-            is_valid = jnp.array(False, dtype=jnp.bool_) # Ensure is_valid is JAX bool on exception too
+                jax.debug.print("  [LogLik ValidityCheck] Outer solve for validity: is_valid_outer_raw={raw}, is_valid_for_cond={cond}",
+                                raw=solution_outer_check.get('solution_valid'), cond=is_valid_outer)
+        except Exception as e_solve_outer: # Python try-except
+            if self.verbose: print(f"  [LogLik ValidityCheck] Exception during outer validity solve: {type(e_solve_outer).__name__}: {e_solve_outer}")
+            is_valid_outer = jnp.array(False, dtype=jnp.bool_)
 
-        log_prob = jax.lax.cond(
-            pred=is_valid, # Must be a JAX boolean scalar
-            true_fun=_calculate_likelihood,
-            false_fun=_return_invalid_likelihood,
-            operand=param_dict
+        # Main conditional execution for likelihood calculation
+        log_prob_final_val = jax.lax.cond(
+            pred=is_valid_outer, 
+            true_fun=_calculate_likelihood_branch, # Calls solve again internally
+            false_fun=_return_invalid_likelihood_branch,
+            operand=param_dict 
         )
         
-        final_log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, jnp.array(LARGE_NEG_VALUE, dtype=desired_dtype))
+        final_log_prob_clean = jnp.where(jnp.isfinite(log_prob_final_val), log_prob_final_val, jnp.array(LARGE_NEG_VALUE, dtype=desired_dtype))
         if self.verbose:
-            print(f"  [LogLik End] Final log_prob returned: {final_log_prob}. (is_valid for cond was: {is_valid})")
-        return final_log_prob
+            jax.debug.print("  [LogLik End] Final log_prob returned: {lp}. (is_valid_outer for cond was: {iv})", lp=final_log_prob_clean, iv=is_valid_outer)
+        return final_log_prob_clean
 
     
 # --- Kalman Integration Test (unchanged from prompt) ---
@@ -683,7 +668,7 @@ def numpyro_model_fixed(
             elif dist_name == "invgamma":
                 conc = jnp.maximum(dist_args_processed.get("concentration", 1.0), 1e-7)
                 user_scale = jnp.maximum(dist_args_processed.get("scale", 1.0), 1e-7)
-                rate_param = 1.0 / user_scale
+                rate_param = 1.0 / user_scale # InverseGamma in Numpyro takes rate = 1/scale
                 sampled_value = numpyro.sample(name, dist.InverseGamma(conc, rate=rate_param))
             elif dist_name == "uniform": sampled_value = numpyro.sample(name, dist.Uniform(dist_args_processed.get("low", 0.0), dist_args_processed.get("high", 1.0)))
             elif dist_name == "halfnormal": sampled_value = numpyro.sample(name, dist.HalfNormal(jnp.maximum(dist_args_processed.get("scale", 1.0), 1e-7)))
@@ -707,10 +692,7 @@ def numpyro_model_fixed(
         
         log_prob = model_instance.log_likelihood(
             params_for_likelihood,
-            ys, 
-            H_obs, 
-            init_x_mean, 
-            init_P_cov,
+            ys, H_obs, init_x_mean, init_P_cov,
             # Pass the precomputed static NaN info received by this function:
             static_valid_obs_idx_for_kf,
             static_n_obs_actual_for_kf
@@ -843,9 +825,9 @@ if __name__ == "__main__":
 
     print("\n--- [4] Defining Priors for Estimation ---")
     user_priors = [
-        {"name": "sigma_SHK_RS", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.2}}, # True was 0.5 (from qpm...)
-        {"name": "rho_L_GDP_GAP", "prior": "beta", "args": {"concentration1": 40.0, "concentration2": 15.0}}, # True was 0.8
-        # {"name": "b1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # True was 0.75
+        {"name": "sigma_SHK_RS", "prior": "invgamma", "args": {"concentration": 3.0, "scale": 0.2}}, # True was 0.25
+        {"name": "rho_L_GDP_GAP", "prior": "beta", "args": {"concentration1": 40.0, "concentration2": 15.0}}, # True was 0.85
+        # {"name": "b1", "prior": "beta", "args": {"concentration1": 30.0, "concentration2": 10.0}}, # True was 0.7
     ]
     estimated_param_names_set = {p["name"] for p in user_priors}
     fixed_params = {}
@@ -872,23 +854,36 @@ if __name__ == "__main__":
             static_valid_obs_idx_mcmc_jnp = jnp.array(_valid_obs_idx_py_mcmc, dtype=jnp.int32)
             static_n_obs_actual_mcmc_py = len(_valid_obs_idx_py_mcmc)
         else: # Should not happen if simulation ran correctly
-            static_valid_obs_idx_mcmc_jnp = jnp.array(np.arange(model.n_obs), dtype=jnp.int32) # Fallback: assume all obs
+            static_valid_obs_idx_mcmc_jnp = jnp.array(onp.arange(model.n_obs), dtype=jnp.int32) # Fallback: assume all obs
             static_n_obs_actual_mcmc_py = model.n_obs
         # --- END COMPUTE STATIC NaN INFO FOR MCMC ---
 
 
         init_values_mcmc = {}
-        # ... (init_values_mcmc setup as before) ...
         print("  Setting initial MCMC values from simulation parameters for estimated vars:")
         for p_spec in user_priors:
              name = p_spec["name"]
-             init_values_mcmc[name] = sim_param_values.get(name, fixed_params.get(name, 0.5)) 
-             print(f"    - {name} = {init_values_mcmc[name]:.4f} (True value: {sim_param_values.get(name, 'N/A')})")
+             # Get true value from sim_param_values, fallback to fixed_params (which includes defaults), then 0.5
+             true_value = sim_param_values.get(name)
+             if true_value is None: true_value = fixed_params.get(name, 0.5) # Should not happen if logic above is correct
+
+             init_values_mcmc[name] = true_value 
+             print(f"    - {name} = {init_values_mcmc[name]:.4f} (True value for sim: {sim_param_values.get(name, 'N/A')})")
         init_strategy = init_to_value(values=init_values_mcmc)
 
 
+        # --- Optional: Run Kalman Integration Test before MCMC ---
+        # test_params_for_kf_integration = sim_param_values.copy() # Use the true sim values for this test
+        # print("\n--- [Pre-MCMC] Running Kalman Integration Test with simulation parameters ---")
+        # test_passed, test_info = test_kalman_integration(
+        #     model, test_params_for_kf_integration, sim_observables, H_obs_est, init_x_mean_est, init_P_cov_est
+        # )
+        # if not test_passed:
+        #     print(f"FATAL: Kalman integration test FAILED. Error: {test_info.get('error')}. Details: {test_info.get('details')}")
+        #     # exit() # Exit if the test fails with true parameters, as MCMC will likely fail.
+        # else:
+        #     print(f"Kalman integration test PASSED with simulation parameters. LogLik: {test_info.get('log_likelihood')}")
 
-        # This test_kalman_integration call already computes its own static info internally, which is fine for testing.
 
         kernel = NUTS(numpyro_model_fixed, init_strategy=init_strategy, target_accept_prob=mcmc_target_accept)
         mcmc = MCMC(kernel, num_warmup=mcmc_warmup, num_samples=mcmc_samples, num_chains=mcmc_chains, progress_bar=True, chain_method='sequential' if mcmc_chains==1 else 'parallel')
@@ -926,6 +921,7 @@ if __name__ == "__main__":
     else: print("\n--- [5] Skipping Estimation ---")
 
     print(f"\n--- Script finished ---")
-    # if run_estimation_flag and NUMPYRO_AVAILABLE : #and KALMAN_FILTER_JAX_AVAILABLE:
-    #    print("Close plot windows to exit."); plt.show()
+    if run_estimation_flag and NUMPYRO_AVAILABLE and KALMAN_FILTER_JAX_AVAILABLE : 
+       print("Close plot windows to exit."); plt.show()
+
 # --- END OF FILE run_estimation.py (Modified) ---
