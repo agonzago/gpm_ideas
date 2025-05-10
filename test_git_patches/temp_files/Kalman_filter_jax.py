@@ -180,7 +180,7 @@ class KalmanFilter:
         def step_static_nan(carry, y_t_full):
             x_prev_filt, P_prev_filt = carry
             P_prev_filt = (P_prev_filt + P_prev_filt.T) / 2.0
-            
+
             # --- Prediction Step ---
             x_pred_t = T_mat @ x_prev_filt
             
@@ -412,6 +412,7 @@ class KalmanFilter:
 
         def backward_step(carry_smooth, scan_t):
             x_s_next_t, P_s_next_t = carry_smooth
+            P_s_next_t = (P_s_next_t + P_s_next_t.T)/2.0
             Pp_next_t, Pf_t, xp_next_t, xf_t = scan_t
             # TPf = Pf_t @ T_mat.T # This order might be more stable if Pf_t is better conditioned
             TPf = T_mat @ Pf_t # Revert to original order T @ P_filt_t for gain calc
