@@ -108,7 +108,7 @@ class DynareModelWithLambdified: # Copied from your run_estimation_4.py
         try:
             stat_param_values_ordered=[param_dict.get(p,self.default_param_assignments.get(p,1.0)) for p in self.param_names_for_stat_funcs]
             A_num_stat=jnp.asarray(self.func_A_stat(*stat_param_values_ordered),dtype=desired_dtype);B_num_stat=jnp.asarray(self.func_B_stat(*stat_param_values_ordered),dtype=desired_dtype);C_num_stat=jnp.asarray(self.func_C_stat(*stat_param_values_ordered),dtype=desired_dtype);D_num_stat=jnp.asarray(self.func_D_stat(*stat_param_values_ordered),dtype=desired_dtype)
-            P_sol_stat,_,_,converged_stat=solve_quadratic_matrix_equation_jax(A_num_stat,B_num_stat,C_num_stat,tol=1e-12,max_iter=15)
+            P_sol_stat,_,_,converged_stat=solve_quadratic_matrix_equation_jax(A_num_stat,B_num_stat,C_num_stat,tol=1e-12,max_iter=10)
             valid_stat_solve=converged_stat&jnp.all(jnp.isfinite(P_sol_stat))
             Q_sol_stat_if_valid=compute_Q_jax(A_num_stat,B_num_stat,D_num_stat,P_sol_stat);Q_sol_stat_if_invalid=jnp.full_like(D_num_stat,jnp.nan);Q_sol_stat=jnp.where(valid_stat_solve,Q_sol_stat_if_valid,Q_sol_stat_if_invalid)
             valid_q_compute=jnp.all(jnp.isfinite(Q_sol_stat))
