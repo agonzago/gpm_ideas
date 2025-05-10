@@ -1,0 +1,121 @@
+/*
+ * Smallest QPM in dynare
+ */
+
+var
+    // Main variables
+    L_GDP_GAP          // Output Gap
+    DLA_CPI         // QoQ Core Inflation
+    RS                 // MP Rate
+    RR_GAP             // Real Interest Rate Gap
+    RES_L_GDP_GAP      // exogenous states
+    RES_DLA_CPI
+    RES_RS
+;
+
+varexo
+    SHK_L_GDP_GAP     // Output gap shock
+    SHK_DLA_CPI
+    SHK_RS            // Foreign interest rate shock
+;
+
+parameters b1, b4, a1, a2, g1, g2, g3, rho_DLA_CPI, rho_L_GDP_GAP, rho_rs, rho_rs2;
+
+    // Parameters from readmodel.m
+    b1 = 0.7;          // Output persistence
+    b4 = 0.7;          // MCI weight
+    a1 = 0.5;          // Inflation persistence
+    a2 = 0.1;          // RMC passthrough
+    g1 = 0.7;         // Interest rate smoothing
+    g2 = 0.3;          // Inflation response
+    g3 = 0.25;         // Output gap response
+    rho_L_GDP_GAP  =0.75;
+    rho_DLA_CPI   =0.75;
+    rho_rs      =0.75;
+    rho_rs2      =0.01;
+
+model;
+    // Aggregate demand
+    L_GDP_GAP = (1-b1)*L_GDP_GAP(+1) + b1*L_GDP_GAP(-1) - b4*RR_GAP(+1) + RES_L_GDP_GAP;
+
+
+    // Core Inflation
+    DLA_CPI = a1*DLA_CPI(-1) + (1-a1)*DLA_CPI(+1) + a2*L_GDP_GAP + RES_DLA_CPI;
+
+
+    // Monetary policy reaction function
+    RS = g1*RS(-1) + (1-g1)*(DLA_CPI(+1) + g2*DLA_CPI(+3) + g3*L_GDP_GAP) + RES_RS;
+
+
+    RR_GAP = RS - DLA_CPI(+1);
+    RES_L_GDP_GAP = rho_L_GDP_GAP*RES_L_GDP_GAP(-1) + SHK_L_GDP_GAP;
+    RES_DLA_CPI = rho_DLA_CPI*RES_DLA_CPI(-1) + SHK_DLA_CPI;
+    RES_RS = rho_rs*RES_RS(-1) + rho_rs2*RES_RS(-2) + SHK_RS;
+
+end;
+
+
+varexo_trends
+SHK_L_GDP_TREND,
+SHK_G_TREND,
+SHK_PI_TREND,
+SHK_RR_TREND
+;
+
+trends_vars
+    L_GDP_TREND,
+    PI_TREND,
+    RS_TREND,
+    RR_TREND,
+    G_TREND
+;
+
+trend_model;
+    L_GDP_TREND = L_GDP_TREND(-1) + G_TREND(-1) + SHK_L_GDP_TREND;
+    G_TREND  = G_TREND(-1) + SHK_G_TREND;
+    PI_TREND = PI_TREND(-1) + SHK_PI_TREND;
+    RS_TREND = RR_TREND + PI_TREND; 
+    RR_TREND = RR_TREND(-1) + SHK_RR_TREND;  
+end;
+
+varobs 
+L_GDP_OBS
+DLA_CPI_OBS
+PI_TREND_OBS
+RS_OBS 
+;
+measurement_equations;
+    L_GDP_OBS = L_GDP_TREND + L_GDP_GAP;
+    DLA_CPI_OBS  = DLA_CPI + PI_TREND;
+    PI_TREND_OBS =  PI_TREND;
+    RS_OBS = RS_TREND + RS;  
+end;
+
+
+initval;
+    L_GDP_GAP = 0;
+    DLA_CPI = 0;
+    RS = 0;
+    RR_GAP = 0;
+    RES_L_GDP_GAP =0;
+    RES_DLA_CPI =0;
+    RES_RS =0;
+end;
+
+steady;
+check;
+
+trend_shocks;
+    var SHK_L_GDP_TREND; stderr 0.001;    
+    var SHK_G_TREND; stderr 0.005;
+    var SHK_PI_TREND; stderr 0.01;
+    var SHK_RR_TREND; stderr 0.1;
+end;
+
+shocks;
+    var SHK_L_GDP_GAP  ; stderr 0.02;   // Output gap shock
+    var SHK_DLA_CPI ; stderr 0.05; 
+    var SHK_RS ; stderr 0.012;             // Foreign interest rate shock
+end;
+
+stoch_simul(order=1, irf=40);
